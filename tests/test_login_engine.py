@@ -4,6 +4,7 @@ city is filtered after the fact, and the overview / checks the pages and tools r
 fake platforms behind httpx.MockTransport, no browser."""
 import asyncio
 import json
+import signal
 import threading
 import time
 from contextlib import contextmanager
@@ -347,14 +348,27 @@ def test_the_startup_check_runs_in_the_background_and_never_holds_startup_back(e
     assert not thread.is_alive() and asked == ["plain", "late", "unlisted", "strict", "filtered", "probed"]
 
 
-def test_the_server_starts_the_background_check_before_it_serves(env, monkeypatch):
+def test_the_server_starts_the_background_check_before_it_serves_and_shuts_down_after(env, monkeypatch):
     order = []
     monkeypatch.setattr(engine, "start_worker", lambda: order.append("workers"))
     monkeypatch.setattr(service, "start_login_check", lambda: order.append("check"))
     monkeypatch.setattr(server.mcp, "run", lambda transport: order.append("serve"))
+    monkeypatch.setattr(service, "shutdown", lambda: order.append("shutdown"))
     monkeypatch.setattr(server.sys, "argv", ["djs"])
+    sigterm = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(server.mcp, "run", lambda transport: order.append(("serve", signal.getsignal(signal.SIGTERM))))
     server.main()
-    assert order == ["workers", "check", "serve"]
+    assert order == ["workers", "check", ("serve", server._on_sigterm), "shutdown"]   # SIGTERM ends it cleanly while it serves...
+    assert signal.getsignal(signal.SIGTERM) == sigterm   # ...and the process gets its own handler back
+
+    def interrupted(transport):
+        raise KeyboardInterrupt
+
+    order.clear()
+    monkeypatch.setattr(server.mcp, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        server.main()
+    assert order == ["workers", "check", "shutdown"] and signal.getsignal(signal.SIGTERM) == sigterm   # also on an interrupt or error
 
 
 # ============================================================ the tools
@@ -365,12 +379,12 @@ def call(name, **args):
 
 def window_with_login(monkeypatch):
     @contextmanager
-    def open_page(provider_name, headless, proxy=None):
-        yield SimpleNamespace(context=SimpleNamespace(cookies=lambda: [{"name": "s", "value": "v", "domain": ".site.test", "expires": -1}],
-                                                       clear_cookies=lambda name: None),
-                              url="https://site.test/login", goto=lambda url, **kw: None, is_closed=lambda: False)
+    def plain_window(provider_name, url, headless=False):
+        yield SimpleNamespace(cookies=lambda: [{"name": "s", "value": "v", "domain": ".site.test", "expires": -1}],
+                              url=lambda: "https://site.test/login", closed=lambda: False,
+                              delete_cookies=lambda names, domain: None)
 
-    monkeypatch.setattr(browser, "open_page", open_page)
+    monkeypatch.setattr(browser, "plain_window", plain_window)
 
 
 def test_the_login_tools(env, monkeypatch):

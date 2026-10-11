@@ -1,5 +1,5 @@
 """The login framework: what counts as logged in comes from each platform's Login spec, never from per-platform code.
-The browser window is a fake page the test scripts over time, so no real window opens and no network is used."""
+The browser window is a fake the test scripts over time, so no real window opens and no network is used."""
 import json
 import stat
 import threading
@@ -42,45 +42,43 @@ def cookie(name, value="v", domain=".site.test", expires=-1):
     return {"name": name, "value": value, "domain": domain, "path": "/", "expires": expires}
 
 
-class Page:
+class Window:
     """What auth.login sees of the window. `steps` = one (url, cookies) per look at it; the last one repeats."""
 
     def __init__(self, steps):
-        self.steps, self.looks, self.visited, self.cleared, self.closed = steps, 0, [], [], False
-        self.context = SimpleNamespace(cookies=self._cookies, clear_cookies=lambda name: self.cleared.append(name))
+        self.steps, self.looks, self.deleted, self.gone = steps, 0, [], False
 
     def _step(self):
         return self.steps[min(max(self.looks - 1, 0), len(self.steps) - 1)]
 
-    def _cookies(self):
+    def cookies(self):
         self.looks += 1
         return list(self._step()[1])
 
-    @property
     def url(self):
         return self._step()[0]
 
-    def goto(self, url, **kw):
-        self.visited.append((url, kw))
+    def closed(self):
+        return self.gone
 
-    def is_closed(self):
-        return self.closed
+    def delete_cookies(self, names, domain):
+        self.deleted.append((tuple(names), domain))
 
 
-def show(monkeypatch, page):
-    """auth.login's window is this page; the returned list records when it opens and when it closes."""
+def show(monkeypatch, window):
+    """auth.login's window is this one; the returned list records when it opens (and on which address) and when it closes."""
     events = []
 
     @contextmanager
-    def open_page(provider_name, headless, proxy=None):
-        events.append(("open", provider_name, headless))
+    def plain_window(provider_name, url, headless=False):
+        events.append(("open", provider_name, url, headless))
         try:
-            yield page
+            yield window
         finally:
-            page.closed = True
+            window.gone = True
             events.append(("close", provider_name))
 
-    monkeypatch.setattr(browser, "open_page", open_page)
+    monkeypatch.setattr(browser, "plain_window", plain_window)
     return events
 
 
@@ -93,13 +91,13 @@ LOGIN_URL = "https://site.test/login"
 
 # ============================================================ what counts as logged in
 def test_any_of_the_cookies_is_enough_and_the_window_closes_by_itself(monkeypatch):
-    page = Page([on(LOGIN_URL), on(LOGIN_URL, cookie("junk")), on(LOGIN_URL, cookie("junk"), cookie("zp_at", SECRET, expires=time.time() + 9e5),
-                                                                cookie("other", "x", domain=".elsewhere.test"))])
-    events = show(monkeypatch, page)
+    window = Window([on(LOGIN_URL), on(LOGIN_URL, cookie("junk")), on(LOGIN_URL, cookie("junk"), cookie("zp_at", SECRET, expires=time.time() + 9e5),
+                                                                    cookie("other", "x", domain=".elsewhere.test"))])
+    events = show(monkeypatch, window)
     got = auth.login("any", timeout=5)
     assert got["logged_in"] is True and got["state"] == "logged_in" and got["method"] == "qr"
-    assert events == [("open", "any", False), ("close", "any")]   # headed, and closed by auth itself
-    assert page.visited == [(LOGIN_URL, {"wait_until": "domcontentloaded"})] and page.closed
+    assert events == [("open", "any", LOGIN_URL, False), ("close", "any")]   # on the login page, headed, closed by auth itself
+    assert window.gone
     assert auth.load_cookies("any") == {"junk": "v", "zp_at": SECRET}   # the platform's own cookies, nothing else the browser holds
 
 
@@ -107,39 +105,38 @@ def test_any_of_the_cookies_is_enough_and_the_window_closes_by_itself(monkeypatc
     ("any", [cookie("nope")], [cookie("wt2")]),
     ("all", [cookie("at")], [cookie("at"), cookie("rt")])])   # all of them: one is not enough
 def test_the_cookie_rules(monkeypatch, name, early, late):
-    page = Page([on(LOGIN_URL, *early), on(LOGIN_URL, *early), on(LOGIN_URL, *late)])
-    show(monkeypatch, page)
+    window = Window([on(LOGIN_URL, *early), on(LOGIN_URL, *early), on(LOGIN_URL, *late)])
+    show(monkeypatch, window)
     assert auth.login(name, timeout=5)["state"] == "logged_in"
-    assert page.looks == 3   # it kept looking until the rule held
+    assert window.looks == 3   # it kept looking until the rule held
 
 
 def test_a_landing_page_can_be_the_signal_and_cookies_then_say_nothing(monkeypatch):
-    page = Page([on("https://login.site.test/?next=my", cookie("analytics")), on("https://we.site.test/other", cookie("analytics")),
-                 on("https://we.site.test/my/myjob", cookie("analytics"))])
-    show(monkeypatch, page)
-    assert auth.login("landing", timeout=5)["state"] == "logged_in" and page.looks == 3
+    window = Window([on("https://login.site.test/?next=my", cookie("analytics")), on("https://we.site.test/other", cookie("analytics")),
+                     on("https://we.site.test/my/myjob", cookie("analytics"))])
+    show(monkeypatch, window)
+    assert auth.login("landing", timeout=5)["state"] == "logged_in" and window.looks == 3
     assert auth.load_cookies("landing") == {"analytics": "v"}
 
 
 def test_the_first_rule_a_platform_sets_decides(monkeypatch):
     both = replace(ANY, url_prefix="https://site.test/home")
     monkeypatch.setattr(providers.get("any"), "login", both)
-    page = Page([on("https://site.test/home")])   # on the landing page, but without the cookie
-    show(monkeypatch, page)
+    show(monkeypatch, Window([on("https://site.test/home")]))   # on the landing page, but without the cookie
     with pytest.raises(TimeoutError):
         auth.login("any", timeout=0.1)
 
 
 @pytest.mark.parametrize("domain", [".other.test", "notsite.test", ".site.test.evil.test"])
 def test_cookies_of_other_domains_never_count(monkeypatch, domain):
-    show(monkeypatch, Page([on(LOGIN_URL, cookie("wt2", domain=domain))]))
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("wt2", domain=domain))]))
     with pytest.raises(TimeoutError):
         auth.login("any", timeout=0.1)
 
 
 @pytest.mark.parametrize("domain", ["site.test", ".site.test", "www.site.test", "a.b.site.test"])
 def test_the_domain_and_its_subdomains_count(monkeypatch, domain):
-    show(monkeypatch, Page([on(LOGIN_URL, cookie("wt2", domain=domain))]))
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("wt2", domain=domain))]))
     assert auth.login("any", timeout=5)["logged_in"] is True
 
 
@@ -162,8 +159,7 @@ def fake_get(monkeypatch, *answers):
 
 def test_a_probe_has_to_agree_before_the_login_counts(monkeypatch):
     monkeypatch.setattr(auth, "PROBE_SECONDS", 0)
-    page = Page([on(LOGIN_URL, cookie("wt2", SECRET))])
-    show(monkeypatch, page)
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("wt2", SECRET))]))
     calls = fake_get(monkeypatch, (200, "请先登录"), httpx.ConnectError("no answer yet"), (403, "no"), (302, ""), (200, '{"code":0}'))
     assert auth.login("probed", timeout=5)["state"] == "logged_in"
     assert len(calls) == 5   # a wall text, a dropped connection, 403 and a redirect all mean "not yet"
@@ -175,7 +171,7 @@ def test_a_probe_has_to_agree_before_the_login_counts(monkeypatch):
 
 def test_probe_requests_are_spaced_while_waiting(monkeypatch):
     monkeypatch.setattr(auth, "PROBE_SECONDS", 30)
-    show(monkeypatch, Page([on(LOGIN_URL, cookie("wt2"))]))
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("wt2"))]))
     calls = fake_get(monkeypatch, (200, "请先登录"))
     with pytest.raises(TimeoutError):
         auth.login("probed", timeout=0.3)   # about thirty looks, one question
@@ -183,15 +179,15 @@ def test_probe_requests_are_spaced_while_waiting(monkeypatch):
 
 
 def test_a_login_without_a_probe_counts_at_once(monkeypatch):
-    show(monkeypatch, Page([on(LOGIN_URL, cookie("wt2"))]))
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("wt2"))]))
     monkeypatch.setattr(httpx, "get", lambda *a, **k: pytest.fail("nothing to ask"))
     assert auth.login("any", timeout=5)["logged_in"] is True
 
 
 # ============================================================ ending a login without success
 def test_a_login_that_never_happens_times_out_with_nothing_saved(monkeypatch):
-    page = Page([on(LOGIN_URL, cookie("junk", SECRET))])
-    events = show(monkeypatch, page)
+    window = Window([on(LOGIN_URL, cookie("junk", SECRET))])
+    events = show(monkeypatch, window)
     with pytest.raises(TimeoutError, match="秒内没有登录成功，请再试一次") as e:
         auth.login("any", timeout=0.1)
     assert SECRET not in str(e.value) and events[-1] == ("close", "any")
@@ -199,8 +195,8 @@ def test_a_login_that_never_happens_times_out_with_nothing_saved(monkeypatch):
 
 
 def test_cancel_closes_the_window_and_saves_nothing(monkeypatch):
-    page = Page([on(LOGIN_URL, cookie("junk"))])
-    events = show(monkeypatch, page)
+    window = Window([on(LOGIN_URL, cookie("junk"))])
+    events = show(monkeypatch, window)
     outcome = {}
 
     def run():
@@ -211,73 +207,140 @@ def test_cancel_closes_the_window_and_saves_nothing(monkeypatch):
 
     thread = threading.Thread(target=run)
     thread.start()
-    while page.looks < 3:   # the user is looking at the window
+    while window.looks < 3:   # the user is looking at the window
         time.sleep(0.01)
     assert auth.cancel_login("any") is True
     thread.join(5)
     assert not thread.is_alive() and isinstance(outcome["error"], auth.LoginCancelled) and str(outcome["error"]) == "已取消登录"
-    assert events[-1] == ("close", "any") and page.closed   # the window is really gone
+    assert events[-1] == ("close", "any") and window.gone   # the window is really gone
     assert auth.cancel_login("any") is False and auth.cancel_login("all") is False   # nothing pending any more
     assert auth.status("any")["state"] == "not_logged_in"
 
 
+def test_cancel_all_ends_every_pending_login_and_returns_once_their_windows_are_gone(monkeypatch):
+    windows = {name: Window([on(LOGIN_URL, cookie("junk"))]) for name in ("any", "all")}
+    closing_slowly = threading.Event()
+
+    @contextmanager
+    def plain_window(provider_name, url, headless=False):
+        try:
+            yield windows[provider_name]
+        finally:
+            closing_slowly.wait(0.3)   # a browser takes a moment to leave
+            windows[provider_name].gone = True
+
+    monkeypatch.setattr(browser, "plain_window", plain_window)
+    outcome = {}
+
+    def run(name):
+        try:
+            auth.login(name, timeout=30)
+        except BaseException as e:   # the thread reports what login raised
+            outcome[name] = e
+
+    threads = [threading.Thread(target=run, args=(name,)) for name in windows]
+    for thread in threads:
+        thread.start()
+    while len(auth.pending_logins()) < 2:
+        time.sleep(0.01)
+    assert sorted(p["provider"] for p in auth.pending_logins()) == ["all", "any"]
+    assert all(p["since"] == pytest.approx(time.time(), abs=5) for p in auth.pending_logins())
+    auth.cancel_all()
+    assert auth.pending_logins() == [] and all(w.gone for w in windows.values())   # back only when both windows were gone
+    for thread in threads:
+        thread.join(5)
+    assert {name: type(e) for name, e in outcome.items()} == {"any": auth.LoginCancelled, "all": auth.LoginCancelled}
+    auth.cancel_all()   # nothing pending: nothing to do, nothing to wait for
+
+
+def test_cancel_all_waits_a_limited_time_for_a_window_that_will_not_go(monkeypatch):
+    release = threading.Event()
+
+    @contextmanager
+    def plain_window(provider_name, url, headless=False):
+        try:
+            yield Window([on(LOGIN_URL, cookie("junk"))])
+        finally:
+            release.wait(30)   # stuck closing
+
+    monkeypatch.setattr(browser, "plain_window", plain_window)
+    outcome = {}
+
+    def run():
+        try:
+            auth.login("any", timeout=30)
+        except BaseException as e:   # the thread reports what login raised
+            outcome["error"] = e
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    while not auth.pending_logins():
+        time.sleep(0.01)
+    begun = time.monotonic()
+    auth.cancel_all(wait=0.3)
+    assert 0.25 < time.monotonic() - begun < 5 and [p["provider"] for p in auth.pending_logins()] == ["any"]
+    release.set()
+    thread.join(5)
+    assert auth.pending_logins() == [] and isinstance(outcome["error"], auth.LoginCancelled)
+
+
 def test_a_window_the_user_closed_ends_the_login_in_plain_chinese(monkeypatch):
-    page = Page([on(LOGIN_URL)])
-    page.closed = True
-    show(monkeypatch, page)
-    page.closed = True   # the fake window closes it again on exit; here the user did it first
+    window = Window([on(LOGIN_URL)])
+    window.gone = True   # the user did it before the first look
+    show(monkeypatch, window)
     with pytest.raises(RuntimeError, match="登录窗口被关闭了，请重新登录"):
         auth.login("any", timeout=5)
 
 
 def test_a_missing_browser_is_explained_in_chinese_and_a_busy_profile_already_is(monkeypatch):
     @contextmanager
-    def nothing(provider_name, headless, proxy=None):
+    def nothing(provider_name, url, headless=False):
         raise browser.BrowserUnavailable("No browser found. Install Google Chrome or Microsoft Edge")
         yield
 
-    monkeypatch.setattr(browser, "open_page", nothing)
+    monkeypatch.setattr(browser, "plain_window", nothing)
     with pytest.raises(browser.BrowserUnavailable, match="^打不开浏览器，没法登录。No browser found"):
         auth.login("any")
 
     @contextmanager
-    def busy(provider_name, headless, proxy=None):
+    def busy(provider_name, url, headless=False):
         raise browser.BrowserBusy("正在使用浏览器，请稍后再试")
         yield
 
-    monkeypatch.setattr(browser, "open_page", busy)
+    monkeypatch.setattr(browser, "plain_window", busy)
     with pytest.raises(NoEgressAvailable, match="正在使用浏览器，请稍后再试"):
         auth.login("any")
     assert auth.cancel_login("any") is False   # a login that could not start leaves nothing to cancel
 
 
 def test_logging_in_again_forgets_the_cookies_of_the_session_that_died(monkeypatch):
-    page = Page([on(LOGIN_URL, cookie("wt2"))])
-    show(monkeypatch, page)
+    forgotten = [(("wt2", "zp_at"), "site.test")]   # the platform's login cookies, on the platform's domain
+    window = Window([on(LOGIN_URL, cookie("wt2"))])
+    show(monkeypatch, window)
     auth.login("any", timeout=5)
-    assert page.cleared == ["wt2", "zp_at"]   # nothing saved yet: the profile's own leftovers must not pass for a login
+    assert window.deleted == forgotten   # nothing saved yet: the profile's own leftovers must not pass for a login
     auth.invalidate("any")
-    again = Page([on(LOGIN_URL, cookie("wt2"))])
+    again = Window([on(LOGIN_URL, cookie("wt2"))])
     show(monkeypatch, again)
     auth.login("any", timeout=5)
-    assert again.cleared == ["wt2", "zp_at"]   # expired: the same
-    third = Page([on(LOGIN_URL, cookie("wt2"))])
+    assert again.deleted == forgotten   # expired: the same
+    third = Window([on(LOGIN_URL, cookie("wt2"))])
     show(monkeypatch, third)
     auth.login("any", timeout=5)
-    assert third.cleared == []   # a session that still works is left alone
+    assert third.deleted == []   # a session that still works is left alone
 
 
 def test_the_users_own_browser_is_never_cleaned(monkeypatch):
     monkeypatch.setenv("DJS_CDP_URL", "http://127.0.0.1:9222")
-    page = Page([on(LOGIN_URL, cookie("wt2"))])
-    show(monkeypatch, page)
+    window = Window([on(LOGIN_URL, cookie("wt2"))])
+    show(monkeypatch, window)
 
     @contextmanager
     def attached(provider_name, headless, proxy=None):
         yield SimpleNamespace(cookies=lambda: [cookie("wt2")])
 
     monkeypatch.setattr(browser, "open_context", attached)
-    assert auth.login("any", timeout=5)["logged_in"] is True and page.cleared == []
+    assert auth.login("any", timeout=5)["logged_in"] is True and window.deleted == []
 
 
 # ============================================================ the saved session
@@ -304,7 +367,7 @@ def test_the_store_is_private_and_atomic():
 
 def test_login_saves_the_expiry_of_the_cookies_that_have_one(monkeypatch):
     soon = time.time() + 3 * 86400
-    show(monkeypatch, Page([on(LOGIN_URL, cookie("wt2", expires=soon), cookie("session"))]))
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("wt2", expires=soon), cookie("session"))]))
     auth.login("any", timeout=5)
     assert json.loads((auth.profile_dir("any") / "cookies.json").read_text())["expires"] == {"wt2": soon}   # a session cookie has none
 
@@ -461,7 +524,7 @@ def test_cookie_values_are_never_returned_logged_or_put_into_an_error(monkeypatc
     with pytest.raises(httpx.HTTPError) as e:
         auth.check("probed")
     seen.append(str(e.value))
-    show(monkeypatch, Page([on(LOGIN_URL, cookie("junk", SECRET))]))
+    show(monkeypatch, Window([on(LOGIN_URL, cookie("junk", SECRET))]))
     with pytest.raises(TimeoutError) as t:
         auth.login("any", timeout=0.05)
     seen.append(str(t.value))

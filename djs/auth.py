@@ -3,8 +3,8 @@
 What counts as logged in is declared by each platform (djs.providers.base.Login); this module has no per-platform
 code. Two halves:
   session store - save / load / invalidate / logout / status / check: plain files, plus one probe request at most
-  login flow    - login() / cancel_login(): a headed window on the shared browser profile (djs.browser) in which the
-                  user logs in themselves; the window closes by itself once the platform's own rule says it worked
+  login flow    - login() / cancel_login(): a plain browser window (djs.browser.plain_window) in which the user logs
+                  in themselves; the window closes by itself once the platform's own rule says it worked
 Cookie VALUES leave this module only through load_cookies() (engine -> httpx client): they are never logged, put into
 an error or returned by status().
 """
@@ -15,6 +15,7 @@ import os
 import shutil
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -34,7 +35,14 @@ class LoginCancelled(RuntimeError):
     """The user cancelled: the window was closed on purpose and nothing was saved."""
 
 
-_pending: dict[str, threading.Event] = {}  # platform -> set() cancels the login that is waiting for the user
+@dataclass
+class _Pending:
+    """A login that is waiting for the user: `cancel.set()` ends it, `since` is when it started."""
+    cancel: threading.Event = field(default_factory=threading.Event)
+    since: float = field(default_factory=time.time)
+
+
+_pending: dict[str, _Pending] = {}  # platform -> its login that is waiting for the user
 
 
 def _spec(provider: str) -> Login:
@@ -113,14 +121,6 @@ def logout(provider: str) -> None:
 
 # ------------------------------------------------------------ what a session is
 
-def _on_domain(browser_cookies: list[dict], domain: str) -> list[dict]:
-    """The cookies of the platform's own domain (and its subdomains), nothing else the browser happens to hold."""
-    def mine(c: dict) -> bool:
-        d = c.get("domain", "").lstrip(".")
-        return d == domain or d.endswith("." + domain)
-    return [c for c in browser_cookies if mine(c)]
-
-
 def _values(site: list[dict]) -> dict[str, str]:
     return {c["name"]: c["value"] for c in site}
 
@@ -160,7 +160,7 @@ def _by_attached_browser(spec: Login) -> bool:
 
 def _attached(provider: str, spec: Login) -> bool:
     with browser.open_context(provider, headless=True) as ctx:
-        return _signed_in(spec, _values(_on_domain(ctx.cookies(), spec.domain)), "")
+        return _signed_in(spec, _values(browser.on_domain(ctx.cookies(), spec.domain)), "")
 
 
 def logged_in(provider: str) -> bool:
@@ -204,16 +204,16 @@ def _confirmed(spec: Login, cookies: dict[str, str]) -> bool:
         return False
 
 
-def _wait_for_login(page, spec: Login, timeout: float, cancel: threading.Event) -> list[dict]:
+def _wait_for_login(window, spec: Login, timeout: float, cancel: threading.Event) -> list[dict]:
     """Look at the window once a second until the platform's success rule holds (and its probe agrees). Returns the
     cookies of the platform's domain."""
     deadline = time.monotonic() + timeout
     probed_at = -PROBE_SECONDS
     while True:
-        if page.is_closed():
+        if window.closed():
             raise RuntimeError("登录窗口被关闭了，请重新登录")
-        site = _on_domain(page.context.cookies(), spec.domain)
-        if _signed_in(spec, _values(site), page.url) and time.monotonic() - probed_at >= PROBE_SECONDS:
+        site = browser.on_domain(window.cookies(), spec.domain)
+        if _signed_in(spec, _values(site), window.url()) and time.monotonic() - probed_at >= PROBE_SECONDS:
             probed_at = time.monotonic()
             if _confirmed(spec, _values(site)):
                 return site
@@ -223,10 +223,9 @@ def _wait_for_login(page, spec: Login, timeout: float, cancel: threading.Event) 
             raise LoginCancelled("已取消登录")
 
 
-def _forget_dead_session(ctx, spec: Login) -> None:
+def _forget_dead_session(window, spec: Login) -> None:
     """The profile may still hold the cookies of the session that died. Left there they would pass for a fresh login."""
-    for name in (*spec.cookies_any, *spec.cookies_all):
-        ctx.clear_cookies(name=name)
+    window.delete_cookies((*spec.cookies_any, *spec.cookies_all), spec.domain)
 
 
 def login(provider: str, timeout: float = 180) -> dict:
@@ -235,17 +234,16 @@ def login(provider: str, timeout: float = 180) -> dict:
     or RuntimeError (the window was closed); the messages are plain Chinese."""
     spec = _spec(provider)
     stale = _stored(provider, spec)[0] != "logged_in"
-    cancel = _pending[provider] = threading.Event()
+    pending = _pending[provider] = _Pending()
     try:
-        with browser.open_page(provider, headless=False) as page:  # same profile and flags as crawling
+        with browser.plain_window(provider, spec.url) as window:  # the profile crawling shares, nothing driving the page
             if stale and not browser.cdp_url():  # never touch the cookies of the user's own browser
-                _forget_dead_session(page.context, spec)
-            page.goto(spec.url, wait_until="domcontentloaded")
-            site = _wait_for_login(page, spec, timeout, cancel)
+                _forget_dead_session(window, spec)
+            site = _wait_for_login(window, spec, timeout, pending.cancel)
     except browser.BrowserUnavailable as e:
         raise browser.BrowserUnavailable(f"打不开浏览器，没法登录。{e}") from e
     finally:
-        if _pending.get(provider) is cancel:
+        if _pending.get(provider) is pending:
             del _pending[provider]
     save_cookies(provider, _values(site), _dated(site))
     return status(provider)
@@ -253,7 +251,23 @@ def login(provider: str, timeout: float = 180) -> dict:
 
 def cancel_login(provider: str) -> bool:
     """Stop the login that is waiting for the user: its window closes. False when none is pending."""
-    cancel = _pending.get(provider)
-    if cancel is not None:
-        cancel.set()
-    return cancel is not None
+    pending = _pending.get(provider)
+    if pending is not None:
+        pending.cancel.set()
+    return pending is not None
+
+
+def pending_logins() -> list[dict]:
+    """The logins waiting for the user right now, as {provider, since} (since: unix time)."""
+    return [{"provider": name, "since": p.since} for name, p in list(_pending.items())]
+
+
+def cancel_all(wait: float = 10) -> None:
+    """Cancel every login that is waiting for the user and give their windows up to `wait` seconds to close (a login
+    drops out of the list once its window is gone). For the end of the app or server: those windows are browsers of this
+    process, and nothing else would close them."""
+    for pending in list(_pending.values()):
+        pending.cancel.set()
+    deadline = time.monotonic() + wait
+    while _pending and time.monotonic() < deadline:
+        time.sleep(0.05)

@@ -51,4 +51,7 @@ def main(argv: list[str] | None = None) -> None:
     engine.start_worker()
     service.start_login_check()
     webview.create_window("找岗位助手", html=page(), js_api=Api(), width=1280, height=860, min_size=(960, 640))
-    webview.start()
+    try:
+        webview.start()
+    finally:
+        service.shutdown()

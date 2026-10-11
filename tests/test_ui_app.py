@@ -53,16 +53,26 @@ def test_the_window_bridge_has_no_save_dialog_any_more():
     assert "SAVE_DIALOG" not in Path(ui_app.__file__).read_text() and "create_file_dialog" not in Path(ui_app.__file__).read_text()
 
 
-def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_window(monkeypatch):
+def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_window_and_shuts_down_after(monkeypatch):
     order = []
     window = SimpleNamespace(create_window=lambda *a, **k: order.append(("window", k["js_api"])), start=lambda: order.append("start"))
     monkeypatch.setitem(sys.modules, "webview", window)
     monkeypatch.setattr(ui_app.envfile, "load", lambda: order.append("env"))
     monkeypatch.setattr(ui_app.engine, "start_worker", lambda: order.append("workers"))
     monkeypatch.setattr(ui_app.service, "start_login_check", lambda: order.append("check"))   # in the background: never held up
+    monkeypatch.setattr(ui_app.service, "shutdown", lambda: order.append("shutdown"))
     ui_app.main([])
-    assert order[:3] == ["env", "workers", "check"] and order[4] == "start"
+    assert order[:3] == ["env", "workers", "check"] and order[4:] == ["start", "shutdown"]
     assert order[3][0] == "window" and isinstance(order[3][1], ui_app.Api)
+
+    def crash():
+        raise RuntimeError("the window died")
+
+    order.clear()
+    window.start = crash
+    with pytest.raises(RuntimeError):
+        ui_app.main([])
+    assert order[-1] == "shutdown"   # the login windows and workers are stopped on the way out, whatever ended the app
 
 
 def test_unknown_route(call):

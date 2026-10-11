@@ -224,6 +224,13 @@ def start_worker() -> None:
                 _threads[name].start()
 
 
+def workers() -> dict[str, bool]:
+    """Per platform: does THIS process have a live worker thread for it (the app, an MCP server and `djs work` each run
+    their own on the same database)."""
+    with _lock:
+        return {name: name in _threads and _threads[name].is_alive() for name in providers.names()}
+
+
 def stop_worker(wait: float = 5.0) -> None:
     """Ask the workers to stop after their current task; give them `wait` seconds in total."""
     with _lock:

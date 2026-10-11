@@ -245,6 +245,17 @@ def test_profile_lock_waits_for_a_holder_that_is_about_to_finish(home):
     holder.join()
 
 
+def test_profiles_in_use_names_the_held_ones_and_never_waits(home):
+    assert browser.profiles_in_use() == []   # no profile folder at all
+    with browser.profile_lock("boss"):
+        with browser.profile_lock("liepin"):
+            pass   # liepin's folder exists now, but nobody holds it
+        begun = time.monotonic()
+        assert browser.profiles_in_use() == ["boss"]
+        assert time.monotonic() - begun < 1   # profile_lock alone would wait three seconds
+    assert browser.profiles_in_use() == []
+
+
 # ============================================================ auth: sessions and the login flow
 def jar_context(jar):
     @contextmanager

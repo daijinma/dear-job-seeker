@@ -5,6 +5,7 @@ import json
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -68,6 +69,9 @@ class FakeAuth:
 
     def load_cookies(self, provider):
         return None
+
+    def pending_logins(self):
+        return []
 
 
 @pytest.fixture
@@ -438,12 +442,13 @@ def test_the_server_teaches_the_recommended_flow():
     assert steps == sorted(steps)   # in the order a client should use them
     for word in ("no_results", "waiting_login", "salary_month_min", "min_month_salary", "next_offset"):
         assert word in text
+    assert "call status first" in text   # and where to look when it does not go as described
     assert 'title="Python 后端"' in text and 'text="Django"' in text   # the role goes in the title, a skill in the text
 
 
 def test_the_new_and_changed_tools_come_with_an_example_each():
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
-    for name in ("search", "wait_for_search", "jobs_get", "job_detail", "task_list", "search_list"):
+    for name in ("search", "wait_for_search", "jobs_get", "job_detail", "task_list", "search_list", "status"):
         assert "Example:" in tools[name].description, name
     props = tools["jobs_get"].inputSchema["properties"]
     assert (props["limit"]["default"], props["fields"]["default"], props["dedupe"]["default"],
@@ -473,3 +478,105 @@ def test_djs_call_runs_search_wait_for_search_and_jobs_get(env, run):
     assert code == 0 and [j["title"] for j in got["jobs"]] == ["Python 后端"]
     code, err = run("wait_for_search", '{"keyword": "nothing"}')
     assert code == 1 and "no search" in err["error"]
+
+
+# ---- status: what is going on, in one call
+@pytest.fixture
+def chrome(env):
+    """A machine with Chrome, so the answer does not depend on the one running the tests."""
+    env.mp.setattr(browser, "find_browser", lambda: ("chrome", Path("/apps/chrome")))
+
+
+def test_status_has_the_shape_clients_rely_on_and_needs_no_network_and_no_time(env, chrome, monkeypatch):
+    monkeypatch.setattr(httpx.Client, "send", lambda *a, **k: pytest.fail("status must not touch the network"))
+    begun = time.monotonic()
+    got = call("status")
+    assert time.monotonic() - begun < 1
+    assert set(got) == {"version", "data_dir", "workers", "queue", "browser", "logins", "platforms"}
+    assert got["data_dir"] == str(db.home()) and got["version"]
+    assert list(got["workers"]) == list(got["platforms"]) == list(env.provs)   # one entry per platform, in registry order
+    assert set(got["browser"]) == {"executable", "hint", "playwright", "cdp_url_set", "login_windows", "profiles_in_use"}
+    assert got["logins"]["opt"] == {"state": "not_logged_in", "expires_at": None}   # the platforms that have a login
+    assert set(got["logins"]) == {"opt", "login"}
+    assert got["queue"] == {"pending": 0, "running": 0, "waiting_login": 0, "done": 0, "dead": 0}
+
+
+def test_status_shows_the_task_a_platform_runs_with_its_progress_and_whether_this_process_works(env, chrome):
+    running = task(env.conn, "a", "py", "杭州", status="running")
+    stats = {"pages": 2, "details_total": 5, "details_ok": 2, "details_failed": 1}
+    env.conn.execute("UPDATE tasks SET locked_at=?, stats=? WHERE id=?", (time.time() - 5, json.dumps(stats), running))
+    task(env.conn, "b", "py")   # done
+    waiting = task(env.conn, "opt", "py", status="pending")
+    got = call("status")
+    assert got["workers"]["a"]["running"] == {"task_id": running, "keyword": "py", "city": "杭州",
+                                              "since": pytest.approx(time.time() - 5, abs=5), "pages": 2,
+                                              "completing": {"done": 3, "total": 5}}
+    assert got["workers"]["b"]["running"] is None and waiting   # only a running task counts
+    assert got["queue"] == {"pending": 1, "running": 1, "waiting_login": 0, "done": 1, "dead": 0}
+    assert {w["alive_in_this_process"] for w in got["workers"].values()} == {False}   # nobody started workers in this process
+    engine.start_worker()
+    assert {w["alive_in_this_process"] for w in call("status")["workers"].values()} == {True}
+
+
+def test_status_tells_in_plain_words_why_the_newest_task_of_a_platform_failed_or_waits(env, chrome):
+    old = task(env.conn, "b", "py", status="dead")
+    task(env.conn, "b", "py2", status="done")   # the newest task of "b" is fine: its old failure is history
+    dead = task(env.conn, "a", "py", status="dead")
+    env.conn.execute("UPDATE tasks SET last_error='Blocked: HTTP 403' WHERE id=?", (dead,))
+    waiting = task(env.conn, "opt", "py", status="waiting_login")
+    env.conn.execute("UPDATE tasks SET last_error='login required' WHERE id=?", (waiting,))
+    task(env.conn, "login", "py", status="dead")   # dead without a recorded error: still reported
+    platforms = call("status")["platforms"]
+    assert old and platforms["b"]["last_error"] is None and platforms["city"]["last_error"] is None
+    assert platforms["a"]["last_error"] == {"task_id": dead, "status": "dead", "kind": "blocked", "reason": "被网站暂时限制，稍后再试"}
+    assert platforms["opt"]["last_error"] == {"task_id": waiting, "status": "waiting_login", "kind": "login", "reason": "需要先登录"}
+    assert platforms["login"]["last_error"]["kind"] == "other"
+    assert call("status")["queue"]["dead"] == 3 and call("status")["queue"]["waiting_login"] == 1
+
+
+def test_status_lists_missing_keys_by_name_and_never_shows_a_value(env, chrome):
+    platforms = call("status")["platforms"]
+    assert platforms["keyed"]["configured"] is False and platforms["keyed"]["missing_env"] == ["DJS_FAKE_TOOLS_KEY"]
+    assert platforms["a"]["configured"] is True and platforms["a"]["missing_env"] == []
+    env.mp.setenv("DJS_FAKE_TOOLS_KEY", "s3cret-value")
+    got = call("status")
+    assert got["platforms"]["keyed"]["configured"] is True and "s3cret-value" not in json.dumps(got)
+
+
+def test_status_names_the_exits_that_are_cooling_down_without_their_passwords(env, chrome):
+    egress.report(env.conn, "http://u:pw@proxy.test:8080", "a", ok=False, blocked=True)   # 30 minutes
+    egress.report(env.conn, "direct", "b", ok=True)   # healthy: not listed
+    got = call("status")
+    [cooling] = got["platforms"]["a"]["cooling_down"]
+    assert cooling["exit"] == "http://u:***@proxy.test:8080" and cooling["until"] == pytest.approx(time.time() + 1800, abs=60)
+    assert got["platforms"]["b"]["cooling_down"] == [] and "pw@" not in json.dumps(got)
+
+
+def test_status_says_which_browser_a_login_window_would_use_or_why_there_is_none(env, chrome):
+    browser_state = call("status")["browser"]
+    assert browser_state["executable"] == {"kind": "chrome", "path": str(Path("/apps/chrome"))} and browser_state["hint"] is None
+    assert (browser_state["playwright"], browser_state["cdp_url_set"]) == (False, False)   # the fixture says Playwright is not there
+    env.mp.setenv("DJS_CDP_URL", "http://127.0.0.1:9222")
+    env.mp.setattr(browser, "find_browser", lambda: None)
+    browser_state = call("status")["browser"]
+    assert browser_state["executable"] is None and "No browser found" in browser_state["hint"] and browser_state["cdp_url_set"] is True
+
+    def playwright_missing():
+        raise browser.BrowserUnavailable(browser.INSTALL_HINT)
+
+    env.mp.setattr(browser, "find_browser", playwright_missing)
+    got = call("status")["browser"]   # no Chrome or Edge, and nobody to ask about Chromium: still an answer, not an error
+    assert got["executable"] is None and got["hint"] == browser.INSTALL_HINT
+
+
+def test_status_shows_the_open_login_windows_and_the_profiles_in_use(env, chrome):
+    env.mp.setattr(service.auth, "pending_logins", lambda: [{"provider": "opt", "since": 1234.5}])
+    with browser.profile_lock("opt"):   # a login window, or a crawl in a browser, holds it
+        got = call("status")["browser"]
+        assert got["login_windows"] == [{"provider": "opt", "since": 1234.5}] and got["profiles_in_use"] == ["opt"]
+    assert call("status")["browser"]["profiles_in_use"] == []   # released again (the folder stays, nobody holds it)
+
+
+def test_djs_call_status_prints_the_same_json(env, chrome, capsys):
+    assert cli.main(["call", "status"]) == 0
+    assert set(json.loads(capsys.readouterr().out)) == {"version", "data_dir", "workers", "queue", "browser", "logins", "platforms"}

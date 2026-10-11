@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sys
 import time
+from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,9 +27,31 @@ Recommended flow:
    limit and next_offset.
 4. job_detail(job_id): the full description of the few jobs you shortlist. jobs_get returns only short summaries.
 Compare pay only through salary_month_min / salary_month_max: salary_text is the site's own wording (per day, per
-hour, per year) and the figures behind it are in salary_unit."""
+hour, per year) and the figures behind it are in salary_unit.
+If results look wrong or a search does not move, call status first: workers, queue, browser, logins and each
+platform's latest problem in one call, without touching the network."""
 
-mcp = FastMCP("dear-job-seeker", instructions=INSTRUCTIONS)
+
+@asynccontextmanager
+async def _lifespan(_server):
+    """Ends with the connection. A client that goes away while a login window is open leaves `login` waiting in a thread
+    that would keep this process, and the window, alive until its timeout: close the windows now. Blocking on purpose
+    (it is the end; an await here could be cancelled before it ran)."""
+    try:
+        yield
+    finally:
+        service.shutdown()
+
+
+mcp = FastMCP("dear-job-seeker", instructions=INSTRUCTIONS, lifespan=_lifespan)
+
+
+def _on_sigterm(signum, frame) -> None:
+    """A host that stops the server with SIGTERM: close what is ours (login windows), then leave at once. The default
+    would kill the process with a window open; a normal exit would wait for the thread that reads stdin, which only
+    returns when the client closes the pipe."""
+    service.shutdown()
+    os._exit(0)
 
 
 def _run(fn, *args, **kwargs):
@@ -46,6 +71,18 @@ def _run(fn, *args, **kwargs):
 async def provider_list() -> dict:
     """List platforms with type, auth, capture transport, effective frequency and login state."""
     return await asyncio.to_thread(_run, service.provider_list)  # the login state may need a browser (plain thread)
+
+
+@mcp.tool()
+async def status() -> dict:
+    """What is going on, in one call and without touching the network: the version and data folder; per platform whether
+    THIS process's worker is alive (the app, another MCP server and `djs work` may run workers on the same database
+    too) and the task it runs now (keyword, city, since, pages, completing {done, total}); the queue by status; the
+    browser a login window would start (or why there is none), Playwright, DJS_CDP_URL, the open login windows and the
+    platform profiles in use; each login's state and end; per platform its missing keys (names only), cooling-down
+    exits and, when its newest task failed or waits for a login, why. Call it first when results look wrong or a
+    search does not move. Example: status()."""
+    return await asyncio.to_thread(_run, service.status)  # finding the browser can start Playwright (plain thread)
 
 
 @mcp.tool()
@@ -201,7 +238,12 @@ def main() -> None:
     envfile.load()
     engine.start_worker()
     service.start_login_check()
-    mcp.run(transport="stdio")
+    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        service.shutdown()  # also when the server ends by an interrupt or an error rather than a closed connection
 
 
 if __name__ == "__main__":

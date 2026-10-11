@@ -2,6 +2,7 @@
 (hand-built from the Go mapper's expected shape, not recorded from Boss)."""
 import builtins
 import json
+import shutil
 import stat
 import time
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from djs import auth, cities
+from djs import auth, browser, cities
 from djs.jobs import derive
 from djs.normalize import missing
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
@@ -93,6 +94,8 @@ def test_status_never_contains_cookie_values():
 # ------------------------------------------------------------------ login flow
 
 def test_login_without_playwright_gives_hint(monkeypatch):
+    monkeypatch.setattr(browser, "CHANNELS", (None,))  # whatever Chrome or Edge this machine has...
+    monkeypatch.setattr(shutil, "which", lambda *a, **k: None)  # ...or Chromium on the PATH
     real_import = builtins.__import__
 
     def fake(name, *a, **k):

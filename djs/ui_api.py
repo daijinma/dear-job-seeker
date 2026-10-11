@@ -2,7 +2,6 @@
 background login, exporting a table, showing files and folders)."""
 from __future__ import annotations
 
-import importlib.metadata
 import json
 import re
 import subprocess
@@ -140,11 +139,7 @@ def add_proxy(conn, a) -> dict:
 
 
 def about(conn, a) -> dict:
-    try:
-        version = importlib.metadata.version("dear-job-seeker")
-    except importlib.metadata.PackageNotFoundError:  # a source checkout that was never installed
-        version = "开发版"
-    return {"home": str(db.home()), "version": version}
+    return {"home": str(db.home()), "version": service.app_version() or "开发版"}  # no version: a source checkout
 
 
 def _show(command: list[str]) -> dict:

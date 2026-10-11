@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import functools
+import importlib.metadata
 import json
 import threading
+import time
 
 import httpx
 
-from djs import auth, browser, egress, engine, jobs, pacer, providers, query, taskqueue
+from djs import auth, browser, db, egress, engine, jobs, pacer, providers, query, taskqueue
 from djs.normalize import CORE
 from djs.providers.base import Blocked, FetchError, LoginRequired
 
@@ -418,3 +420,88 @@ def egress_remove(conn, url) -> dict:
 
 def egress_list(conn) -> list[dict]:
     return egress.list_(conn)
+
+
+def shutdown() -> None:
+    """The app or the MCP server is ending. A login window is a browser process of this process and nothing else would
+    close it: cancel the pending logins and wait (a few seconds at most) for their windows to go, then stop the workers."""
+    auth.cancel_all()
+    engine.stop_worker(5)
+
+
+# ---- status: what is going on, in one call
+def app_version() -> str | None:
+    """The installed version of the package, None for a source checkout that was never installed."""
+    try:
+        return importlib.metadata.version("dear-job-seeker")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _running(conn) -> dict[str, dict]:
+    """Per platform, the task it runs right now, as {task_id, keyword, city, since, pages, completing}; any process of
+    this database may be the one running it."""
+    out = {}
+    for row in conn.execute("SELECT * FROM tasks WHERE status='running' ORDER BY id"):
+        t = taskqueue.as_dict(row)
+        stats = t["stats"] or {}
+        out[t["provider"]] = {"task_id": t["id"], "keyword": t["payload"].get("keyword") or t["payload"].get("tenant"),
+                              "city": t["payload"].get("city"), "since": t["locked_at"], "pages": stats.get("pages", 0),
+                              "completing": taskqueue.summary("running", 0, stats).get("completing")}
+    return out
+
+
+def _queue(conn) -> dict[str, int]:
+    counts = dict.fromkeys(("pending", "running", "waiting_login", "done", "dead"), 0)
+    counts.update({r["status"]: r["n"] for r in conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")})
+    return counts
+
+
+def _browser_state() -> dict:
+    """The browser a login window would start in (or why there is none), and what holds browser profiles right now."""
+    try:
+        found = browser.find_browser()
+        hint = None if found else browser.no_browser_hint()
+    except browser.BrowserUnavailable as e:  # no Chrome or Edge, and Playwright cannot say where its Chromium is
+        found, hint = None, str(e)
+    return {"executable": {"kind": found[0], "path": str(found[1])} if found else None, "hint": hint,
+            "playwright": browser.ready(), "cdp_url_set": browser.cdp_url() is not None,
+            "login_windows": auth.pending_logins(), "profiles_in_use": browser.profiles_in_use()}
+
+
+def _problem(task) -> dict | None:
+    """Why a platform's newest task failed or waits for a login, in plain words; None when it did neither."""
+    from djs import results  # late: results imports this module
+    if task is None or task["status"] not in ("dead", "waiting_login"):
+        return None
+    kind, reason = results.classify(task["last_error"])
+    return {"task_id": task["id"], "status": task["status"], "kind": kind, "reason": reason}
+
+
+def _platform(name: str, newest, cooling: list) -> dict:
+    missing = providers.get(name).missing_env()
+    return {"configured": not missing, "missing_env": missing, "cooling_down": cooling, "last_error": _problem(newest)}
+
+
+def _platforms(conn) -> dict[str, dict]:
+    """Per platform: its keys (names of the missing ones only), the exits that are cooling down, and its newest task's
+    problem, if any."""
+    newest = {r["provider"]: r for r in conn.execute(
+        "SELECT * FROM tasks WHERE id IN (SELECT MAX(id) FROM tasks GROUP BY provider)")}
+    cooling: dict[str, list] = {}
+    for r in conn.execute("SELECT egress_id, provider, blocked_until FROM egress_health WHERE blocked_until>? "
+                          "ORDER BY blocked_until", (time.time(),)):
+        cooling.setdefault(r["provider"], []).append({"exit": egress.mask(r["egress_id"]), "until": r["blocked_until"]})
+    return {name: _platform(name, newest.get(name), cooling.get(name, [])) for name in providers.names()}
+
+
+def status(conn) -> dict:
+    """What is going on, in one call: no network, well under a second. `workers` tells, per platform, whether THIS
+    process's worker thread is alive and the task the platform runs right now (the app, an MCP server and `djs work`
+    each run workers on the same database)."""
+    running, alive = _running(conn), engine.workers()
+    return {"version": app_version() or "dev", "data_dir": str(db.home()),
+            "workers": {name: {"alive_in_this_process": alive[name], "running": running.get(name)} for name in alive},
+            "queue": _queue(conn), "browser": _browser_state(),
+            "logins": {row["provider"]: {"state": row["state"], "expires_at": row["expires_at"]} for row in login_overview()},
+            "platforms": _platforms(conn)}

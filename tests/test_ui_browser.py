@@ -144,6 +144,12 @@ class FakeAuth:
         self.cancelled.set()
         return True
 
+    def cancel_all(self, wait=10):
+        self.cancelled.set()
+
+    def pending_logins(self):
+        return []
+
     def logout(self, p):
         self.sessions.pop(p, None)
 
