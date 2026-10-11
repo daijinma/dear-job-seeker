@@ -16,7 +16,8 @@ def provider_list(conn) -> list[dict]:
         interval, jitter, max_pages = pacer.effective(conn, name)
         d = {"name": name, "label": p.label or name, "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
              "interval": interval, "jitter": jitter, "max_pages": max_pages,
-             "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note}
+             "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note,
+             "configured": not p.missing_env(), "missing_env": p.missing_env()}
         if p.auth == "login":
             d["logged_in"] = auth.status(name)["logged_in"]
         out.append(d)
@@ -24,6 +25,10 @@ def provider_list(conn) -> list[dict]:
 
 
 def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=None) -> dict:
+    missing = providers.get(provider).missing_env()
+    if missing:
+        raise ValueError(f"{provider} needs environment variable(s) {', '.join(missing)}; "
+                         "set them in the MCP client config env block (see README)")
     payload = {k: v for k, v in (("keyword", keyword), ("city", city), ("tenant", tenant), ("max_pages", max_pages))
                if v is not None}
     return {"task_id": taskqueue.create(conn, provider, payload)}

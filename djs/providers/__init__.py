@@ -5,7 +5,8 @@ from __future__ import annotations
 import importlib
 
 _MODULES = {"nowcoder": "NowCoder", "iguopin": "Iguopin", "chinahr": "Chinahr", "zhaopin": "Zhaopin",
-            "mohrss": "Mohrss", "ciic": "Ciic", "bytedance": "Bytedance", "boss": "Boss"}
+            "mohrss": "Mohrss", "ciic": "Ciic", "bytedance": "Bytedance", "boss": "Boss",
+            "yupao": "Yupao", "job51": "Job51", "job58": "Job58", "ganji": "Ganji"}
 _cache: dict = {}
 
 

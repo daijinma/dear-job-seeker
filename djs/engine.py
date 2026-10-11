@@ -71,6 +71,8 @@ def _fail(conn, task_id, prov, exit_id, exc):
 
 def run_task(conn, task) -> None:
     prov = providers.get(task["provider"])
+    if prov.missing_env():
+        return taskqueue.dead(conn, task["id"], f"missing environment variable(s): {', '.join(prov.missing_env())}")
     cookies = auth.load_cookies(prov.name) if prov.auth == "login" else None
     if prov.auth == "login" and cookies is None:
         return taskqueue.waiting_login(conn, task["id"])

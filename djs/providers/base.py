@@ -11,6 +11,7 @@ Providers never sleep: pacing is enforced by the egress client (djs.egress / djs
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -40,6 +41,18 @@ class ParseError(StructureError):
 
 class Delisted(FetchError):
     """Job is offline. Expected terminal state, not a failure; never retried."""
+
+
+class MissingEnv(FetchError):
+    """A required signing variable is unset (never retryable by itself)."""
+
+
+def env(name: str) -> str:
+    """Read signing material lazily at call time, so providers import without keys."""
+    v = os.environ.get(name, "").strip()
+    if not v:
+        raise MissingEnv(f"environment variable {name} is not set")
+    return v
 
 
 def retry_after(r) -> float | None:
@@ -99,6 +112,10 @@ class Provider:
     page_cap: int | None = None    # known hard paging ceiling of the platform; None = unknown
     enabled: bool = True
     note: str = ""                 # one-line platform caveat shown by provider_list
+    requires_env: tuple[str, ...] = ()   # env vars holding signing keys (never shipped in the repo)
+
+    def missing_env(self) -> list[str]:
+        return [n for n in self.requires_env if not os.environ.get(n, "").strip()]
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         raise NotImplementedError
