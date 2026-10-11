@@ -22,6 +22,8 @@ Decisions taken without a round-trip are marked `assumed:` and can be reversed.
 | A15 | assumed: `search` without `providers` uses the same "usable right now" set as the app's preselection (A9), minus platforms that have no code for the asked city; BOSS only when named | an AI client must not open a browser window or wait for a login nobody asked for |
 | A16 | assumed: one `wait_for_search` call blocks at most 600 s and then answers `timed_out: true` | MCP clients time out long calls; calling again is cheap |
 | A17 | assumed: `jobs_get` lists newest first; the results page keeps its interleaved order | a client filters and pages; the page is read top to bottom |
+| A18 | assumed: the app also preselects the sites that need a city (58同城, 赶集) and uses them only when a city is filled in; a site that cannot take a search is skipped and named instead of refusing the whole search (amends A9) | a typed city should reach every site that covers it, and one uncovered city must not cost the other sites |
+| A19 | assumed: the login window is a plain browser window (the user's Chrome / Edge started as a normal program), read only at the browser level; crawling stays on Playwright | BOSS and 猎聘 blank any page Playwright drives (F36) |
 
 ## Findings from driving the real app (Peekaboo on the native window, fresh data folder)
 | # | Finding | Status |
@@ -69,3 +71,18 @@ The client produced 5 sound recommendations, and reported these tool problems:
 |---|---|---|
 | F25 | Starting a search next to running workers failed about 1 run in 6 with "database is locked" (the app's search start had the same flaw) | fixed (the write lock is taken first; regression test) |
 | F26 | Live run "Python 后端 · 杭州": 12 sites in 2 min 34 s, 9 found jobs, 3 had none, 0 failed; 147 records, 107 complete; one job on 智联 and 前程无忧 merged; ≥ 1.5 万/月 leaves 74 | ok |
+
+## Findings from the second round of real use (desktop tour and an AI client, same day)
+| # | Finding | Status |
+|---|---|---|
+| F27 | AI client, same request as F8–F13: it used search → wait_for_search → jobs_get with filters and picked 5 sound jobs in 5 turns, no context trouble | ok |
+| F28 | 鱼泡 jobs had no link, so the client could not recommend them (e.g. 阿里云 2–4 万/月) | fixed (`www.yupao.com/zhaogong/<jobId>.html`, checked on a live job) |
+| F29 | `text="Python"` also matched descriptions, so Java and 数据分析 roles came back | fixed (`title` filter; live: `title=会计` 125 vs `text=会计` 147) |
+| F30 | `wait_for_search(timeout=300)` timed out while 前程无忧 fetched its last details (no JD in its list: 145 details at 3 s ≈ 8 min); the client read the results anyway | note: the lists are there at once and the details fill in |
+| F31 | 猎聘 lists some companies anonymously ("某知名互联网公司") | site behaviour |
+| F32 | Desktop tour "Python 后端 · 杭州": every flow worked, no page errors, but one search showed 215 / 216 / 213 jobs (search card, strip, heading) | fixed (`whole`: one count everywhere) |
+| F33 | 综合 put "风电结构仿真分析工程师" (国聘) first for "Python 后端" | fixed (title matches first in 综合) |
+| F34 | One site that cannot take the city refused the whole search; "浙江杭州" and "杭州市西湖区" were refused by every site, 义乌 and 昆山 by nearly all | fixed (city text resolved; a site that cannot take it is skipped and named; live: 义乌 started 牛客, skipped 智联 and 58同城) |
+| F35 | 58同城 and 赶集 were not preselected even with a city typed | fixed (A18) |
+| F36 | Real logins: 智联, 前程无忧 and 康强 worked; BOSS and 猎聘 showed the login page for ~1 s, then about:blank. Any Playwright-driven page is blanked within 1–2 s there (4/4 runs, with or without stealth scripts); a plain Chrome read only at the browser level kept both pages alive (4/4) | fix in progress (A19) |
+| F37 | A process that ended in the middle of a 前程无忧 detail pass left its task 'running'; other processes could not take it for 15 minutes (the lock is set once at claim time and never refreshed) | fix planned: heartbeat with every progress write, 3-minute lock, tasks handed back on a normal stop |
