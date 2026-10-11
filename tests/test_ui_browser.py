@@ -3,6 +3,7 @@ fake platforms behind httpx.MockTransport, real per-platform workers: no network
 Playwright's Chromium is not installed."""
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import itertools
 import json
@@ -119,7 +120,7 @@ class FakeAuth:
     def status(self, p):
         spec = providers.get(p).login
         return {"logged_in": self.logged_in(p), "state": self._state(p), "saved_at": SAVED if p in self.sessions else None,
-                "expires_at": None, "method": spec.method, "unlocks": spec.unlocks}
+                "expires_at": None, "method": spec.method, "unlocks": spec.unlocks, "helps": spec.helps}
 
     def check(self, p):
         self.checks.append(p)
@@ -616,6 +617,20 @@ def test_a_retrying_site_says_later_once(page, app):
     """No network: "网络不通，稍后再试，稍后会自动重试" said "later" twice."""
     note = page.evaluate("siteNote({provider: 'zz', label: '中智招聘', outcome: 'retrying', reason: '网络不通，稍后再试'})")
     assert note["text"] == "网络不通，稍后会自动重试"
+
+
+def test_a_login_that_brings_nothing_measurable_is_not_nagged_about_until_it_expires(page, app, monkeypatch):
+    """Measured: 智联 / 前程无忧 / 猎聘 find the same with or without a login. The badge and the hint count only logins
+    that help (and any login that has expired); the login page still lists them all."""
+    zl = providers.get("zl")
+    monkeypatch.setattr(zl, "login", dataclasses.replace(zl.login, helps=False))
+    page.get_by_role("link", name="设置").click()
+    page.get_by_role("link", name="查找", exact=True).click()
+    expect(badge(page)).to_have_text("2")                       # BOSS 直聘 and 登录专用站, not 智联招聘
+    expect(page.locator("#login-hint")).to_contain_text("登录 2 个平台后，结果更全")
+    app.auth.sessions.update({"zl": "expired"})               # a login the user had: worth renewing
+    page.get_by_role("link", name="设置").click()
+    expect(badge(page)).to_have_text("3")
 
 
 def test_typed_text_and_chosen_sites_survive_a_tab_change(page, app):
@@ -1498,12 +1513,12 @@ def test_the_nav_has_a_fourth_item_with_a_badge_counting_the_platforms_that_need
     nav = page.get_by_role("navigation", name="主导航").get_by_role("link")
     expect(nav).to_have_text(["查找", "我的结果", "设置", re.compile(r"^平台登录\s*3$")])
     expect(badge(page)).to_have_text("3")   # 智联招聘, BOSS 直聘 and 登录专用站 have a login and none is logged in
-    expect(nav_logins(page)).to_have_attribute("aria-label", "平台登录，还有 3 个没登录")
+    expect(nav_logins(page)).to_have_attribute("aria-label", "平台登录，还有 3 个建议登录")
     assert page.evaluate("getComputedStyle(document.querySelector('#login-badge')).backgroundColor") == "rgb(179, 95, 0)"   # orange
     app.auth.sessions.update({"zl": "logged_in", "bs": "expired"})   # an expired login still needs doing
     page.get_by_role("link", name="设置").click()
     expect(badge(page)).to_have_text("2")   # the badge is on every page
-    expect(nav_logins(page)).to_have_attribute("aria-label", "平台登录，还有 2 个没登录")
+    expect(nav_logins(page)).to_have_attribute("aria-label", "平台登录，还有 2 个建议登录")
     app.auth.sessions.update({"bs": "logged_in", "lg": "logged_in"})
     page.get_by_role("link", name="查找", exact=True).click()
     expect(badge(page)).to_be_hidden()   # nothing left to do: no badge at all

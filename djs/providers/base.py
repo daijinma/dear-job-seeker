@@ -145,6 +145,7 @@ class Login:
     probe_url: str = ""                     # optional online check with the saved session (GET, must be 2xx) ...
     probe_fail_text: str = ""               # ... and its body must not contain this text
     unlocks: str = ""                       # one plain-Chinese line for the UI: what logging in improves
+    helps: bool = True                      # measured to improve results; the app nudges only for these (and expired ones)
     valid_days: int = 7                     # re-check age when the site gives no cookie expiry
 
 

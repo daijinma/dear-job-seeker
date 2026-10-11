@@ -182,7 +182,8 @@ def status(provider: str) -> dict:
         state = "logged_in" if attached else ("expired" if state == "expired" else "not_logged_in")
     saved = saved or {}
     return {"logged_in": state == "logged_in", "state": state, "saved_at": saved.get("saved_at"),
-            "expires_at": _expires_at(spec, saved) if saved else None, "method": spec.method, "unlocks": spec.unlocks}
+            "expires_at": _expires_at(spec, saved) if saved else None, "method": spec.method, "unlocks": spec.unlocks,
+            "helps": spec.helps}
 
 
 def check(provider: str) -> dict:

@@ -116,7 +116,7 @@ DJS_JOB58_LUNA_SALT=...
 
 ## Logins
 
-Five platforms have a login. It is optional on four of them; the login gives more:
+Five platforms have a login. It is optional on four of them, and only two measurably gain from it (BOSS 直聘 and 康强医疗网), so the app's reminder (the badge on 平台登录 and the hint on 查找) counts only those, plus any login that has expired:
 
 | Platform | How you log in | What the login adds |
 |---|---|---|

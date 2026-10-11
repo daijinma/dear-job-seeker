@@ -17,6 +17,8 @@ const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const siteLabel = (name) => S.providers.find((p) => p.name === name)?.label || name;
 const loginOf = (name) => S.logins.find((x) => x.provider === name);
+// a login worth asking for: one that measurably helps and is missing, or one the user had that has expired
+const wantsLogin = (x) => (x.helps !== false && !x.logged_in) || x.state === "expired";
 /* what logging in gives, to follow "登录后：" (a text that already starts with 登录后 is not made to say it twice) */
 const gives = (unlocks) => (unlocks || "结果更全").replace(/^登录后[，,：:]?/, "");
 

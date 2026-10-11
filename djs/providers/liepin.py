@@ -69,7 +69,7 @@ class Liepin(Provider):
     page_cap = 2
     note = "Mini-program API: at most 80 results per keyword, strict keyword match, no city filter (applied after)."
     login = Login(url="https://www.liepin.com/", method="qr", domain="liepin.com", cookies_any=("lt_auth",),
-                  unlocks="暂无明显提升（不登录也能完整搜索）")
+                  unlocks="暂无明显提升（不登录也能完整搜索）", helps=False)
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         condition = {"keyword": payload["keyword"], "sortType": "intelligent", "pageSize": self.page_size,

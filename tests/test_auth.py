@@ -397,7 +397,7 @@ def test_a_corrupt_file_is_no_login():
 def test_status_has_exactly_what_the_pages_need():
     save(expires={"wt2": time.time() + 86400})
     got = auth.status("any")
-    assert set(got) == {"logged_in", "state", "saved_at", "expires_at", "method", "unlocks"}
+    assert set(got) == {"logged_in", "state", "saved_at", "expires_at", "method", "unlocks", "helps"}
     assert (got["method"], got["unlocks"]) == ("qr", "能看到薪资") and got["saved_at"] == pytest.approx(time.time(), abs=5)
     assert auth.status("all")["method"] == "wechat" and auth.status("all")["state"] == "not_logged_in"
     assert auth.status("all")["saved_at"] is None and auth.status("all")["expires_at"] is None

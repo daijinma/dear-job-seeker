@@ -67,7 +67,7 @@ const sitePicker = () => (S.searched ? disclosure("picker", `已选 ${pickedCoun
 
 /* ---- first-time hint ---- */
 function loginHint() {
-  const todo = S.logins.filter((x) => !x.logged_in).length;
+  const todo = S.logins.filter(wantsLogin).length;
   return todo ? `<div class="notice">${icon("shield", 18)}<span>登录 ${todo} 个平台后，结果更全</span>${linkBtn("去登录", "#/logins", "line sm")}</div>` : "";
 }
 

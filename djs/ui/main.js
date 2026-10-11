@@ -17,12 +17,12 @@ async function route() {
 
 /* the number of sites that have a login but are not logged in (or whose login ran out), next to 平台登录 */
 function paintBadge() {
-  const todo = S.logins.filter((x) => !x.logged_in).length;
+  const todo = S.logins.filter(wantsLogin).length;
   const badge = $("#login-badge");
   badge.textContent = todo;
   badge.hidden = !todo;
   const link = $('nav a[data-tab="logins"]');
-  todo ? link.setAttribute("aria-label", `平台登录，还有 ${todo} 个没登录`) : link.removeAttribute("aria-label");
+  todo ? link.setAttribute("aria-label", `平台登录，还有 ${todo} 个建议登录`) : link.removeAttribute("aria-label");
 }
 
 function viewError(e) {

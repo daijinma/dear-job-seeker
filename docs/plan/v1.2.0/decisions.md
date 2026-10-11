@@ -26,6 +26,7 @@ Decisions taken without a round-trip are marked `assumed:` and can be reversed.
 | A19 | assumed: the login window is a plain browser window (the user's Chrome / Edge started as a normal program), read only at the browser level; crawling stays on Playwright | BOSS and 猎聘 blank any page Playwright drives (F36) |
 | A20 | assumed (user: 先完成初版再上传): 1.2.0 ships with Playwright; 1.3.0 replaces it with the browser-level CDP client the login window already uses | Playwright's Node.js driver is 65–70% of every download (Windows 107 of 166 MB, macOS 136–139 of 195–201 MB unpacked); without it ≈ 60 MB unpacked, ≈ 25–30 MB zipped |
 | A21 | assumed: BOSS is crawled list-only until 1.3.0's experiment says otherwise: no detail calls by the crawl; its jobs give the reason "BOSS 暂时拿不到职位描述，可打开原页面查看"; a job opened in the app still fetches its detail on demand | the detail calls mostly failed (F44) and each failure cooled the site down and retried the task, for hours, against the user's own account |
+| A22 | assumed: the app's login reminder (badge, hint) counts only logins measured to help (BOSS 直聘, 康强医疗网) and expired ones; the login page still lists all five with what each measurably gives | "登录 5 个平台后，结果更全" sent users to three logins that change nothing (F38, F45) |
 
 ## Findings from driving the real app (Peekaboo on the native window, fresh data folder)
 | # | Finding | Status |
