@@ -109,5 +109,6 @@ The client produced 5 sound recommendations, and reported these tool problems:
 |---|---|---|
 | F46 | 牛客网 answers a keyword it does not know ("xqzvbnq") with its default listing (10 unrelated jobs); real job titles are applied | note |
 | F47 | With every exit pointing at a dead proxy, all sites said "被网站暂时限制": the cooldown after 3 connection errors replaced the cause | fixed (58d1dde: the cause stays in front and decides the wording) |
-| F48 | One site waiting out a cooldown (中智招聘) kept the whole search "running": wait_for_search waited its full 300 s, the app said 查找中 | in progress (sites that failed and wait for their next try no longer keep a search running) |
-| F49 | Review of the window close: the last wait had no timeout and only the main browser process was signalled | in progress (one deadline, whole process tree, profile reopens) |
+| F48 | One site waiting out a cooldown (中智招聘) kept the whole search "running": wait_for_search waited its full 300 s, the app said 查找中 | fixed (3f35e78: `retrying` outcome; a search runs only while some site works; the app says 已完成 or 稍后重试 with the site's note) |
+| F49 | Review of the window close: the last wait had no timeout and only the main browser process was signalled | fixed (8ee5feb: own process group, one 15 s deadline for close → SIGTERM → SIGKILL of the group, taskkill /T on Windows, the profile reopens; real Chrome closed five ways) |
+| F50 | With no network the retry note read "网络不通，稍后再试，稍后会自动重试" | fixed ("later" said once) |

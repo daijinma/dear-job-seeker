@@ -598,6 +598,12 @@ def test_a_search_whose_every_site_waits_for_its_next_try_says_so(page, app):
     expect(newest_card(page).locator(".pill")).to_have_text("稍后重试")
 
 
+def test_a_retrying_site_says_later_once(page, app):
+    """No network: "网络不通，稍后再试，稍后会自动重试" said "later" twice."""
+    note = page.evaluate("siteNote({provider: 'zz', label: '中智招聘', outcome: 'retrying', reason: '网络不通，稍后再试'})")
+    assert note["text"] == "网络不通，稍后会自动重试"
+
+
 def test_typed_text_and_chosen_sites_survive_a_tab_change(page, app):
     page.get_by_label("岗位或关键词", exact=True).fill("数据分析")
     page.get_by_label("城市", exact=True).fill("上海")
