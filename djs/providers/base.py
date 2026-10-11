@@ -15,6 +15,8 @@ import os
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
+from djs import cities
+
 
 class FetchError(Exception):
     def __init__(self, msg: str = "", retry_after: float | None = None):
@@ -84,6 +86,16 @@ def get_json(r) -> dict:
     return d
 
 
+def join_places(names) -> str | None:
+    """Jobs can list several cities; keep them all so 'city contains X' stays true for each."""
+    return "、".join(n for n in names if n) or None
+
+
+def months_suffix(months) -> str:
+    """'·14薪' for more than 12 monthly payments; 12 or fewer is the default and not worth showing."""
+    return f"·{months}薪" if isinstance(months, int) and months > 12 else ""
+
+
 def need(obj, *path, typ=list):
     """Strict getter: every level must exist, leaf must be `typ` and non-None/non-empty-str."""
     o = obj
@@ -103,6 +115,9 @@ class Provider:
     kind: str = "keyword"          # 'keyword' (search by keyword[+city]) | 'tenant' (one company site per task)
     auth: str = "public"           # 'public' (no cookie) | 'login' (needs the user's own cookie from djs.auth)
     requires_city: bool = False    # True = no nationwide search; fetch() rejects missing city
+    city_filter: str = "none"      # who applies payload['city']: 'server' = fetch() sends it to the site |
+                                   # 'client' = the site cannot filter, the engine drops rows whose row()['city']
+                                   # lacks it | 'none' = no city notion
     # ---- frequency / paging facts (user can override interval/jitter/max_pages) ----
     interval: float = 3.0          # min seconds between two requests of this provider (global, per egress)
     jitter: float = 0.3            # random extra on top of interval
@@ -116,6 +131,21 @@ class Provider:
 
     def missing_env(self) -> list[str]:
         return [n for n in self.requires_env if not os.environ.get(n, "").strip()]
+
+    def city_code(self, city: str | None) -> str | None:
+        """What the site's server expects for `city`; None = no city given (nationwide search).
+        A missing required city or one we have no code for is a ValueError: never search nationwide by accident."""
+        if not city:
+            if self.requires_city:
+                raise ValueError(f"{self.label}必须指定城市")
+            return None
+        if self.city_filter != "server":
+            return city  # the site takes no city code; nothing to map
+        c = cities.code(self.name, city)
+        if c is None:
+            shown = "、".join(cities.supported(self.name)[:10])
+            raise ValueError(f"{self.label}暂不支持城市「{city}」，可选：{shown}等")
+        return c
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         raise NotImplementedError

@@ -4,10 +4,10 @@ No signature and no secret. Anonymous mode returns a fixed 8 items per (city, ke
 rejected (code 4), so page_cap=1. The detail `localname` comes from the item's weappQuery and is
 load-bearing: a wrong one silently returns an empty JD, hence the JD check in detail().
 Only relative times ("今天") exist, so published_at is always unknown.
+The user-facing page is the share URL the detail response carries (the detail path itself is a JSON API).
 """
 from __future__ import annotations
 
-from . import _city
 from .base import Blocked, Provider, StructureError, get_json, need
 
 APPID = "wx8a53973ba8aa631e"
@@ -39,6 +39,7 @@ class Ganji(Provider):
     kind = "keyword"
     auth = "public"
     requires_city = True
+    city_filter = "server"
     interval = 1.5
     min_interval = 0.75
     page_size = 8
@@ -47,9 +48,7 @@ class Ganji(Provider):
     note = "No key needed; city required; anonymous mode returns only 8 results per (city, keyword)"
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
-        if not payload.get("city"):
-            raise ValueError("ganji: fetch requires payload['city'], no nationwide search")
-        cid = _city.code(_city.GANJI, self.name, payload["city"])
+        cid = self.city_code(payload.get("city"))
         r = client.post(LIST_URL, json={"sceneKey": SCENE_KEY, "keyQuery": payload["keyword"], "pageNum": page},
                         headers={**COMMON, "content-type": "application/json", "version": "10.40.00", "cid": cid})
         d = get_json(r)
@@ -76,9 +75,8 @@ class Ganji(Provider):
         return result
 
     def meta(self, job: dict, detail: dict | None) -> dict:
-        wq = job.get("weappQuery") or {}
-        name, jid = wq.get("listName"), job.get("infoId")
-        url = f"{DETAIL_BASE}/{name}/{jid}" if name and jid else None
+        share = ((detail or {}).get("other") or {}).get("share") or {}
+        url = (share.get("data") or {}).get("url") or None
         return {"source_url": url, "apply_url": url, "published_at": None, "published_at_kind": "unknown"}
 
     def row(self, job: dict, detail: dict | None) -> dict:

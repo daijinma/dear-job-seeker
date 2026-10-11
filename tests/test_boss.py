@@ -2,7 +2,6 @@
 (hand-built from the Go mapper's expected shape, not recorded from Boss)."""
 import builtins
 import json
-import os
 import stat
 import time
 from pathlib import Path
@@ -10,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from djs import auth
+from djs import auth, cities
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
 from djs.providers.boss import Boss
 
@@ -123,7 +122,7 @@ def test_wait_for_login_times_out():
 
 def test_class_attrs_match_contract():
     b = Boss()
-    assert (b.name, b.kind, b.auth, b.requires_city) == ("boss", "keyword", "login", False)
+    assert (b.name, b.kind, b.auth, b.requires_city, b.city_filter) == ("boss", "keyword", "login", False, "server")
     assert (b.interval, b.min_interval, b.page_size, b.first_page, b.page_cap) == (6.0, 4.0, 15, 1, 5)
 
 
@@ -152,9 +151,27 @@ def test_fetch_without_city_is_nationwide():
     assert seen["q"]["city"] == "100010000"
 
 
-def test_unknown_city_is_structure_error():
-    with pytest.raises(StructureError, match="unknown Boss city"):
-        Boss().fetch(client_for(reply(fixture("boss_list.json"))), {"keyword": "x", "city": "火星"}, 1)
+def test_unknown_city_is_refused_not_nationwide():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=fixture("boss_list.json"))
+
+    with pytest.raises(ValueError, match="BOSS 直聘暂不支持城市「火星」"):
+        Boss().fetch(client_for(handler), {"keyword": "x", "city": "火星"}, 1)
+    assert seen == []
+
+
+def test_city_name_suffix_is_normalized():
+    seen = {}
+
+    def handler(request):
+        seen["q"] = request.url.params
+        return httpx.Response(200, json=fixture("boss_empty.json"))
+
+    Boss().fetch(client_for(handler), {"keyword": "x", "city": "杭州市"}, 1)
+    assert seen["q"]["city"] == "101210100"
 
 
 def test_code_37_is_blocked_not_login():
@@ -231,5 +248,4 @@ def test_meta_and_row():
 
 
 def test_probe_payload_city_is_known():
-    from djs.providers.boss import city_code
-    assert city_code(Boss().probe_payload()["city"]) != "100010000"
+    assert cities.code("boss", Boss().probe_payload()["city"]) not in (None, "100010000")

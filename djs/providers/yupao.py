@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from . import _city, _yupao_sign as ys
+from . import _yupao_sign as ys
 from .base import Blocked, Provider, StructureError, check_http, need
 
 URL = "https://yupao-prod.yupaowang.com/job/v2/search/job/search"
@@ -32,6 +32,7 @@ class Yupao(Provider):
     label = "鱼泡直聘"
     kind = "keyword"
     auth = "public"
+    city_filter = "server"
     interval = 3.0
     min_interval = 1.5
     page_size = 15
@@ -42,9 +43,9 @@ class Yupao(Provider):
             "~500 results per query; WAF may block")
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
-        city = payload.get("city")
+        city = self.city_code(payload.get("city"))
         body = {"keywords": payload["keyword"], "currentPage": page, "pageSize": self.page_size,
-                "areaIds": [_city.code(_city.YUPAO, self.name, city)] if city else [],
+                "areaIds": [city] if city else [],
                 "listType": 1, "reselectArea": False, "wechat_token": ys.APPID}
         d = _json(client.post(URL, json=body, headers=ys.headers(body)))
         if d.get("code") != 0:

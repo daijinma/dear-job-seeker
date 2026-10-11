@@ -13,7 +13,6 @@ import time
 import uuid
 from urllib.parse import quote
 
-from . import _city
 from .base import Provider, StructureError, env, get_json, need
 
 HOST = "https://cupid.51job.com"
@@ -41,6 +40,7 @@ class Job51(Provider):
     label = "前程无忧"
     kind = "keyword"
     auth = "public"
+    city_filter = "server"
     interval = 3.0
     min_interval = 1.5
     page_size = 50
@@ -52,8 +52,8 @@ class Job51(Provider):
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         params = {"keyword": payload["keyword"], "pageSize": self.page_size, "pageNum": page,
                   "searchType": 2, "scene": 12, "sortType": 0}
-        if payload.get("city"):
-            params["jobArea"] = _city.code(_city.JOB51, self.name, payload["city"])
+        if city := self.city_code(payload.get("city")):
+            params["jobArea"] = city
         return need(_get(client, "open/noauth/searchOptimization", params), "resultbody", "job", "items")
 
     def job_id(self, job: dict) -> str:

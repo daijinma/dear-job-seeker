@@ -15,7 +15,6 @@ import time
 
 import httpx
 
-from . import _city
 from .base import Blocked, ParseError, Provider, StructureError, env, get_json, need
 
 APPID = "wxc97b21c63d084d92"
@@ -53,17 +52,16 @@ class Job58(Provider):
     kind = "keyword"
     auth = "public"
     requires_city = True
+    city_filter = "server"
     interval = 1.5
     min_interval = 0.75
     page_size = 50
     first_page = 1
     requires_env = ("DJS_JOB58_LUNA_SALT",)
-    note = "Needs env DJS_JOB58_LUNA_SALT; city required (20 hot cities); risk control redirects to HTML"
+    note = "Needs env DJS_JOB58_LUNA_SALT; city required (major cities); risk control redirects to HTML"
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
-        if not payload.get("city"):
-            raise ValueError("job58: fetch requires payload['city'], no nationwide search")
-        cid = _city.code(_city.JOB58, self.name, payload["city"])
+        cid = self.city_code(payload.get("city"))
         cur = payload.setdefault("_cursor", {"thirdKey": _rnd(64), "done": False,
                                              "pageFreshId": str(int(time.time() * 1000)) + _rnd(20)})
         if cur["done"]:

@@ -50,6 +50,12 @@ def test_zhaopin_happy_and_headers():
     assert seen[0].headers["x-zp-version"] and seen[0].url.params["S_SOU_WORK_CITY"] == "530"
 
 
+def test_zhaopin_no_city_sends_no_city_slice():
+    seen = []
+    Zhaopin().fetch(client({"statusCode": 200, "data": {"list": []}}, seen=seen), SEARCH, 1)
+    assert "S_SOU_WORK_CITY" not in seen[0].url.params
+
+
 def test_zhaopin_empty_list_is_valid():
     assert Zhaopin().fetch(client({"statusCode": 200, "data": {"list": []}}), SEARCH, 1) == []
 
@@ -67,7 +73,7 @@ def test_zhaopin_business_block_and_structure_break():
         Zhaopin().fetch(client({"statusCode": 500}), SEARCH, 1)
     with pytest.raises(StructureError):
         Zhaopin().fetch(client({"statusCode": 200, "data": {}}), SEARCH, 1)
-    with pytest.raises(StructureError):
+    with pytest.raises(ValueError, match="智联招聘暂不支持城市「火星」"):
         Zhaopin().fetch(client({"statusCode": 200, "data": {"list": []}}), {**SEARCH, "city": "火星"}, 1)
 
 
@@ -97,6 +103,14 @@ def test_ciic_happy_path():
     assert [j["uuid"] for j in jobs] == ["ab12", "cd34"]
     assert jobs[0]["city"] == "广州" and jobs[1]["city"] == "上海"
     assert seen[0].url.params["workplace"] == "广州"
+
+
+def test_ciic_city_is_sent_as_short_name():
+    seen = []
+    Ciic().fetch(client(text=page(), seen=seen), {**SEARCH, "city": " 杭州市 "}, 1)
+    assert seen[0].url.params["workplace"] == "杭州"        # "杭州市" returns 0 rows on the real site
+    Ciic().fetch(client(text=page(), seen=seen), SEARCH, 1)
+    assert "workplace" not in seen[1].url.params
 
 
 def test_ciic_empty_skeleton_vs_blocked():

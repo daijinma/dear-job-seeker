@@ -1,7 +1,10 @@
 """Chinahr (chinahr.com). Keyword search; the list has no JD, so detail() does a GET hop.
 
 The search body field is `keyWord` (capital W). `keyword` is silently ignored and returns a
-default list unrelated to the query. City filtering does not work, so city is dropped.
+default list unrelated to the query.
+City: `localId` takes chinahr's own city id (POST /newchr/open/dic {"keys": "city"}, see djs.cities); a foreign
+id is silently ignored or gives an unrelated set. The site also returns jobs whose location is the whole province
+or "全国", so row()['city'] is not always the searched city.
 """
 from __future__ import annotations
 
@@ -13,18 +16,21 @@ class Chinahr(Provider):
     label = "新华英才"
     kind = "keyword"
     auth = "public"
+    city_filter = "server"
     interval = 0.8
     min_interval = 0.5
     page_size = 50
     first_page = 0
     page_cap = None
-    note = "`keyWord` capital W; detail GET open/job/detail?id="
+    note = "`keyWord` capital W; city via localId; detail GET open/job/detail?id="
 
     URL = "https://www.chinahr.com/newchr/open/job/search"
     DETAIL_URL = "https://www.chinahr.com/newchr/open/job/detail"
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         body = {"page": page, "pageSize": self.page_size, "keyWord": payload["keyword"]}
+        if city := self.city_code(payload.get("city")):
+            body["localId"] = city
         r = client.post(self.URL, json=body, headers={"Content-Type": "application/json"})
         d = _ok(get_json(r), "list")
         return need(d, "data", "jobItems")
@@ -41,9 +47,9 @@ class Chinahr(Provider):
                 "companyDesc": (data.get("comInfo") or {}).get("companyDesc") or ""}
 
     def meta(self, job: dict, detail: dict | None) -> dict:
-        # The job page is an SPA shell (not parseable) but is a fine landing page. The list has no time field.
+        # The site returns no time field anywhere (list and detail), so published_at is always unknown.
         jid = job.get("jobId")
-        url = f"https://www.chinahr.com/job/{jid}.html" if jid else None
+        url = f"https://www.chinahr.com/detail/{jid}" if jid else None
         return {"source_url": url, "apply_url": url,
                 "published_at": None, "published_at_kind": "unknown"}
 

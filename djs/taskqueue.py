@@ -17,8 +17,7 @@ def create(conn, provider: str, payload: dict) -> int:
     need = "keyword" if prov.kind == "keyword" else "tenant"
     if not payload.get(need):
         raise ValueError(f"{provider}: payload needs {need!r}")
-    if prov.requires_city and not payload.get("city"):
-        raise ValueError(f"{provider}: city is required")
+    prov.city_code(payload.get("city"))  # refuse a missing required / unsupported city now, not after 8 retries
     mp = payload.get("max_pages")
     if mp is not None and (not isinstance(mp, int) or isinstance(mp, bool) or mp < 1):
         raise ValueError("max_pages must be an integer >= 1")

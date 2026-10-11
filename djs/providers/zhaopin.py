@@ -13,11 +13,6 @@ from .base import Blocked, Provider, StructureError, get_json, need
 HEADERS = {"x-zp-channel": "wxxiaochengxu", "x-zp-business-system": "73",
            "x-zp-platform": "12", "x-zp-version": "4.1.321"}
 
-# Only unambiguous codes; a wrong slice is worse than no slice.
-CITY_CODES = {"北京": 530, "天津": 531, "上海": 538, "重庆": 551, "南京": 635, "杭州": 653,
-              "宁波": 654, "合肥": 664, "厦门": 682, "济南": 702, "广州": 763, "深圳": 765,
-              "东莞": 779, "成都": 801, "西安": 854}
-
 
 def _check_code(code, where: str) -> None:
     if code in (210, 211):
@@ -31,6 +26,7 @@ class Zhaopin(Provider):
     label = "智联招聘"
     kind = "keyword"
     auth = "public"
+    city_filter = "server"
     interval = 3.0
     min_interval = 1.5
     page_size = 20          # pageSize param is ignored by the server
@@ -42,11 +38,8 @@ class Zhaopin(Provider):
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         params = {"S_SOU_FULL_INDEX": payload["keyword"], "pageIndex": page, "pageSize": self.page_size}
-        city = payload.get("city")
-        if city:
-            if city not in CITY_CODES:
-                raise StructureError(f"zhaopin: unsupported city {city!r}; known: {sorted(CITY_CODES)}")
-            params["S_SOU_WORK_CITY"] = CITY_CODES[city]
+        if city := self.city_code(payload.get("city")):
+            params["S_SOU_WORK_CITY"] = city
         r = client.get(f"{self.BASE}/searchrecommend/searchPositions", params=params, headers=HEADERS)
         d = get_json(r)
         _check_code(d.get("statusCode", d.get("code")), "list")

@@ -78,16 +78,44 @@ def test_job_id_missing(p, _e, _b):
 def test_mohrss_happy_and_mapping():
     seen = []
     p = Mohrss()
-    jobs = p.fetch(client(text=page(), seen=seen), {"keyword": "PMO(专员)", "city": "110100"}, 1)
+    jobs = p.fetch(client(text=page(), seen=seen), {"keyword": "PMO(专员)", "city": "北京"}, 1)
     q = seen[0].url.params
     assert q["textfield"] == "PMO（专员）" and q["AREA"] == "110100" and q["pageNo"] == "1"
     assert [p.job_id(j) for j in jobs] == ["J1", "abc"]
-    assert p.row(jobs[0], None) == {"title": "算法工程师", "company": "示例公司", "city": "北京市",
+    assert p.row(jobs[0], None) == {"title": "算法工程师", "company": "示例公司", "city": "北京",
                                     "salary_text": "6000-9000元/月", "description": "负责算法"}
-    r = p.row(jobs[1], None)
-    assert r["salary_text"] is None and r["description"] is None
+    r = p.row(jobs[1], None)   # 429004 is not a canonical city: fall back to the site's own label
+    assert r["salary_text"] is None and r["description"] is None and r["city"] == "仙桃市"
     assert p.meta(jobs[0], None)["source_url"] == "http://example.org/j1"
     assert p.meta(jobs[1], None)["source_url"] is None
+
+
+def test_mohrss_dates_are_refresh_and_hr_contacts_are_never_returned():
+    p = Mohrss()
+    jobs = p.fetch(client(text=page()), SEARCH, 1)
+    assert p.meta(jobs[0], None)["published_at"] == "2026-09-23T00:00:00+08:00"
+    assert p.meta(jobs[0], None)["published_at_kind"] == "refresh"
+    assert p.meta(jobs[1], None)["published_at"] is None and p.meta(jobs[1], None)["published_at_kind"] == "unknown"
+    assert all("aae004" not in j and "aae005" not in j for j in jobs)        # fixture carries both on job 1
+
+
+def test_mohrss_city_and_nationwide_area():
+    seen = []
+    Mohrss().fetch(client(text=page(), seen=seen), {"keyword": "x", "city": "杭州市"}, 1)
+    Mohrss().fetch(client(text=page(), seen=seen), SEARCH, 1)
+    assert seen[0].url.params["AREA"] == "330100"
+    assert seen[1].url.params["AREA"] == ""       # always sent: the server session is sticky
+
+
+def test_mohrss_findjoblist_must_be_a_list_of_objects():
+    with pytest.raises(StructureError):
+        Mohrss().fetch(client(text='name="findjoblist" value="[1, 2]"'), SEARCH, 1)
+
+
+def test_bytedance_city_goes_to_location_code_list():
+    seen = []
+    Bytedance().fetch(client(fx("bytedance_list.json"), seen=seen), {**SEARCH, "city": "杭州"}, 0)
+    assert json.loads(seen[0].content) == {"keyword": "算法", "limit": 20, "offset": 0, "location_code_list": ["CT_52"]}
 
 
 def test_bytedance_happy_and_mapping():
@@ -95,10 +123,11 @@ def test_bytedance_happy_and_mapping():
     p = Bytedance()
     jobs = p.fetch(client(fx("bytedance_list.json"), seen=seen), SEARCH, 2)
     assert json.loads(seen[0].content) == {"keyword": "算法", "limit": 20, "offset": 40}
-    assert [p.job_id(j) for j in jobs] == ["7001", "7002"]
-    assert p.row(jobs[0], None) == {"title": "后端工程师", "company": "字节跳动", "city": "北京",
+    assert [p.job_id(j) for j in jobs] == ["7001", "7002", "7003"]
+    assert p.row(jobs[0], None) == {"title": "后端工程师", "company": "字节跳动", "city": "北京、杭州",
                                     "salary_text": None, "description": "岗位职责 A\n\n任职要求 B"}
     assert p.row(jobs[1], None)["city"] is None and p.row(jobs[1], None)["description"] is None
+    assert p.row(jobs[2], None)["city"] == "杭州"       # no city_list: fall back to city_info
     m = p.meta(jobs[0], None)
     assert m["source_url"] == "https://joinbytedance.com/search/7001"
     assert m["published_at"] == "2023-11-14T22:13:20+00:00" and m["published_at_kind"] == "original"

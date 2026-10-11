@@ -84,7 +84,7 @@ def test_yupao_failures():
         y.fetch(client({"code": 5, "message": "bad sign"}), {"keyword": "x"}, 1)
     with pytest.raises(StructureError):
         y.fetch(client({"code": 0, "data": {}}), {"keyword": "x"}, 1)
-    with pytest.raises(StructureError, match="unsupported city"):
+    with pytest.raises(ValueError, match="暂不支持城市"):
         y.fetch(client({"code": 0, "data": {"list": []}}), {"keyword": "x", "city": "火星"}, 1)
     with pytest.raises(StructureError):
         y.job_id({})
@@ -100,7 +100,7 @@ J51_DETAIL = {"detailJobInfo": {"jobDescribe": "做账"}}
 def test_job51_happy_url_signed_and_mapping():
     seen = []
     body = {"status": "1", "resultbody": {"job": {"items": [J51]}}}
-    assert Job51().fetch(client(body, seen=seen), {"keyword": "会计", "city": "上海"}, 2) == [J51]
+    assert Job51().fetch(client(body, seen=seen), {"keyword": "会计", "city": "上海市"}, 2) == [J51]
     req = seen[0]
     assert req.headers["sign"] and req.headers["From-Domain"] == "51job_weixin_wxapp"
     assert req.url.params["jobArea"] == "020000" and req.url.params["pageNum"] == "2"
@@ -146,6 +146,12 @@ def test_job58_happy_cursor_and_mapping():
     assert p.meta(J58, None)["published_at_kind"] == "unknown"
 
 
+def test_job58_shares_the_58_group_city_ids_with_ganji():
+    seen = []
+    Job58().fetch(client({"code": 0, "data": {"searchList": []}}, seen=seen), {"keyword": "x", "city": "西安"}, 1)
+    assert seen[0].url.params["cityId"] == "483"        # verified live: xa.58.com
+
+
 def test_job58_detail_signed_and_failures():
     p, seen = Job58(), []
     assert p.detail(client({"code": 1, "data": J58_DETAIL}, seen=seen), J58) == J58_DETAIL
@@ -154,9 +160,9 @@ def test_job58_detail_signed_and_failures():
         p.detail(client({"code": 4}), J58)
     with pytest.raises(Blocked):
         p.detail(client(text="<!DOCTYPE html><html>"), J58)
-    with pytest.raises(ValueError, match="city"):
+    with pytest.raises(ValueError, match="必须指定城市"):
         p.fetch(client({}), {"keyword": "x"}, 1)
-    with pytest.raises(StructureError, match="unsupported city"):
+    with pytest.raises(ValueError, match="暂不支持城市「火星」"):
         p.fetch(client({}), {"keyword": "x", "city": "火星"}, 1)
     assert p.fetch(client({"code": 0, "data": {"illegal": 0}}), {"keyword": "x", "city": "北京"}, 1) == []
     with pytest.raises(Blocked):
@@ -168,7 +174,9 @@ def test_job58_detail_signed_and_failures():
 # ---- ganji ----
 GJ = {"_synthetic": True, "infoId": 8, "title": "销售", "enterpriseName": "丁", "area": "房山", "salary": "8000元",
       "weappQuery": {"listName": "yewu", "localName": "bj"}}
-GJ_RESULT = {"info": [{"position_publisher_area_v1": [{"position_desc": {"text": "卖货"}}]}]}
+GJ_SHARE = "https://h5.example/m-position-share/index.html?infoid=8"
+GJ_RESULT = {"info": [{"position_publisher_area_v1": [{"position_desc": {"text": "卖货"}}]}],
+             "other": {"share": {"data": {"url": GJ_SHARE}}}}
 
 
 def test_ganji_happy_and_mapping():
@@ -180,8 +188,10 @@ def test_ganji_happy_and_mapping():
     assert p.detail(client({"status": "0", "result": GJ_RESULT}), GJ) == GJ_RESULT
     assert p.row(GJ, GJ_RESULT) == {"title": "销售", "company": "丁", "city": "房山", "salary_text": "8000元",
                                     "description": "卖货"}
-    assert p.meta(GJ, None) == {"source_url": "https://gj.58.com/job/detail/yewu/8", "apply_url": "https://gj.58.com/job/detail/yewu/8",
-                                "published_at": None, "published_at_kind": "unknown"}
+    # the detail path is a JSON API; the page a person can open is the share URL the detail response carries
+    assert p.meta(GJ, GJ_RESULT) == {"source_url": GJ_SHARE, "apply_url": GJ_SHARE,
+                                     "published_at": None, "published_at_kind": "unknown"}
+    assert p.meta(GJ, None)["source_url"] is None
 
 
 def test_ganji_failures():
@@ -195,8 +205,10 @@ def test_ganji_failures():
         p.fetch(client({"code": 4}), pl, 1)
     with pytest.raises(StructureError):
         p.fetch(client({"code": 0, "data": {}}), pl, 1)
-    with pytest.raises(ValueError, match="city"):
+    with pytest.raises(ValueError, match="必须指定城市"):
         p.fetch(client({}), {"keyword": "x"}, 1)
+    with pytest.raises(ValueError, match="暂不支持城市"):   # 合肥 has no 58-group id
+        p.fetch(client({}), {"keyword": "x", "city": "合肥"}, 1)
     with pytest.raises(StructureError):  # status 0 but no JD block
         p.detail(client({"status": "0", "result": {"info": []}}), GJ)
     with pytest.raises(StructureError):
@@ -226,8 +238,10 @@ def test_missing_env_listing_and_crawl_start(conn, monkeypatch):
 
 
 def test_crawl_start_requires_city(conn):
-    with pytest.raises(ValueError, match="city"):
+    with pytest.raises(ValueError, match="必须指定城市"):
         service.crawl_start(conn, "job58", keyword="x")
+    with pytest.raises(ValueError, match="暂不支持城市"):
+        service.crawl_start(conn, "job58", keyword="x", city="火星")
     assert service.crawl_start(conn, "job58", keyword="x", city="北京")["task_id"]
 
 

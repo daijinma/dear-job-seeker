@@ -4,7 +4,8 @@ Zero hits remove the whole list container and write no empty-state text, so "0 r
 cannot tell "really empty" from "redirected / layout changed". Only when BOTH skeleton
 anchors (present on empty and non-empty pages) exist is 0 rows a valid empty.
 The site caps at 400 results (20 pages); beyond that it silently falls back to page 1,
-hence page_cap=20. City is a Chinese name passed as `workplace`.
+hence page_cap=20. City is the short Chinese name passed as `workplace` ("杭州"; "杭州市" or an unknown
+name returns 0 rows, never a nationwide list).
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ class Ciic(Provider):
     label = "中智招聘"
     kind = "keyword"
     auth = "public"
+    city_filter = "server"
     interval = 3.0
     jitter = 1.0
     min_interval = 1.5
@@ -45,8 +47,8 @@ class Ciic(Provider):
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         params = {"page": page, "keyword": payload["keyword"]}
-        if payload.get("city"):
-            params["workplace"] = payload["city"]
+        if city := self.city_code(payload.get("city")):
+            params["workplace"] = city
         r = client.get(f"{BASE}/position/list", params=params, headers={"User-Agent": UA})
         check_http(r)
         missing = [a for a in SKELETON if a not in r.text]

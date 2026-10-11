@@ -6,8 +6,7 @@ maps to Blocked (cooldown + retry) and never sends the user into a login loop. E
 """
 from __future__ import annotations
 
-from djs.providers.base import (Blocked, LoginRequired, Provider, StructureError,
-                                get_json, need)
+from djs.providers.base import Blocked, LoginRequired, Provider, get_json, need
 
 BASE = "https://www.zhipin.com"
 SEARCH_URL = BASE + "/wapi/zpgeek/search/joblist.json"
@@ -20,26 +19,7 @@ HEADERS = {
     "Origin": BASE,
     "X-Requested-With": "XMLHttpRequest",
 }
-NATIONWIDE = "100010000"
-
-# Subset of the 373-entry table in rpa-client boss/city_codes.go (names without 市).
-CITY_CODES = {
-    "北京": "101010100", "上海": "101020100", "广州": "101280100", "深圳": "101280600",
-    "杭州": "101210100", "成都": "101270100", "武汉": "101200100", "南京": "101190100",
-    "西安": "101110100", "苏州": "101190400", "长沙": "101250100", "郑州": "101180100",
-    "东莞": "101281600", "青岛": "101120200", "沈阳": "101070100", "宁波": "101210400",
-    "厦门": "101230200", "合肥": "101220100", "济南": "101120100", "福州": "101230100",
-    "无锡": "101190200", "佛山": "101280800", "大连": "101070200", "珠海": "101280700",
-    "昆明": "101290100", "天津": "101030100", "重庆": "101040100",
-}
-
-
-def city_code(city: str | None) -> str:
-    if not city:
-        return NATIONWIDE
-    if city not in CITY_CODES:
-        raise StructureError(f"unknown Boss city {city!r}; known: {', '.join(CITY_CODES)}")
-    return CITY_CODES[city]
+NATIONWIDE = "100010000"                 # Boss's own "全国" city code; city codes live in djs.cities
 
 
 def check_body(d: dict) -> dict:
@@ -58,6 +38,7 @@ class Boss(Provider):
     kind = "keyword"
     auth = "login"
     requires_city = False
+    city_filter = "server"
     interval = 6.0
     jitter = 2.0
     min_interval = 4.0
@@ -67,7 +48,7 @@ class Boss(Provider):
     note = "Needs your own QR login (login tool). Personal account: ban risk, keep the default pace."
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
-        params = {"query": payload["keyword"], "city": city_code(payload.get("city")),
+        params = {"query": payload["keyword"], "city": self.city_code(payload.get("city")) or NATIONWIDE,
                   "page": page, "pageSize": self.page_size, "scene": 1}
         zp = check_body(get_json(client.get(SEARCH_URL, params=params, headers=HEADERS)))
         return need(zp, "jobList", typ=list)

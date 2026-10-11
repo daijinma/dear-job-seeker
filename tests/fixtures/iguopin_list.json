@@ -1,5 +1,4 @@
-{"_synthetic": true, "code": 200, "msg": "OK", "data": {"total": 2, "page": 1, "page_size": 20, "list": [
- {"job_id": "j1", "job_name": "护士", "company_name": "示例医院", "contents": "【工作职责】护理",
-  "district_list": [{"area_cn": "北京-东城区"}], "is_negotiable": false, "wage_unit": "11jNfoC",
-  "min_wage": 8000, "max_wage": 12000, "refresh_time": "2026-09-12 10:00:00"},
- {"job_id": 2, "job_name": "面议岗", "company_name": "示例公司", "is_negotiable": true, "district_list": []}]}}
+{"_synthetic": true, "code": 200, "msg": "OK", "data": {"total": 3, "page": 1, "page_size": 20, "list": [
+ {"job_id": "j1", "job_name": "护士", "company_name": "示例医院", "contents": "【工作职责】护理", "district_list": [{"area_cn": "北京"}, {"area_cn": "杭州-西湖区"}], "is_negotiable": false, "wage_unit": "11jNfoC", "wage_unit_cn": "元/月", "months": 14, "min_wage": 8000, "max_wage": 12000, "refresh_time": "2026-09-12 10:00:00"},
+ {"job_id": 2, "job_name": "面议岗", "company_name": "示例公司", "is_negotiable": true, "district_list": []},
+ {"job_id": 3, "job_name": "日薪岗", "company_name": "示例公司", "is_negotiable": false, "wage_unit_cn": "元/天", "months": 12, "min_wage": 101, "max_wage": 150, "district_list": [{"area_cn": "杭州"}]}]}}
