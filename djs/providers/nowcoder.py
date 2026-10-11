@@ -34,7 +34,8 @@ class NowCoder(Provider):
     URL = "https://www.nowcoder.com/np-api/u/job/search"
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
-        form = {"query": payload["keyword"], "page": page, "pageSize": self.page_size}
+        # the site answers 0 rows for any query containing a space ("Python 开发" -> 0, "Python开发" -> 4 in 杭州)
+        form = {"query": "".join(payload["keyword"].split()), "page": page, "pageSize": self.page_size}
         if city := self.city_code(payload.get("city")):
             form["jobCity"] = city
         r = client.post(self.URL, data=form,

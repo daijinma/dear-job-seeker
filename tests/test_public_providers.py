@@ -220,3 +220,10 @@ def test_split_places_keeps_every_city_and_every_district_once():
 def test_district_of_skips_the_city_label():
     assert district_of("西湖区·翠苑", "杭州") == "西湖区" and district_of("杭州·余杭", "杭州") == "余杭"
     assert district_of("余杭", "杭州") == "余杭" and district_of("杭州", "杭州") is None and district_of(None, None) is None
+
+
+def test_nowcoder_query_has_no_spaces():
+    """The site answers 0 rows for a query containing a space; the provider joins the words."""
+    seen = []
+    NowCoder().fetch(client({"code": 0, "data": {"datas": []}}, seen=seen), {"keyword": "Python  开发 \t后端"}, 1)
+    assert parse_qs(seen[0].content.decode())["query"] == ["Python开发后端"]
