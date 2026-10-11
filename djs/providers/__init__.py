@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import importlib
 
-_MODULES = {"nowcoder": "NowCoder", "iguopin": "Iguopin", "chinahr": "Chinahr", "boss": "Boss"}
+_MODULES = {"nowcoder": "NowCoder", "iguopin": "Iguopin", "chinahr": "Chinahr", "zhaopin": "Zhaopin",
+            "mohrss": "Mohrss", "ciic": "Ciic", "bytedance": "Bytedance", "boss": "Boss"}
 _cache: dict = {}
 
 

@@ -12,6 +12,7 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 class NowCoder(Provider):
     name = "nowcoder"
+    label = "牛客网"
     kind = "keyword"
     auth = "public"
     interval = 0.6

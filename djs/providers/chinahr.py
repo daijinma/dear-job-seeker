@@ -10,6 +10,7 @@ from .base import Provider, StructureError, get_json, need
 
 class Chinahr(Provider):
     name = "chinahr"
+    label = "新华英才"
     kind = "keyword"
     auth = "public"
     interval = 0.8

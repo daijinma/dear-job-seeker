@@ -85,6 +85,7 @@ def need(obj, *path, typ=list):
 
 class Provider:
     name: str = ""
+    label: str = ""                # display name shown to end users (UI), e.g. "牛客网"
     # ---- platform TYPE (two independent axes) ----
     kind: str = "keyword"          # 'keyword' (search by keyword[+city]) | 'tenant' (one company site per task)
     auth: str = "public"           # 'public' (no cookie) | 'login' (needs the user's own cookie from djs.auth)

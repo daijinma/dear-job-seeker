@@ -1,0 +1,4 @@
+{"_synthetic": true, "code": 0, "data": {"count": 2, "job_post_list": [
+  {"id": "7001", "title": "后端工程师", "description": "岗位职责 A", "requirement": "任职要求 B",
+   "city_info": {"name": "北京"}, "publish_time": 1700000000000},
+  {"id": 7002, "title": "产品经理", "description": "", "requirement": "", "city_info": null}]}}

@@ -17,6 +17,7 @@ WAGE_UNIT_MONTHLY = "11jNfoC"      # wage_unit code for yuan/month; other codes 
 
 class Iguopin(Provider):
     name = "iguopin"
+    label = "国聘"
     kind = "keyword"
     auth = "public"
     interval = 3.0

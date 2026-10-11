@@ -54,6 +54,7 @@ def check_body(d: dict) -> dict:
 
 class Boss(Provider):
     name = "boss"
+    label = "BOSS 直聘"
     kind = "keyword"
     auth = "login"
     requires_city = False

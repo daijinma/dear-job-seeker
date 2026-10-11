@@ -14,7 +14,7 @@ def provider_list(conn) -> list[dict]:
     for name in providers.names():
         p = providers.get(name)
         interval, jitter, max_pages = pacer.effective(conn, name)
-        d = {"name": name, "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
+        d = {"name": name, "label": p.label or name, "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
              "interval": interval, "jitter": jitter, "max_pages": max_pages,
              "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note}
         if p.auth == "login":
