@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from djs import auth, browser, cities
+from djs import auth, browser, cities, service
 from djs.jobs import derive
 from djs.normalize import missing
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
@@ -333,16 +333,16 @@ def test_anonymous_jobs_lack_only_the_salary_and_logged_in_ones_are_complete():
     assert (full["city"], full["district"], full["education"], full["experience"]) == ("北京", "海淀区", "本科", "3-5年")
 
 
-def test_an_anonymous_detail_cannot_complete_a_job_that_lacks_a_salary():
+def test_the_crawl_never_asks_boss_for_details_and_says_why_the_jd_is_missing():
+    """List-only (decision A21): Boss blanks the page an automation drives, so its detail calls mostly fail (F44), and a
+    failing detail pass was retried for hours against the user's account. No combination asks for the detail; the one a
+    user opens in the app is still fetched on demand (job_detail)."""
     b = Boss()
-    # anonymous: the detail has everything but the salary, so a job without one stays incomplete whatever is fetched
-    assert b.detail_can_fill(["salary"], False) is False
-    assert b.detail_can_fill(["salary", "description"], False) is False
-    assert b.detail_can_fill(["description"], False) is True    # a job that lacks only its JD is worth the request
-    assert b.detail_can_fill([], False) is True
-    # logged in, the detail carries the salary as well
-    assert b.detail_can_fill(["salary"], True) is True
-    assert b.detail_can_fill(["salary", "description"], True) is True
+    for missing_now in (["salary"], ["description"], ["salary", "description"], []):
+        for logged_in in (False, True):
+            assert b.detail_can_fill(missing_now, logged_in) is False
+    job = {"provider": "boss", "missing": "description", "salary_text": "15-25K", "detail_error": None, "detail_due": 0}
+    assert service.reasons(job, lambda name: True) == ["BOSS 暂时拿不到职位描述，可打开原页面查看"]
 
 
 class _PageGone(FakeBrowser):

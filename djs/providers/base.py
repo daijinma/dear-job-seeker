@@ -176,6 +176,9 @@ class Provider:
     home: str = ""                 # page the browser loads first so the site's own scripts write their anti-bot cookies
     # ---- login (auth 'optional' or 'login'); None = the platform has no login ----
     login: Login | None = None
+    # why a core element stays missing on this platform, in the user's words (e.g. {"description": "…"}); it wins over
+    # the generic "平台未提供…" reason. Read only.
+    missing_reasons: dict[str, str] = {}
     login_transport: str | None = None  # transport to use while logged in when the user has not chosen one
                                         # (e.g. 'browser': the logged-in endpoint only answers a real page)
 

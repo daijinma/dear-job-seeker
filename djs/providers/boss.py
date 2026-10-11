@@ -71,8 +71,9 @@ class Boss(Provider):
     page_cap = 5
     transports = ("browser",)
     needs_headed = True
-    note = ("Needs a real browser window (plain HTTP gets code 37). The salary shows only after login. "
-            "Keep the default pace: risk control hits the account and the IP for hours.")
+    note = ("Needs a real browser window (plain HTTP gets code 37). The salary shows only after login. List-only for "
+            "now: job descriptions are not fetched by the crawl. Keep the default pace: risk control hits the account "
+            "and the IP for hours.")
     login = Login(url="https://www.zhipin.com/web/user/?ka=bticket", method="qr", domain="zhipin.com",
                   cookies_any=("wt2", "zp_at"), unlocks="能看到薪资")
 
@@ -113,9 +114,14 @@ class Boss(Provider):
         need(zp, "jobInfo", typ=dict)
         return zp
 
+    missing_reasons = {"description": "BOSS 暂时拿不到职位描述，可打开原页面查看"}
+
     def detail_can_fill(self, missing: list[str], logged_in: bool) -> bool:
-        """Anonymous details have no salary either (the page hides it), so a job that lacks one cannot be completed."""
-        return logged_in or "salary" not in missing
+        """List-only for now (decision A21): Boss blanks a page an automation drives, so the detail call made after the
+        list mostly fails (F44), and each failure cooled the site down and retried the task for hours against the
+        user's account. The crawl never asks; a detail the user opens in the app is still fetched on demand. 1.3.0's
+        experiment E1 decides whether details come back."""
+        return False
 
     def meta(self, job: dict, detail: dict | None) -> dict:
         # lastLoginTime is the recruiter's activity, not a posting date: leave published_at unknown.

@@ -181,7 +181,15 @@ def _why(job: dict, element: str, logged_in, completing: bool) -> str:
         return "详情获取失败"
     if completing:
         return "正在补全详情"
-    return f"平台未提供{CORE[element]}"
+    return _platform_says(job["provider"], element) or f"平台未提供{CORE[element]}"
+
+
+def _platform_says(provider: str, element: str) -> str | None:
+    """The platform's own words for an element it leaves out (Provider.missing_reasons); None for a removed platform."""
+    try:
+        return providers.get(provider).missing_reasons.get(element)
+    except KeyError:
+        return None
 
 
 def reasons(job: dict, logged_in=None) -> list[str]:

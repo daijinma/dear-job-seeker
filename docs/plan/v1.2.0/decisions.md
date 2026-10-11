@@ -25,6 +25,7 @@ Decisions taken without a round-trip are marked `assumed:` and can be reversed.
 | A18 | assumed: the app also preselects the sites that need a city (58同城, 赶集) and uses them only when a city is filled in; a site that cannot take a search is skipped and named instead of refusing the whole search (amends A9) | a typed city should reach every site that covers it, and one uncovered city must not cost the other sites |
 | A19 | assumed: the login window is a plain browser window (the user's Chrome / Edge started as a normal program), read only at the browser level; crawling stays on Playwright | BOSS and 猎聘 blank any page Playwright drives (F36) |
 | A20 | assumed (user: 先完成初版再上传): 1.2.0 ships with Playwright; 1.3.0 replaces it with the browser-level CDP client the login window already uses | Playwright's Node.js driver is 65–70% of every download (Windows 107 of 166 MB, macOS 136–139 of 195–201 MB unpacked); without it ≈ 60 MB unpacked, ≈ 25–30 MB zipped |
+| A21 | assumed: BOSS is crawled list-only until 1.3.0's experiment says otherwise: no detail calls by the crawl; its jobs give the reason "BOSS 暂时拿不到职位描述，可打开原页面查看"; a job opened in the app still fetches its detail on demand | the detail calls mostly failed (F44) and each failure cooled the site down and retried the task, for hours, against the user's own account |
 
 ## Findings from driving the real app (Peekaboo on the native window, fresh data folder)
 | # | Finding | Status |
@@ -117,3 +118,4 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F53 | Same run: status() showed no last_error for platforms whose tasks were failing and waiting to retry | fixed (retrying tasks report their reason and retry time) |
 | F54 | Same run: nothing showed that all traffic went through a proxy | fixed (status `exits`: the pool, masked, with what rests) |
 | F55 | 30-minute run of the workers with a search every 5 min (6 searches, 72 tasks, 1227 jobs): memory 30–86 MB without a trend, 15 threads and 83–87 open files throughout, no browser left, clean stop on Ctrl-C, nothing stuck | ok |
+| F56 | 1.2.2 still retried a failing BOSS detail pass up to 8 times over hours, each time loading the list again under the user's account | fixed in 1.2.3 (A21: list-only) |
