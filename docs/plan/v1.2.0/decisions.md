@@ -116,3 +116,4 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F52 | MCP host with the network down (every exit on a dead proxy): it named the cause (connection refused on all 12 sites, check the proxy) in 6 turns and made nothing up; but wait_for_search said "done" while every site was retrying | fixed (search status `retrying`; `done` = every site finished) |
 | F53 | Same run: status() showed no last_error for platforms whose tasks were failing and waiting to retry | fixed (retrying tasks report their reason and retry time) |
 | F54 | Same run: nothing showed that all traffic went through a proxy | fixed (status `exits`: the pool, masked, with what rests) |
+| F55 | 30-minute run of the workers with a search every 5 min (6 searches, 72 tasks, 1227 jobs): memory 30–86 MB without a trend, 15 threads and 83–87 open files throughout, no browser left, clean stop on Ctrl-C, nothing stuck | ok |
