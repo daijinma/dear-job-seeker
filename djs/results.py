@@ -86,12 +86,14 @@ _ERRORS = (  # (kind, pattern on the raw error text, what the user reads); the f
     ("closed", r"登录窗口被关闭", "登录窗口被关掉了，请再试一次"),
     ("login", r"LoginRequired|login required|未登录", "需要先登录"),
     ("timeout", r"秒内没有登录成功", "等了三分钟还没有登录成功，请再试一次"),
-    ("blocked", r"Blocked|\b(?:403|429)\b|code[ =:]*37\b|limiting requests|cooling down", "被网站暂时限制，稍后再试"),
+    ("blocked", r"Blocked|\b(?:403|429)\b|code[ =:]*37\b|limiting requests", "被网站暂时限制，稍后再试"),
     ("city", r"暂不支持城市", "这个网站暂时不支持这个城市"),
     ("city", r"必须指定城市|city is required", "这个网站需要先填写城市"),
     ("structure", r"StructureError|ParseError", "网站页面变了，暂时读不出来"),
     ("network", r"timeout|timed out|ConnectError|NetworkError|ConnectionError|ReadError|RemoteProtocolError|net::ERR",
      "网络不通，稍后再试"),
+    # the exits rest after errors; the error that made them rest comes first in the text when it is known (engine)
+    ("cooling", r"cooling down", "这个网站刚才连续出错，正在歇一会儿"),
 )
 _OTHER = ("other", "没成功，可以稍后重试")
 

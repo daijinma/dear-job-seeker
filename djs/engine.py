@@ -13,6 +13,7 @@ import httpx
 from djs import auth, browser, cities, db, egress, jobs, pacer, providers, taskqueue
 from djs.providers.base import Blocked, Delisted, FetchError, LoginRequired
 
+REST_MARK = " | then: "   # joins the cause and the cooldown in last_error
 NO_EGRESS_DELAY = 60
 POLL_SECONDS = 1
 ERROR_BACKOFF = 5
@@ -177,6 +178,13 @@ def _crawl(conn, run, prov, client, payload, max_pages) -> dict:
     return {**stats, **jobs.tally(conn, run.id)}
 
 
+def _resting(task, e: Exception) -> str:
+    """The error to keep while the exits rest: the one that made them rest (the task's last) in front of the rest
+    itself, so a dead proxy reads as a network problem and a block as a block, not both as "the site limits us"."""
+    cause = (task["last_error"] or "").split(REST_MARK)[0]
+    return f"{cause}{REST_MARK}{e}" if cause and "cooling down" not in cause else str(e)
+
+
 def run_task(conn, task) -> None:
     run = _run_of(task)
     prov = providers.get(task["provider"])
@@ -192,7 +200,7 @@ def run_task(conn, task) -> None:
     except browser.BrowserUnavailable as e:  # retrying cannot install Playwright or start the user's Chrome
         return taskqueue.dead(conn, run.who, str(e))
     except egress.NoEgressAvailable as e:  # also a busy browser profile: try again later, attempt not burned
-        return taskqueue.release(conn, run.who, str(e), NO_EGRESS_DELAY)
+        return taskqueue.release(conn, run.who, _resting(task, e), NO_EGRESS_DELAY)
     except (FetchError, httpx.HTTPError) as e:
         if _login_expired(prov, e):
             return taskqueue.waiting_login(conn, run.who)

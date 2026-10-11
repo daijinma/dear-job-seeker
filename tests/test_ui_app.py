@@ -219,7 +219,7 @@ def test_job_detail_fetches_once_when_nothing_is_stored_and_speaks_chinese_on_fa
             raise ValueError(message)
         return fn
     for message, shown in (("nowcoder is limiting requests right now; try again later", "被网站暂时限制，稍后再试"),
-                           ("all egress for nowcoder are cooling down", "被网站暂时限制，稍后再试"),
+                           ("all egress for nowcoder are cooling down", "这个网站刚才连续出错，正在歇一会儿"),   # cause unknown here: no blame
                            ("nowcoder: login required; log in and try again", "需要先登录"),
                            ("nowcoder: could not load the detail (ConnectError: x)", "网络不通，稍后再试"),
                            ("job 99 not found", "没成功，可以稍后重试")):

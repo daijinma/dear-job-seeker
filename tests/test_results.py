@@ -310,7 +310,9 @@ def test_plain_text_leaves_nothing_that_could_run_as_markup():
     ("Blocked: HTTP 403", "blocked", "被网站暂时限制，稍后再试"),
     ("HTTP 429", "blocked", "被网站暂时限制，稍后再试"),
     ("Blocked: Boss code=37 environment abnormal", "blocked", "被网站暂时限制，稍后再试"),
-    ("all egress for nowcoder are cooling down", "blocked", "被网站暂时限制，稍后再试"),
+    ("all egress for nowcoder are cooling down", "cooling", "这个网站刚才连续出错，正在歇一会儿"),
+    ("ConnectError: [Errno 61] Connection refused | then: all egress for nowcoder are cooling down", "network", "网络不通，稍后再试"),
+    ("Blocked: Boss code=37 | then: all egress for boss are cooling down", "blocked", "被网站暂时限制，稍后再试"),
     ("nowcoder is limiting requests right now; try again later", "blocked", "被网站暂时限制，稍后再试"),
     ("LoginRequired: HTTP 401", "login", "需要先登录"),
     ("login required", "login", "需要先登录"),
@@ -402,3 +404,14 @@ def test_requeue_restarts_dead_and_login_blocked_tasks_only(conn):
     assert taskqueue.claim(conn)["id"] == dead   # and the queue picks them up again
     with pytest.raises(ValueError):
         taskqueue.requeue(conn, ["x"])
+
+
+def test_a_resting_exit_keeps_the_error_that_made_it_rest():
+    """A dead proxy made every site "被网站暂时限制" in a live run: the exits rested after connection errors and the
+    rest replaced the cause. The cause now stays in front, once, and decides the wording."""
+    from djs import egress, engine
+    cause, rest = "ConnectError: [Errno 61] Connection refused", egress.NoEgressAvailable("all egress for a are cooling down")
+    kept = engine._resting({"last_error": cause}, rest)
+    assert kept == f"{cause}{engine.REST_MARK}{rest}" and results.classify(kept)[0] == "network"
+    assert engine._resting({"last_error": kept}, rest) == kept            # the next rest does not stack
+    assert engine._resting({"last_error": None}, rest) == str(rest)      # nothing known before it: the rest alone
