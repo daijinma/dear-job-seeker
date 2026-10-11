@@ -61,7 +61,7 @@ def test_class_attrs():
 
 
 # ---- yupao ----
-YP = {"_synthetic": True, "jobBizId": 77, "title": "<em>普工</em>", "address": "北京 丰台区",
+YP = {"_synthetic": True, "jobBizId": 77, "jobId": 4242, "title": "<em>普工</em>", "address": "北京 丰台区",
       "sortTime": "2026-09-14 16:20:32", "detail": "招普工", "showPerfect": {"salary": "4000元/月"},
       "companyInfo": {"enterpriseName": "甲"}, "areaInfo": {"cityName": "北京", "countyName": "丰台区"},
       "showTags": [{"name": "4000元/月", "type": 1}, {"name": "经验不限", "type": 15}, {"name": "大专", "type": 17}]}
@@ -80,8 +80,9 @@ def test_yupao_happy_headers_and_mapping():
                                "description": "招普工"}
     bare = p.row({"title": "x", "address": "上海", "areaInfo": {"cityName": "上海", "countyName": ""}}, None)
     assert (bare["city"], bare["district"], bare["education"], bare["experience"]) == ("上海", None, None, None)
-    assert p.meta(YP, None) == {"source_url": None, "apply_url": None,
+    assert p.meta(YP, None) == {"source_url": "https://www.yupao.com/zhaogong/4242.html", "apply_url": None,
                                 "published_at": "2026-09-14T16:20:32+08:00", "published_at_kind": "refresh"}
+    assert p.meta({"jobId": None}, None)["source_url"] is None   # no id, no link (never a guessed one)
 
 
 def test_yupao_failures():

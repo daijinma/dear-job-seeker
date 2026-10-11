@@ -4,7 +4,8 @@ Anonymous access works (empty token/uid). Signing: see _yupao_sign. A non-JSON /
 treated as Blocked (Aliyun WAF challenge page), a non-zero business code as StructureError with the
 package version in the text so a rotated salt is easy to spot. Page size is fixed ~15 by the server;
 the end is detected by short/empty page, page_cap is only a runaway fuse (~500 results per query).
-The list has no original publish time (sortTime is a refresh/sort time), and there is no web URL.
+The list has no original publish time (sortTime is a refresh/sort time). A job's page on the web site is
+WEB_PAGE with its numeric jobId (jobBizId is the API's id).
 Education and experience are tags in `showTags` (type 17 and 15); the place is `areaInfo` (city + district).
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ from . import _yupao_sign as ys
 from .base import Blocked, Provider, StructureError, check_http, need
 
 URL = "https://yupao-prod.yupaowang.com/job/v2/search/job/search"
+WEB_PAGE = "https://www.yupao.com/zhaogong/{}.html"
 TAG_EXPERIENCE, TAG_EDUCATION = 15, 17     # showTags[].type
 
 
@@ -60,7 +62,9 @@ class Yupao(Provider):
     def meta(self, job: dict, detail: dict | None) -> dict:
         st = job.get("sortTime")
         at = f"{st.replace(' ', 'T')}+08:00" if st else None
-        return {"source_url": None, "apply_url": None, "published_at": at,
+        page_id = job.get("jobId")
+        url = WEB_PAGE.format(page_id) if str(page_id or "").isdigit() else None
+        return {"source_url": url, "apply_url": None, "published_at": at,
                 "published_at_kind": "refresh" if at else "unknown"}
 
     def row(self, job: dict, detail: dict | None) -> dict:
