@@ -2,7 +2,7 @@
 platform, search, task, completeness), each job once with the best record kept, and the other platforms it is on."""
 import pytest
 
-from djs import db, query, taskqueue
+from djs import db, query
 from provider_fakes import job, task
 
 

@@ -33,11 +33,14 @@ def set_frequency(conn, provider: str, interval=None, jitter=None, max_pages=Non
     return {"provider": provider, "interval": i, "jitter": j, "max_pages": m}
 
 
-def transport(conn, provider: str) -> str:
-    """How the platform is captured: the user's override while the provider still supports it, else its default."""
+def transport(conn, provider: str, session: bool = False) -> str:
+    """How the platform is captured: the user's own choice (set_transport) while the platform still supports it, else,
+    while a login `session` exists, the transport logged-in crawling needs (login_transport), else its first."""
     prov = providers.get(provider)
     row = conn.execute("SELECT transport FROM provider_settings WHERE provider=?", (provider,)).fetchone()
-    return row["transport"] if row and row["transport"] in prov.transports else prov.transports[0]
+    if row and row["transport"] in prov.transports:
+        return row["transport"]
+    return prov.login_transport if session and prov.login_transport in prov.transports else prov.transports[0]
 
 
 def set_transport(conn, provider: str, transport: str | None = None) -> dict:

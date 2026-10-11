@@ -164,17 +164,17 @@ def test_a_login_platform_waits_for_its_session_and_then_runs_with_it(env):
 
 
 # ============================================================ the transport made for logged-in crawling
-def test_transport_for_is_the_choice_else_the_login_one_else_the_first(env):
-    late, c = env.provs["late"], env.conn
-    assert engine.transport_for(c, late, False) == "http" and engine.transport_for(c, late, True) == "browser"
+def test_transport_is_the_choice_else_the_login_one_else_the_first(env):
+    c = env.conn
+    assert pacer.transport(c, "late", False) == "http" and pacer.transport(c, "late", True) == "browser"
     pacer.set_transport(c, "late", "http")   # the user chose, and a choice is a choice even if it is the default
-    assert engine.transport_for(c, late, True) == "http"
+    assert pacer.transport(c, "late", True) == "http"
     pacer.set_transport(c, "late", "browser")
-    assert engine.transport_for(c, late, False) == "browser"
+    assert pacer.transport(c, "late", False) == "browser"
     pacer.set_transport(c, "late", None)
-    assert engine.transport_for(c, late, True) == "browser"   # cleared again
-    assert engine.transport_for(c, env.provs["unlisted"], True) == "http"   # a login transport it does not have is ignored
-    assert engine.transport_for(c, env.provs["plain"], True) == "http"      # none declared
+    assert pacer.transport(c, "late", True) == "browser"   # cleared again
+    assert pacer.transport(c, "unlisted", True) == "http"   # a login transport it does not have is ignored
+    assert pacer.transport(c, "plain", True) == "http"      # none declared
 
 
 def test_while_logged_in_the_engine_uses_the_login_transport_unless_the_user_chose(env, real_browser):

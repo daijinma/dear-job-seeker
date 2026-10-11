@@ -50,7 +50,7 @@ def provider_list(conn, logins: list[dict] | None = None) -> list[dict]:
         d = {"name": name, "label": providers.label(name), "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
              "interval": interval, "jitter": jitter, "max_pages": max_pages,
              "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note,
-             "transports": list(p.transports), "transport": engine.transport_for(conn, p, logged_in.get(name, False)),
+             "transports": list(p.transports), "transport": pacer.transport(conn, name, logged_in.get(name, False)),
              "needs_headed": p.needs_headed, "browser_ready": browser_ready, "cdp": cdp,
              "configured": not p.missing_env(), "missing_env": p.missing_env()}
         if name in logged_in:
@@ -69,7 +69,7 @@ def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=
         raise ValueError(f"{provider} needs environment variable(s) {', '.join(missing)}; "
                          "set them in the MCP client config env block (see README)")
     session = bool(prov.login_transport) and auth.logged_in(provider)  # only then does the login change the transport
-    if engine.transport_for(conn, prov, session) != "http" and not browser.ready():
+    if pacer.transport(conn, provider, session) != "http" and not browser.ready():
         raise ValueError(browser.INSTALL_HINT)  # the task would only die later with the same message
     payload = {k: v for k, v in (("keyword", keyword), ("city", city), ("tenant", tenant), ("max_pages", max_pages),
                                  ("detail", detail)) if v is not None}

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from djs import browser, cli, db, egress, engine, providers, server, service, taskqueue
+from djs import browser, cli, db, egress, engine, pacer, providers, server, service, taskqueue
 from djs.providers.base import Login, Provider, get_json, need
 from provider_fakes import job, task
 
@@ -142,10 +142,10 @@ def test_a_search_that_cannot_start_everywhere_starts_nowhere_and_says_why(env):
 def test_a_worker_committing_while_a_search_starts_does_not_fail_it(env):
     """The tasks of a search are made in one transaction that reads before it writes. A deferred transaction fails at
     once with 'database is locked' when anything commits in between (a worker does, all the time): it must lock first."""
-    real = engine.transport_for
+    real = pacer.transport
 
-    def rival(conn, prov, session):
-        got = real(conn, prov, session)   # the read that opens the transaction's snapshot
+    def rival(conn, provider, session=False):
+        got = real(conn, provider, session)   # the read that opens the transaction's snapshot
         other = sqlite3.connect(db.home() / "djs.db", timeout=0.05)
         try:
             other.execute("INSERT INTO provider_settings(provider, interval) VALUES ('rival', 1)")
@@ -156,7 +156,7 @@ def test_a_worker_committing_while_a_search_starts_does_not_fail_it(env):
             other.close()
         return got
 
-    env.mp.setattr(engine, "transport_for", rival)
+    env.mp.setattr(pacer, "transport", rival)
     assert call("search", keyword="py", providers=["a", "b"])["task_ids"] == [1, 2]
 
 

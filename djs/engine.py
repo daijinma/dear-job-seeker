@@ -28,15 +28,6 @@ def _session(prov) -> bool:
     return prov.login is not None and auth.logged_in(prov.name)
 
 
-def transport_for(conn, prov, session: bool) -> str:
-    """How the platform is captured: the user's own choice (set_transport) if there is one, else, while a session
-    exists, the transport logged-in crawling needs (login_transport), else the platform's first."""
-    row = conn.execute("SELECT transport FROM provider_settings WHERE provider=?", (prov.name,)).fetchone()
-    if row and row["transport"] in prov.transports:
-        return row["transport"]
-    return prov.login_transport if session and prov.login_transport in prov.transports else prov.transports[0]
-
-
 @contextmanager
 def _open(transport: str, prov, exit_id: str, interval: float, jitter: float, cookies):
     """The client for a platform's transport: an httpx client, or a browser page that acts like one."""
@@ -57,7 +48,7 @@ def leased_client(conn, prov, key: str, payload: dict):
     session = _session(prov)
     if prov.auth == "login" and not session:
         raise LoginRequired(f"no login for {prov.name}")
-    transport = transport_for(conn, prov, session)
+    transport = pacer.transport(conn, prov.name, session)
     cookies = auth.load_cookies(prov.name) if session and transport == "http" else None
     exit_id = egress.lease(conn, prov.name, key)
     interval, jitter, _ = pacer.effective(conn, prov.name)
