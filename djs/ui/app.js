@@ -19,17 +19,23 @@ async function refresh() {
   const [p, t] = await Promise.all([api("GET /api/providers"), api("GET /api/tasks")]);
   S.providers = p.providers;
   S.providers.forEach((x) => { SITES[x.name] = x.label; });
-  S.picked ||= new Set(S.providers.filter((x) => x.auth === "public" && !x.requires_city).map((x) => x.name));
+  S.picked ||= new Set(S.providers.filter((x) => x.auth === "public" && x.configured !== false && !x.requires_city).map((x) => x.name));
   S.preset = p.preset || "steady";
   S.tasks = t.tasks;
 }
 
 /* ---------- 查找 ---------- */
+const provider = (k) => S.providers.find((p) => p.name === k) || {};
+const usable = (k) => provider(k).configured !== false && (k !== "boss" || loggedIn());
+
 function renderChips() {
   $("#chips").innerHTML = Object.entries(SITES).map(([k, name]) => {
+    const p = provider(k);
+    if (p.configured === false) return `<span class="chip off">${name} ${pill("未配置密钥", "gray")}</span>`;
     if (k === "boss" && !loggedIn())
       return `<span class="chip off">${name} ${pill("需要先登录", "warn")}</span><a data-act="login">去登录</a>`;
-    return `<button class="chip ${S.picked.has(k) ? "on" : ""}" data-act="pick" data-k="${k}">${S.picked.has(k) ? CHECK : ""}${name}</button>`;
+    const on = S.picked.has(k);
+    return `<button class="chip ${on ? "on" : ""}" data-act="pick" data-k="${k}">${on ? CHECK : ""}${name}${p.requires_city ? " " + pill("需填城市", "gray") : ""}</button>`;
   }).join("");
 }
 
@@ -70,7 +76,9 @@ async function pollSearch() {
 }
 
 async function startSearch() {
-  const picked = [...S.picked].filter((k) => k !== "boss" || loggedIn());
+  const picked = [...S.picked].filter(usable);
+  const needCity = picked.filter((k) => provider(k).requires_city).map((k) => SITES[k]);
+  if (needCity.length && !$("#city").value.trim()) { $("#msg").textContent = `${needCity.join("、")}需要先填写城市`; return; }
   try {
     await api("POST /api/crawl", { keyword: $("#kw").value, city: $("#city").value, providers: picked });
     $("#msg").textContent = "";

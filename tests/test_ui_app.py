@@ -14,7 +14,8 @@ def call(tmp_path, monkeypatch):
 
 
 def test_index_asset_and_unknown_route(call):
-    assert b"<title>" in ui_app.INDEX.read_bytes() and (ui_app.INDEX.parent / "app.js").exists()
+    html = ui_app.page()
+    assert "<title>" in html and "<style>" in html and "app.css" not in html and "app.js" not in html
     assert "error" in call("GET /api/nope")
 
 

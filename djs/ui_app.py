@@ -7,7 +7,16 @@ from pathlib import Path
 
 from djs import db, engine, ui_api
 
-INDEX = Path(__file__).with_name("ui") / "index.html"
+UI_DIR = Path(__file__).with_name("ui")
+
+
+def page() -> str:
+    """index.html with CSS/JS inlined, so the window needs no file URL and pywebview starts no internal HTTP server."""
+    html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+    css = (UI_DIR / "app.css").read_text(encoding="utf-8")
+    js = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    return html.replace('<link rel="stylesheet" href="app.css">', f"<style>{css}</style>").replace(
+        '<script src="app.js"></script>', f"<script>{js}</script>")
 
 
 class Api:
@@ -49,5 +58,5 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
     engine.start_worker()
     api = Api()
-    api._window = webview.create_window("找岗位助手", url=str(INDEX), js_api=api, width=1280, height=860, min_size=(960, 640))
+    api._window = webview.create_window("找岗位助手", html=page(), js_api=api, width=1280, height=860, min_size=(960, 640))
     webview.start()
