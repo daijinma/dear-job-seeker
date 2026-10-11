@@ -12,6 +12,7 @@ Providers never sleep: pacing is enforced by the egress client (djs.egress / djs
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -119,6 +120,22 @@ def need(obj, *path, typ=list):
     return o
 
 
+@dataclass(frozen=True)
+class Login:
+    """How the user logs in to a platform in a browser window on their own machine, and how we know it worked.
+    Success rules are checked on the cookies of `domain` / the window's URL; the first rule that is set decides."""
+    url: str                                # page opened in the login window
+    method: str                             # 'qr' (platform app scan) | 'wechat' (WeChat scan) | 'password' | 'sms'
+    domain: str                             # cookie domain to read and save, e.g. 'zhipin.com'
+    cookies_any: tuple[str, ...] = ()       # logged in when ANY of these cookies exists
+    cookies_all: tuple[str, ...] = ()       # logged in when ALL of these cookies exist
+    url_prefix: str = ""                    # logged in when the window lands on a URL starting with this
+    probe_url: str = ""                     # optional online check with the saved session (GET, must be 2xx) ...
+    probe_fail_text: str = ""               # ... and its body must not contain this text
+    unlocks: str = ""                       # one plain-Chinese line for the UI: what logging in improves
+    valid_days: int = 7                     # re-check age when the site gives no cookie expiry
+
+
 class Provider:
     name: str = ""
     label: str = ""                # display name shown to end users (UI), e.g. "牛客网"
@@ -145,6 +162,10 @@ class Provider:
                                               # a new tab of the user's own browser). First = default.
     needs_headed: bool = False     # True = the site refuses headless browsers, so the browser transport opens a window
     home: str = ""                 # page the browser loads first so the site's own scripts write their anti-bot cookies
+    # ---- login (auth 'optional' or 'login'); None = the platform has no login ----
+    login: Login | None = None
+    login_transport: str | None = None  # transport to use while logged in when the user has not chosen one
+                                        # (e.g. 'browser': the logged-in endpoint only answers a real page)
 
     def missing_env(self) -> list[str]:
         return [n for n in self.requires_env if not os.environ.get(n, "").strip()]
