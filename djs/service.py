@@ -5,7 +5,7 @@ import json
 
 import httpx
 
-from djs import auth, egress, engine, pacer, providers, taskqueue
+from djs import auth, browser, egress, engine, pacer, providers, taskqueue
 from djs.providers.base import Blocked, FetchError, LoginRequired
 
 JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, salary_text, description, source_url, "
@@ -17,15 +17,17 @@ def _label(prov) -> str:
 
 
 def provider_list(conn) -> list[dict]:
-    out = []
+    out, browser_ready, cdp = [], browser.ready(), browser.cdp_url() is not None
     for name in providers.names():
         p = providers.get(name)
         interval, jitter, max_pages = pacer.effective(conn, name)
         d = {"name": name, "label": _label(p), "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
              "interval": interval, "jitter": jitter, "max_pages": max_pages,
              "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note,
+             "transports": list(p.transports), "transport": pacer.transport(conn, name),
+             "browser_ready": browser_ready, "cdp": cdp,
              "configured": not p.missing_env(), "missing_env": p.missing_env()}
-        if p.auth == "login":
+        if p.auth != "public":
             d["logged_in"] = auth.status(name)["logged_in"]
         out.append(d)
     return out
@@ -37,6 +39,8 @@ def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=
     if missing:
         raise ValueError(f"{provider} needs environment variable(s) {', '.join(missing)}; "
                          "set them in the MCP client config env block (see README)")
+    if pacer.transport(conn, provider) != "http" and not browser.ready():
+        raise ValueError(browser.INSTALL_HINT)  # the task would only die later with the same message
     payload = {k: v for k, v in (("keyword", keyword), ("city", city), ("tenant", tenant), ("max_pages", max_pages),
                                  ("detail", detail)) if v is not None}
     return {"task_id": taskqueue.create(conn, provider, payload)}
@@ -87,11 +91,11 @@ def job_detail(conn, job_id: int) -> dict:
     prov = providers.get(job["provider"])
     item = json.loads(conn.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
     try:
-        with engine.leased_client(conn, prov, f"job:{job_id}") as client:
+        with engine.leased_client(conn, prov, f"job:{job_id}", {}) as client:
             detail, err = engine.fetch_detail(client, prov, item)
         if err:
             raise err
-    except egress.NoEgressAvailable as e:
+    except (egress.NoEgressAvailable, browser.BrowserUnavailable) as e:
         raise ValueError(str(e)) from e
     except (FetchError, httpx.HTTPError) as e:
         raise ValueError(_friendly(prov, e)) from e
@@ -128,7 +132,7 @@ def searches(conn, limit=20) -> list[dict]:
 
 
 def login(conn, provider) -> dict:
-    if providers.get(provider).auth != "login":
+    if providers.get(provider).auth == "public":
         raise ValueError(f"{provider} does not need login")
     status = auth.login(provider, timeout=180)
     resumed = taskqueue.resume_login(conn, provider) if status.get("logged_in") else 0
@@ -146,6 +150,10 @@ def logout(conn, provider) -> dict:
 
 def set_frequency(conn, provider, interval=None, jitter=None, max_pages=None, force=False) -> dict:
     return pacer.set_frequency(conn, provider, interval, jitter, max_pages, force)
+
+
+def set_transport(conn, provider, transport=None) -> dict:
+    return pacer.set_transport(conn, provider, transport)
 
 
 def egress_add(conn, url, provider="*") -> dict:

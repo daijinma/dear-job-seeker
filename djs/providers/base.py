@@ -113,7 +113,8 @@ class Provider:
     label: str = ""                # display name shown to end users (UI), e.g. "牛客网"
     # ---- platform TYPE (two independent axes) ----
     kind: str = "keyword"          # 'keyword' (search by keyword[+city]) | 'tenant' (one company site per task)
-    auth: str = "public"           # 'public' (no cookie) | 'login' (needs the user's own cookie from djs.auth)
+    auth: str = "public"           # 'public' (no cookie) | 'optional' (works anonymously, login unlocks more data,
+                                   # e.g. Boss salary) | 'login' (needs the user's own cookie from djs.auth)
     requires_city: bool = False    # True = no nationwide search; fetch() rejects missing city
     city_filter: str = "none"      # who applies payload['city']: 'server' = fetch() sends it to the site |
                                    # 'client' = the site cannot filter, the engine drops rows whose row()['city']
@@ -128,6 +129,11 @@ class Provider:
     enabled: bool = True
     note: str = ""                 # one-line platform caveat shown by provider_list
     requires_env: tuple[str, ...] = ()   # env vars holding signing keys (never shipped in the repo)
+    # ---- capture transport (user can override with set_transport) ----
+    transports: tuple[str, ...] = ("http",)   # 'http' (httpx) | 'browser' (a real Chromium page; DJS_CDP_URL makes it
+                                              # a new tab of the user's own browser). First = default.
+    needs_headed: bool = False     # True = the site refuses headless browsers, so the browser transport opens a window
+    home: str = ""                 # page the browser loads first so the site's own scripts write their anti-bot cookies
 
     def missing_env(self) -> list[str]:
         return [n for n in self.requires_env if not os.environ.get(n, "").strip()]
@@ -162,6 +168,11 @@ class Provider:
     def detail(self, client, job: dict) -> dict | None:
         """None = list item already is the detail (no second hop)."""
         return None
+
+    def warmup(self, client, payload: dict) -> None:
+        """Runs once after the client opens. A browser client loads `home` first; an http client has no goto."""
+        if self.home and hasattr(client, "goto"):
+            client.goto(self.home)
 
     def probe_payload(self) -> dict:
         raise NotImplementedError

@@ -34,6 +34,23 @@ def set_frequency(conn, provider: str, interval=None, jitter=None, max_pages=Non
     return {"provider": provider, "interval": i, "jitter": j, "max_pages": m}
 
 
+def transport(conn, provider: str) -> str:
+    """How the platform is captured: the user's override while the provider still supports it, else its default."""
+    prov = providers.get(provider)
+    row = conn.execute("SELECT transport FROM provider_settings WHERE provider=?", (provider,)).fetchone()
+    return row["transport"] if row and row["transport"] in prov.transports else prov.transports[0]
+
+
+def set_transport(conn, provider: str, transport: str | None = None) -> dict:
+    """Override how the platform is captured; None clears the override."""
+    prov = providers.get(provider)
+    if transport is not None and transport not in prov.transports:
+        raise ValueError(f"{provider} supports transport(s) {', '.join(prov.transports)}, not {transport!r}")
+    conn.execute("INSERT INTO provider_settings(provider, transport) VALUES (?,?) "
+                 "ON CONFLICT(provider) DO UPDATE SET transport=excluded.transport", (provider, transport))
+    return {"provider": provider, "transport": transport or prov.transports[0]}
+
+
 def wait(provider: str, egress_id: str, interval: float, jitter: float) -> None:
     """Serialize requests per (provider, egress): the lock file holds the last request time (wall clock,
     shared across processes); the lock is held while sleeping so waiters queue up."""

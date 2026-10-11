@@ -58,5 +58,6 @@ CREATE TABLE IF NOT EXISTS provider_settings (
   provider  TEXT PRIMARY KEY,
   interval  REAL,        -- NULL = use class default
   jitter    REAL,
-  max_pages INTEGER
+  max_pages INTEGER,
+  transport TEXT         -- NULL = the provider's first declared transport
 );

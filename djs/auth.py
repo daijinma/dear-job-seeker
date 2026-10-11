@@ -1,8 +1,8 @@
-"""Login cookies for providers with auth='login'.
+"""Login state for providers with auth='login' or 'optional'.
 
 Two halves, deliberately separate:
   cookie store  - save/load/invalidate/logout/status (plain files, no browser)
-  login flow    - login(): headful Playwright, user scans the QR code themselves
+  login flow    - login(): a headed browser page (djs.browser), the user scans the QR code themselves
 Cookie VALUES never leave this module except via load_cookies() (engine -> httpx client);
 they are never logged, and status() never returns them.
 """
@@ -14,7 +14,8 @@ import shutil
 import time
 from pathlib import Path
 
-from djs import db
+from djs import browser
+from djs.db import profile_dir  # the cookie store and the browser profile live in the same private directory
 
 LOGIN = {
     "boss": {
@@ -25,16 +26,8 @@ LOGIN = {
     },
 }
 
-# Hides the one automation tell Boss reads (wiki 29); without it the login page redirects away.
-_STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-_INSTALL_HINT = "Playwright/Chromium missing. Run: pip install playwright && playwright install chromium"
-
 
 # ---------------------------------------------------------------- cookie store
-
-def profile_dir(provider: str) -> Path:
-    return db.home() / "profiles" / provider
-
 
 def _cookie_file(provider: str) -> Path:
     return profile_dir(provider) / "cookies.json"
@@ -49,9 +42,7 @@ def _read(provider: str) -> dict | None:
 
 def _write(provider: str, state: dict) -> None:
     """Atomic: temp file created 0600 in the 0700 profile dir, then renamed over."""
-    d = profile_dir(provider)
-    d.mkdir(parents=True, exist_ok=True)
-    d.chmod(0o700)
+    d = profile_dir(provider, create=True)
     tmp = d / "cookies.json.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -86,23 +77,24 @@ def logout(provider: str) -> None:
     shutil.rmtree(profile_dir(provider), ignore_errors=True)
 
 
+def logged_in(provider: str) -> bool:
+    """A usable session. With DJS_CDP_URL the user's own browser decides (its cookies); otherwise our saved cookies."""
+    if not browser.cdp_url():
+        return load_cookies(provider) is not None
+    with browser.open_context(provider, headless=True) as ctx:
+        return bool(_auth_cookies(ctx.cookies(), LOGIN[provider]))
+
+
 def status(provider: str) -> dict:
     state = _read(provider)
-    return {
-        "logged_in": load_cookies(provider) is not None,
-        "saved_at": state.get("saved_at") if state else None,
-    }
+    try:
+        ok = logged_in(provider)
+    except browser.BrowserUnavailable:  # the attached browser is not reachable right now: cannot tell
+        ok = False
+    return {"logged_in": ok, "saved_at": state.get("saved_at") if state else None}
 
 
 # ------------------------------------------------------------------ login flow
-
-def _sync_playwright():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as e:
-        raise RuntimeError(_INSTALL_HINT) from e
-    return sync_playwright
-
 
 def _auth_cookies(browser_cookies: list[dict], cfg: dict) -> dict[str, str]:
     """Site cookies, but only if an auth cookie is among them (else {})."""
@@ -120,26 +112,9 @@ def _wait_for_login(ctx, cfg: dict, timeout: float) -> dict[str, str]:
     raise TimeoutError(f"login not completed within {timeout:.0f}s")
 
 
-def _open_context(pw, provider: str):
-    try:
-        ctx = pw.chromium.launch_persistent_context(
-            str(profile_dir(provider) / "browser"), headless=False, locale="zh-CN")
-    except Exception as e:  # playwright raises its own Error for a missing browser binary
-        raise RuntimeError(f"{_INSTALL_HINT} ({type(e).__name__})") from e
-    ctx.add_init_script(_STEALTH_JS)
-    return ctx
-
-
 def login(provider: str, timeout: float = 180) -> dict:
     cfg = LOGIN[provider]
-    sync_playwright = _sync_playwright()
-    profile_dir(provider).mkdir(parents=True, exist_ok=True)
-    profile_dir(provider).chmod(0o700)
-    with sync_playwright() as pw:
-        ctx = _open_context(pw, provider)
-        try:
-            (ctx.pages[0] if ctx.pages else ctx.new_page()).goto(cfg["url"])
-            save_cookies(provider, _wait_for_login(ctx, cfg, timeout))
-        finally:
-            ctx.close()
+    with browser.open_page(provider, headless=False) as page:  # same profile and flags as crawling
+        page.goto(cfg["url"])
+        save_cookies(provider, _wait_for_login(page.context, cfg, timeout))
     return status(provider)

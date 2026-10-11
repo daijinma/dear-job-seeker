@@ -59,8 +59,11 @@ class FakeAuth:
         self.invalidated.append(p)
         self.cookies = None
 
+    def logged_in(self, p):
+        return self.cookies is not None
+
     def status(self, p):
-        return {"logged_in": self.cookies is not None}
+        return {"logged_in": self.logged_in(p)}
 
     def login(self, p, timeout=180):
         self.cookies = {"s": "1"}

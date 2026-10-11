@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from contextlib import contextmanager
 
 import httpx
 
-from djs import auth, db, egress, pacer, providers, taskqueue
+from djs import auth, browser, db, egress, pacer, providers, taskqueue
 from djs.providers.base import Blocked, Delisted, FetchError, LoginRequired
 
 NO_EGRESS_DELAY = 60
 POLL_SECONDS = 1
+ERROR_BACKOFF = 5
 # jobs columns a provider derives from a list item (row) and its metadata (meta)
 FIELDS = ("title", "company", "city", "salary_text", "description", "source_url", "published_at", "published_at_kind")
 
@@ -33,16 +35,31 @@ def _login_expired(prov, exc) -> bool:
 
 
 @contextmanager
-def leased_client(conn, prov, key: str):
-    """Paced httpx client on a leased exit; login providers get their cookie attached. Reports the exit's health
-    afterwards. A dead login cookie is the cookie's fault, not the exit's, so it only invalidates the cookie."""
-    cookies = auth.load_cookies(prov.name) if prov.auth == "login" else None
-    if prov.auth == "login" and cookies is None:
+def _open(transport: str, prov, exit_id: str, interval: float, jitter: float, cookies):
+    """The client for a platform's transport: an httpx client, or a browser page that acts like one."""
+    if transport == "http":
+        with egress.make_client(exit_id, prov, interval, jitter, cookies) as client:
+            yield client
+    else:
+        with browser.open_browser(prov, exit_id, interval, jitter) as client:
+            yield client
+
+
+@contextmanager
+def leased_client(conn, prov, key: str, payload: dict):
+    """Paced client on a leased exit, over the platform's transport (httpx or browser). A 'login' provider needs a
+    live session first; 'optional' ones never wait for one (an http client still carries a saved cookie).
+    Reports the exit's health afterwards. A dead login is the login's fault, not the exit's, so it only
+    invalidates the cookie."""
+    transport = pacer.transport(conn, prov.name)
+    if prov.auth == "login" and not auth.logged_in(prov.name):
         raise LoginRequired(f"no login for {prov.name}")
+    cookies = auth.load_cookies(prov.name) if prov.auth != "public" and transport == "http" else None
     exit_id = egress.lease(conn, prov.name, key)
     interval, jitter, _ = pacer.effective(conn, prov.name)
     try:
-        with egress.make_client(exit_id, prov, interval, jitter, cookies) as client:
+        with _open(transport, prov, exit_id, interval, jitter, cookies) as client:
+            prov.warmup(client, payload)
             yield client
     except (FetchError, httpx.HTTPError) as e:
         if _login_expired(prov, e):
@@ -123,9 +140,11 @@ def run_task(conn, task) -> None:
     payload = json.loads(task["payload"])
     max_pages = payload.get("max_pages") or pacer.effective(conn, prov.name)[2]
     try:
-        with leased_client(conn, prov, str(task["id"])) as client:
+        with leased_client(conn, prov, str(task["id"]), payload) as client:
             stats = _crawl(conn, task["id"], prov, client, payload, max_pages)
-    except egress.NoEgressAvailable as e:
+    except browser.BrowserUnavailable as e:  # retrying cannot install Playwright or start the user's Chrome
+        return taskqueue.dead(conn, task["id"], str(e))
+    except egress.NoEgressAvailable as e:  # also a busy browser profile: try again later, attempt not burned
         return taskqueue.release(conn, task["id"], str(e), NO_EGRESS_DELAY)
     except (FetchError, httpx.HTTPError) as e:
         if _login_expired(prov, e):
@@ -152,11 +171,22 @@ _threads: dict[str, threading.Thread] = {}
 
 
 def _loop(provider: str) -> None:
-    conn = db.connect()
+    """Runs until stop_worker(). Any error (e.g. a locked database) means reconnect after a pause, never exit:
+    a worker that dies silently retires its platform for the rest of the session."""
+    conn = None
     while not _stop.is_set():
-        if not tick(conn, provider):
-            _stop.wait(POLL_SECONDS)
-    conn.close()
+        try:
+            conn = conn or db.connect()
+            if not tick(conn, provider):
+                _stop.wait(POLL_SECONDS)
+        except Exception as e:
+            print(f"djs worker {provider}: {type(e).__name__}: {e}", file=sys.stderr)
+            if conn is not None:
+                conn.close()
+            conn = None
+            _stop.wait(ERROR_BACKOFF)
+    if conn is not None:
+        conn.close()
 
 
 def start_worker() -> None:

@@ -25,9 +25,9 @@ def _run(fn, *args, **kwargs):
 
 
 @mcp.tool()
-def provider_list() -> dict:
-    """List platforms with type, auth, effective frequency and login state."""
-    return _run(service.provider_list)
+async def provider_list() -> dict:
+    """List platforms with type, auth, capture transport, effective frequency and login state."""
+    return await asyncio.to_thread(_run, service.provider_list)  # the login state may need a browser (plain thread)
 
 
 @mcp.tool()
@@ -68,9 +68,9 @@ async def login(provider: str) -> dict:
 
 
 @mcp.tool()
-def login_status(provider: str) -> dict:
+async def login_status(provider: str) -> dict:
     """Whether a valid login exists for the provider."""
-    return _run(service.login_status, provider)
+    return await asyncio.to_thread(_run, service.login_status, provider)
 
 
 @mcp.tool()
@@ -84,6 +84,13 @@ def set_frequency(provider: str, interval: float | None = None, jitter: float | 
                   max_pages: int | None = None, force: bool = False) -> dict:
     """Override request frequency; below the platform min_interval needs force=True."""
     return _run(service.set_frequency, provider, interval, jitter, max_pages, force)
+
+
+@mcp.tool()
+def set_transport(provider: str, transport: str | None = None) -> dict:
+    """Choose how a platform is captured: 'http' (plain requests) or 'browser' (a real Chromium page; set DJS_CDP_URL
+    to use a tab of your own Chrome instead). Only transports the platform supports; omit to reset to its default."""
+    return _run(service.set_transport, provider, transport)
 
 
 @mcp.tool()
