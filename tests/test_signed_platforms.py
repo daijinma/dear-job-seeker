@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from djs import db, engine, service, taskqueue
+from djs import db, engine, pacer, service, taskqueue
 from djs.jobs import derive
 from djs.normalize import missing
 from djs.providers import _yupao_sign, job51 as j51mod
@@ -148,7 +148,7 @@ def pc_list() -> dict:
 
 def test_job51_declares_the_two_transports_and_the_login():
     p = Job51()
-    assert (p.transports, p.login_transport) == (("http", "browser"), "browser")
+    assert (p.transports, p.login_transport) == (("http", "browser"), None)   # logged in, it stays on the http API
     assert (p.login.method, p.login.domain, p.login.url_prefix) == ("password", "51job.com", "https://we.51job.com/pc/my/")
     assert p.login.cookies_any == p.login.cookies_all == () and p.login.valid_days == 30    # the landing page is the signal
 
@@ -330,6 +330,12 @@ def test_missing_env_listing_and_crawl_start(conn, monkeypatch):
     with pytest.raises(ValueError, match="DJS_JOB51_HMAC_KEY"):
         service.crawl_start(conn, "job51", keyword="会计")
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_a_job51_login_keeps_the_crawl_on_the_http_api(conn):
+    """Logged in, the PC search in a browser hung on the WAF and the whole site cooled down (F38): a saved login
+    must never make 前程无忧 worse than anonymous."""
+    assert pacer.transport(conn, "job51", True) == "http"
 
 
 def test_crawl_start_requires_city(conn):

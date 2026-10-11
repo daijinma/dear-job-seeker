@@ -63,6 +63,6 @@ def test_the_logins_are_what_the_research_found():
 
 def test_where_a_logged_in_session_changes_the_endpoint_it_says_which_transport():
     assert {n: providers.get(n).login_transport for n in LOGIN_PROVIDERS} == {
-        "boss": None, "zhaopin": "browser", "job51": "browser", "liepin": None, "kq36": None}
+        "boss": None, "zhaopin": "browser", "job51": None, "liepin": None, "kq36": None}   # 前程无忧: see F38
     assert providers.get("boss").transports == ("browser",) and providers.get("boss").needs_headed
     assert providers.get("kq36").transports == ("http",)           # the saved cookie goes on the http client
