@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dear-job-seeker": {
+      "command": "uv",
+      "args": ["run", "--quiet", "djs"]
+    }
+  }
+}

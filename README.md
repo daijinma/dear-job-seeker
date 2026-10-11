@@ -26,13 +26,20 @@ python3 -m venv .venv
 .venv/bin/djs ui
 ```
 
-**MCP client config** (Claude Desktop / Cursor / Claude Code `.mcp.json`)
+## Use it from an AI client (MCP)
 
-```json
-{"mcpServers": {"dear-job-seeker": {"command": "/abs/path/to/.venv/bin/djs"}}}
-```
+The MCP server is the `djs` command over stdio. Pick one way to register it:
 
-Then ask: *"Find Python jobs in Hangzhou on nowcoder and zhaopin, 2 pages each"*.
+| Where | How |
+|---|---|
+| Any MCP client, nothing installed (needs [uv](https://docs.astral.sh/uv/)) | `{"mcpServers": {"dear-job-seeker": {"command": "uvx", "args": ["--from", "git+https://github.com/daijinma/dear-job-seeker", "djs"]}}}` |
+| Claude Code, one line | `claude mcp add dear-job-seeker -- uvx --from git+https://github.com/daijinma/dear-job-seeker djs` |
+| Working in a clone of this repo | nothing to do: the committed [`.mcp.json`](.mcp.json) runs `uv run djs` from the repo root |
+| Your own virtualenv | `{"mcpServers": {"dear-job-seeker": {"command": "/abs/path/to/.venv/bin/djs"}}}` |
+
+Keys for the key-signed platforms go in the client's `env` block or in `$DJS_HOME/.env` (see below). Verified end to end on 2026-10-11 by Claude Code itself (headless `claude -p` with the project `.mcp.json`): `provider_list → crawl_start → task_list → jobs_get → job_detail`.
+
+Then ask: *"Find Python jobs in Hangzhou on nowcoder and zhaopin"*.
 
 ## Platforms
 
