@@ -19,6 +19,8 @@ BUNDLE_ID = "io.github.daijinma.dearjobseeker"
 WINDOW, CONSOLE = "entry_window", "entry_console"  # entry scripts next to this spec
 VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 OPTIONS = [("X utf8", None, "OPTION")]  # Python text I/O is UTF-8 everywhere (Windows would use the ANSI code page)
+# The logo of the app's top bar (source: icon.svg): the .exe files carry icon.ico, the macOS bundle icon.icns
+EXE_ICON = str(Path(SPECPATH) / "icon.ico") if sys.platform == "win32" else None
 
 analysis = Analysis(
     [str(Path(SPECPATH) / f"{entry}.py") for entry in (WINDOW, CONSOLE)],
@@ -39,13 +41,14 @@ def scripts(entry):
     return [s for s in analysis.scripts if s[0] != other]
 
 
-window = EXE(pyz, scripts(WINDOW), OPTIONS, exclude_binaries=True, name=NAME, console=False, upx=False)
-console = EXE(pyz, scripts(CONSOLE), OPTIONS, exclude_binaries=True, name="djs", console=True, upx=False)
+window = EXE(pyz, scripts(WINDOW), OPTIONS, exclude_binaries=True, name=NAME, console=False, upx=False, icon=EXE_ICON)
+console = EXE(pyz, scripts(CONSOLE), OPTIONS, exclude_binaries=True, name="djs", console=True, upx=False, icon=EXE_ICON)
 folder = COLLECT(window, console, analysis.binaries, analysis.datas, name=FOLDER, upx=False)
 BUNDLE(
     folder,
     name=f"{NAME}.app",
     bundle_identifier=BUNDLE_ID,
+    icon=str(Path(SPECPATH) / "icon.icns"),
     version=VERSION,
     # BUNDLE takes the alphabetically first program (`djs`) as the app's main one and, as that one is a console
     # program, makes the app background-only: say explicitly that double-clicking opens the window
