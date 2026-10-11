@@ -102,3 +102,12 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | R1 | Desktop tour, fresh data folder, "Python 后端 · 杭州": 12 sites preselected (58同城 and 赶集 included with a city), one count everywhere (228), salary chips, a merged job with its other site, no page errors | ok |
 | R2 | AI client, "宁波 会计，月薪 8000 以上，最好双休": used title=, floor_month_salary= and text="双休"; 12 matches, 5 picks all with 双休 (mostly from welfare tags), 5 turns, no tool failures | ok |
 | R3 | CI build of all three downloads with smoke tests (selftest, CLI, real crawl, MCP over stdio, app launch on macOS) | ok (run 38147690094 on 1b7d88b; the tag build repeats it) |
+| R4 | The released macOS arm64 zip, downloaded and unzipped like a user: selftest, `status` (version 1.2.0, Chrome found), an AI client using its `djs` as the MCP command with no keys configured ("北京 产品经理 2 万以上"): 5 sound picks in 5 turns | ok |
+
+## Findings after the release (simulated use on 1.2.0)
+| # | Finding | Status |
+|---|---|---|
+| F46 | 牛客网 answers a keyword it does not know ("xqzvbnq") with its default listing (10 unrelated jobs); real job titles are applied | note |
+| F47 | With every exit pointing at a dead proxy, all sites said "被网站暂时限制": the cooldown after 3 connection errors replaced the cause | fixed (58d1dde: the cause stays in front and decides the wording) |
+| F48 | One site waiting out a cooldown (中智招聘) kept the whole search "running": wait_for_search waited its full 300 s, the app said 查找中 | in progress (sites that failed and wait for their next try no longer keep a search running) |
+| F49 | Review of the window close: the last wait had no timeout and only the main browser process was signalled | in progress (one deadline, whole process tree, profile reopens) |
