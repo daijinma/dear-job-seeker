@@ -110,15 +110,15 @@ Five platforms have a login. It is optional on four of them; the login gives mor
 
 | Platform | How you log in | What the login adds |
 |---|---|---|
-| BOSS 直聘 | scan the QR code with the BOSS app | salaries: without a login BOSS shows every field but the pay, so its jobs stay incomplete |
+| BOSS 直聘 | scan the QR code with the BOSS app | salaries in the list (measured: 15 of 15). Its job descriptions do not load yet (see below), so BOSS jobs still count as incomplete: switch on 显示信息不全的岗位 to see them |
 | 智联招聘 | scan with WeChat | the desktop-site search, which returns a different set of jobs, not more of them (measured: 60 vs 60, 21 shared) |
 | 前程无忧 | account and password | nothing measurable yet: the anonymous search is already complete, and the desktop-site search stayed blocked when logged in, so the login does not change how it searches |
-| 猎聘 | scan with the 猎聘 app | possibly more jobs (not yet verified with a real account) |
+| 猎聘 | scan with the 猎聘 app | nothing measurable: the same jobs as without a login (its API needs none) |
 | 康强医疗网 | account and password, or SMS code | searching at all: the site lists nothing without a login |
 
 Click **去登录** in the app (page 平台登录) or call the `login` tool: an ordinary Chrome or Edge window opens on the site's own login page, you log in as you always do, and the window closes by itself once the login is detected. Nothing automates that window (BOSS 直聘 and 猎聘 blank any page an automation tool drives); the program only asks the browser for its cookies. The session is saved on your machine only (file mode 0600) with its expiry (7 days; 前程无忧 30), and searches that were waiting for it continue. `login_check` asks the site whether a saved login still works; the app runs the same check at start and marks dead logins as expired.
 
-**BOSS 直聘** answers plain HTTP and headless browsers with `code 37` ("environment abnormal"), so it runs in a real browser window, which is why it is not preselected. It is paced at 8 s per request: its risk control can restrict an account and an IP for hours. `code 37` is treated as a temporary block (cooldown and retry), never as an expired login.
+**BOSS 直聘** answers plain HTTP and headless browsers with `code 37` ("environment abnormal"), so it runs in a real browser window, which is why it is not preselected. It is paced at 8 s per request: its risk control can restrict an account and an IP for hours. `code 37` is treated as a temporary block (cooldown and retry), never as an expired login. **Known limitation in 1.2.0:** BOSS also blanks a crawling page within a second or two, so the list call (made right after the page loads) works while the per-job detail calls often fail; such a failure now cools BOSS down for 30 minutes instead of retrying. 1.3.0 moves crawling to the same plain browser the login window uses.
 
 ## MCP tools
 
