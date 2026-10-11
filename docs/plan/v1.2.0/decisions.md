@@ -95,3 +95,10 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F43 | Real BOSS + 猎聘 logins through the plain window: both saved, both pass the site's own check; the crawl browser reads the session the window stored | ok |
 | F44 | BOSS logged in: the list came back with salaries (15/15), but every detail call failed ("Failed to fetch": the page was blanked before the call), the task retried 8 times and a later list call failed too | mitigated (a call the page could not make → Blocked, 30-min cooldown); fix planned for 1.3.0: crawl BOSS in a plain browser too (A20). Live BOSS tests stopped to protect the account |
 | F45 | 猎聘 logged in vs anonymous, Java · 杭州, 2 pages: 6 vs 6, all shared (its API needs no login; 74 of 80 dropped by the city filter) | login line reworded: no measurable gain |
+
+## Release check (1b14ca2)
+| # | Check | Result |
+|---|---|---|
+| R1 | Desktop tour, fresh data folder, "Python 后端 · 杭州": 12 sites preselected (58同城 and 赶集 included with a city), one count everywhere (228), salary chips, a merged job with its other site, no page errors | ok |
+| R2 | AI client, "宁波 会计，月薪 8000 以上，最好双休": used title=, floor_month_salary= and text="双休"; 12 matches, 5 picks all with 双休 (mostly from welfare tags), 5 turns, no tool failures | ok |
+| R3 | CI build of all three downloads with smoke tests (selftest, CLI, real crawl, MCP over stdio, app launch on macOS) | ok (run 38147690094 on 1b7d88b; the tag build repeats it) |
