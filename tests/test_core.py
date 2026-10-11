@@ -205,6 +205,43 @@ def test_retry_backoff_then_dead(env):
     assert status(env, t["id"])["status"] == "dead"
 
 
+@pytest.mark.parametrize("state, error, jobs, outcome, works", [
+    ("pending", None, 0, "running", True),                                        # queued, never failed
+    ("pending", "", 0, "running", True),
+    ("running", None, 0, "running", True),
+    ("running", "Blocked: HTTP 403", 0, "running", True),                         # a retry that runs works, whatever failed before
+    ("pending", "Blocked: HTTP 403", 0, "retrying", False),                       # failed, waits out a back-off
+    ("pending", "all egress for fake are cooling down", 0, "retrying", False),    # waits out the rest of its exits
+    ("waiting_login", "login required", 0, "waiting_login", False),
+    ("dead", "boom", 0, "failed", False),
+    ("done", None, 0, "no_results", False),
+    ("done", None, 3, "found", False),
+])
+def test_one_rule_tells_a_task_that_works_from_one_that_waits_for_its_next_try(state, error, jobs, outcome, works):
+    assert taskqueue.outcome(state, jobs, error) == outcome
+    assert taskqueue.working(state, error) is works and taskqueue.retrying(state, error) is (outcome == "retrying")
+    assert taskqueue.searching([{"status": state, "last_error": error}]) is works
+    progress = {"details_total": 4, "details_ok": 1, "details_failed": 1}
+    assert taskqueue.summary(state, jobs, progress, error) == {
+        "outcome": outcome, **({"completing": {"done": 2, "total": 4}} if works else {})}   # only work has a pass to report
+
+
+def test_a_task_waits_for_its_next_try_after_a_failure_or_a_rest_and_works_again_once_it_runs_or_is_resumed(env):
+    outcomes = lambda: {t["id"]: t["outcome"] for t in taskqueue.list_(env.conn)}   # noqa: E731
+    failed, rested, queued = (task(env)["id"] for _ in range(3))
+    login = task(env, "fakelogin", city="Hangzhou")["id"]
+    assert set(outcomes().values()) == {"running"}                                   # queued: never failed
+    taskqueue.retry(env.conn, failed, "Blocked: HTTP 403")                           # a back-off
+    taskqueue.release(env.conn, rested, "all egress for fake are cooling down", 60)  # the exits' rest, no attempt burned
+    taskqueue.waiting_login(env.conn, login)
+    assert outcomes() == {failed: "retrying", rested: "retrying", queued: "running", login: "waiting_login"}
+    env.conn.execute("UPDATE tasks SET next_run_at=0 WHERE id=?", (failed,))
+    assert taskqueue.claim(env.conn, "fake")["id"] == failed
+    assert outcomes()[failed] == "running"                                           # it failed before, it works now
+    assert taskqueue.resume_login(env.conn, "fakelogin") == 1
+    assert outcomes()[login] == "running" and status(env, login)["last_error"] is None   # due at once, not a retry
+
+
 # ---- pacer ----
 def test_frequency_override_and_floor(env):
     assert pacer.effective(env.conn, "fake") == (0.0, 0.0, pacer.DEFAULT_MAX_PAGES)

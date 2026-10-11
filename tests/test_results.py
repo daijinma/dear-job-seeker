@@ -3,7 +3,7 @@ third-party descriptions, friendly error wording."""
 import pytest
 
 from djs import db, normalize, results, service, taskqueue
-from provider_fakes import job, task
+from provider_fakes import job, retrying, task
 
 
 @pytest.fixture
@@ -273,6 +273,28 @@ def test_searching_follows_the_status_of_any_task_of_the_search(conn):
     assert done and results.search_jobs(conn, "py", None)["task_ids"] == [done, queued]
 
 
+def test_a_task_that_waits_for_its_next_try_is_not_searching_until_it_runs_again(conn):
+    task(conn, "nowcoder", "py")
+    waiting = retrying(conn, "chinahr", "py")   # failed: it waits out a back-off
+    queued = task(conn, "iguopin", "py", status="pending")   # never failed: it will run
+    assert results.search_jobs(conn, "py", None)["searching"] is True
+    assert service.jobs_get(conn, keyword="py")["searching"] is True
+    assert service.search_status(conn, "py")["status"] == "running"
+    conn.execute("UPDATE tasks SET status='done' WHERE id=?", (queued,))
+    assert results.search_jobs(conn, "py", None)["searching"] is False   # only the retry is left, and that comes by itself
+    assert service.jobs_get(conn, keyword="py")["searching"] is False
+    assert service.search_status(conn, "py")["status"] == "done"
+    conn.execute("UPDATE tasks SET status='running' WHERE id=?", (waiting,))
+    assert results.search_jobs(conn, "py", None)["searching"] is True    # the retry runs: the search is under way again
+    assert service.search_status(conn, "py")["status"] == "running"
+
+
+def test_a_search_that_waits_for_a_login_and_a_retry_is_waiting_for_the_user(conn):
+    task(conn, "nowcoder", "py", status="waiting_login")
+    retrying(conn, "chinahr", "py")
+    assert service.search_status(conn, "py")["status"] == "waiting_login"   # the user is the one who can move it
+
+
 def test_description_is_the_stored_text_or_none(conn):
     t = task(conn, "nowcoder", "py")
     full, empty = job(conn, "nowcoder", "f", [t], description="全文"), job(conn, "nowcoder", "e", [t], description="")
@@ -373,6 +395,19 @@ def test_annotate_searches_adds_reason_kind_and_the_newest_task_per_site(conn):
     assert (sites["chinahr"]["task_id"], sites["chinahr"]["kind"]) == (quiet, "other")
     assert (sites["iguopin"]["task_id"], sites["iguopin"]["kind"], sites["iguopin"]["reason"]) == (ok, None, None)
     assert all("last_error" not in s for s in search["per_site"])
+
+
+def test_a_site_that_waits_for_its_next_try_says_why_and_when_and_the_search_is_done(conn):
+    done, waiting = task(conn, "chinahr", "py", "杭州"), retrying(
+        conn, "nowcoder", "py", "杭州", "ConnectError: refused | then: all egress for nowcoder are cooling down")
+    job(conn, "chinahr", "a", [done])
+    [search] = results.annotate_searches(conn, service.searches(conn))
+    sites = {s["provider"]: s for s in search["per_site"]}
+    assert search["status"] == "done"   # nothing works: the retry comes by itself
+    assert (sites["nowcoder"]["status"], sites["nowcoder"]["outcome"], sites["nowcoder"]["task_id"]) == ("pending", "retrying", waiting)
+    assert (sites["nowcoder"]["kind"], sites["nowcoder"]["reason"]) == ("network", "网络不通，稍后再试")
+    assert sites["nowcoder"]["retry_at"] == taskqueue.get(conn, waiting)["next_run_at"]
+    assert (sites["chinahr"]["outcome"], sites["chinahr"]["reason"]) == ("found", None) and "retry_at" not in sites["chinahr"]
 
 
 def test_a_site_whose_jobs_are_all_incomplete_for_one_reason_says_so(conn):

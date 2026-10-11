@@ -17,9 +17,11 @@ MAX_WAIT = 600       # the longest one wait_for_search call blocks, whatever the
 INSTRUCTIONS = """Searches Chinese job sites from the user's own machine and keeps the results in a local database.
 Recommended flow:
 1. search(keyword, city): starts the search on every site usable right now and returns at once.
-2. wait_for_search(keyword, city): blocks until every site is done (or `timeout`) and returns the per-site outcome:
-   found, no_results (the site had nothing: not an error), failed, waiting_login (needs the user: login tool) or
-   running. If it timed out, call it again, or read what is there and check `searching`.
+2. wait_for_search(keyword, city): blocks until no site is working any more (or `timeout`) and returns the per-site
+   outcome: found, no_results (the site had nothing: not an error), failed, waiting_login (needs the user: login
+   tool), retrying (the site failed and tries again by itself at `retry_at`, `reason` says why: the call does not wait
+   for it; read what the others found, ask again later for more) or running. If it timed out, call it again, or read
+   what is there and check `searching`.
 3. jobs_get(keyword, city, ...): reads the results, complete jobs only and each job once (`also_on` names the other
    sites that carry it). Put the role in title (every word must be in the job title, e.g. title="会计": without it,
    jobs of companies merely named "…会计服务…" come back too), conditions and skills in text (every word in the title,
@@ -80,11 +82,12 @@ async def provider_list() -> dict:
 async def status() -> dict:
     """What is going on, in one call and without touching the network: the version and data folder; per platform whether
     THIS process's worker is alive (the app, another MCP server and `djs work` may run workers on the same database
-    too) and the task it runs now (keyword, city, since, pages, completing {done, total}); the queue by status; the
-    browser a login window would start (or why there is none), Playwright, DJS_CDP_URL, the open login windows and the
-    platform profiles in use; each login's state and end; per platform its missing keys (names only), cooling-down
-    exits and, when its newest task failed or waits for a login, why. Call it first when results look wrong or a
-    search does not move. Example: status()."""
+    too), the task it runs now (keyword, city, since, pages, completing {done, total}) and the tasks that failed and
+    wait for their next try (`retrying`: task_id, reason, retry_at); the queue by status; the browser a login window
+    would start (or why there is none), Playwright, DJS_CDP_URL, the open login windows and the platform profiles in
+    use; each login's state and end; per platform its missing keys (names only), cooling-down exits and, when its
+    newest task failed or waits for a login, why. Call it first when results look wrong or a search does not move.
+    Example: status()."""
     return await asyncio.to_thread(_run, service.status)  # finding the browser can start Playwright (plain thread)
 
 
@@ -112,11 +115,12 @@ async def search(keyword: str, city: str | None = None, providers: list[str] | N
 
 @mcp.tool()
 async def wait_for_search(keyword: str, city: str | None = None, timeout: float = 120) -> dict:
-    """Wait until every platform of a search has finished (at most `timeout` seconds, up to 600) and return its
-    status: per platform the outcome (found | no_results | failed | waiting_login | running), job counts (`whole`: the
-    complete jobs of the whole search, each job once) and, while a platform fetches details, completing {done,
-    total}. `timed_out: true` means it was still running. Give the same keyword and city as to search. Example:
-    wait_for_search(keyword="Python 后端", city="杭州", timeout=120)."""
+    """Wait until no platform of a search is working any more (at most `timeout` seconds, up to 600) and return its
+    status: per platform the outcome (found | no_results | failed | waiting_login | retrying | running), job counts
+    (`whole`: the complete jobs of the whole search, each job once) and, while a platform fetches details, completing
+    {done, total}. A platform that failed and waits for its next try (retrying, with `reason` and `retry_at`, unix
+    time) is not waited for; it runs again by itself later. `timed_out: true` means it was still running. Give the same
+    keyword and city as to search. Example: wait_for_search(keyword="Python 后端", city="杭州", timeout=120)."""
     deadline = time.monotonic() + max(0.0, min(timeout, MAX_WAIT))
     while True:
         status = await asyncio.to_thread(_run, service.search_status, keyword, city)
@@ -131,7 +135,8 @@ async def wait_for_search(keyword: str, city: str | None = None, timeout: float 
 def task_list(status: str | None = None, limit: int = 20) -> dict:
     """List recent tasks, optionally by status. stats has pages, jobs_new, jobs_seen, details_ok, details_failed and
     how many of the task's jobs are complete / incomplete; outcome is found | no_results | failed | waiting_login |
-    running, with completing {done, total} while the task fetches details. Example: task_list(status="running")."""
+    retrying (failed, tries again at next_run_at) | running, with completing {done, total} while the task fetches
+    details. Example: task_list(status="running")."""
     return _run(service.task_list, status, limit)
 
 
@@ -151,8 +156,9 @@ def jobs_get(keyword: str | None = None, city: str | None = None, task_id: int |
     default only complete jobs and each job once; incomplete ones come with complete_only=false and say what is
     `missing`; dedupe=false lists every record. fields='summary' returns short rows (salary_month_min/max are comparable
     across sites, benefits are the platform's welfare tags, description_snippet is 120 characters), 'full' the whole
-    description. A search also says whether it is still `searching`. Example: jobs_get(keyword="会计", city="宁波",
-    title="会计", text="双休", floor_month_salary=8000, limit=10)."""
+    description. A search also says whether it is still `searching` (a site that failed and waits for its next try does
+    not count). Example: jobs_get(keyword="会计", city="宁波", title="会计", text="双休", floor_month_salary=8000,
+    limit=10)."""
     return _run(service.jobs_get, keyword=keyword, city=city, task_id=task_id, provider=provider,
                 min_month_salary=min_month_salary, max_month_salary=max_month_salary,
                 floor_month_salary=floor_month_salary, title=title, text=text, complete_only=complete_only,
@@ -170,9 +176,11 @@ async def job_detail(job_id: int, raw: bool = False) -> dict:
 
 @mcp.tool()
 def search_list(limit: int = 20) -> dict:
-    """Recent searches (same keyword + city) with status, job counts (`whole`: complete jobs, each job once) and
-    per-platform progress: outcome, how many of each platform's jobs are complete / incomplete, completing {done,
-    total} while it fetches details. Example: search_list(limit=5)."""
+    """Recent searches (same keyword + city) with status (running only while some platform works; one that failed and
+    waits for its next try does not count), job counts (`whole`: complete jobs, each job once) and per-platform
+    progress: outcome (found | no_results | failed | waiting_login | retrying | running; retrying comes with `reason`
+    and `retry_at`), how many of each platform's jobs are complete / incomplete, completing {done, total} while it
+    fetches details. Example: search_list(limit=5)."""
     return _run(service.searches, limit)
 
 

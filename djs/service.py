@@ -255,7 +255,8 @@ def jobs_get(conn, keyword=None, city=None, task_id=None, provider=None, min_mon
     range starts at or below this; `title` (every word in the job title: the role, e.g. "会计"), `text` (every word in
     the title, the description or the welfare tags: conditions and skills that may sit anywhere, e.g. "双休",
     "Django"). By default only complete jobs, each job once (`also_on` lists the other platforms that carry it). With a
-    search, `searching` says whether its tasks still run."""
+    search, `searching` says whether one of its tasks still works; a site that failed and waits for its next try does
+    not count."""
     if fields not in ("summary", "full"):
         raise ValueError(f"fields must be 'summary' or 'full', not {fields!r}")
     keyword, city = search_key(keyword, city)
@@ -271,7 +272,7 @@ def jobs_get(conn, keyword=None, city=None, task_id=None, provider=None, min_mon
     after = offset + len(found)
     out = {"jobs": found, "total": total, "returned": len(found), "next_offset": after if after < total else None}
     if tasks is not None:
-        out["searching"] = any(t["status"] in taskqueue.ACTIVE for t in tasks)
+        out["searching"] = taskqueue.searching(tasks)
     return out
 
 
@@ -324,19 +325,34 @@ def job_detail(conn, job_id: int, raw: bool = False) -> dict:
     return {**out, "detail": job["detail"]} if raw else out
 
 
-def _search_status(statuses: set[str]) -> str:
-    if statuses & set(taskqueue.ACTIVE):
+def _plain(raw) -> tuple[str, str]:
+    """(kind, plain-Chinese reason) of an error text, as results.classify words it."""
+    from djs import results  # late: results imports this module
+    return results.classify(raw)
+
+
+def _retry_info(task: dict) -> dict:
+    """Why a task that failed waits for its next try, in plain words, and when that is (unix time)."""
+    return {"reason": _plain(task["last_error"])[1], "retry_at": task["next_run_at"]}
+
+
+def _search_status(tasks: list[dict]) -> str:
+    """running while some task works (one that waits for its next try does not), else waiting_login if one needs the
+    user, else done."""
+    if taskqueue.searching(tasks):
         return "running"
-    return "waiting_login" if "waiting_login" in statuses else "done"
+    return "waiting_login" if any(t["status"] == "waiting_login" for t in tasks) else "done"
 
 
 def _site(name: str, task: dict, found: dict) -> dict:
     """One platform of a search, from its newest task: status, how many jobs (complete or not), and the outcome (found,
-    no_results, failed, waiting_login or running, with the completion progress while it runs)."""
+    no_results, failed, waiting_login, running with the completion progress, or retrying: it failed and waits for its
+    next try, with the plain-words `reason` and `retry_at`)."""
     jobs_n, complete = found.get(name, (0, 0))
-    return {"provider": name, "label": providers.label(name), "status": task["status"], "jobs": jobs_n,
+    site = {"provider": name, "label": providers.label(name), "status": task["status"], "jobs": jobs_n,
             "complete": complete, "incomplete": jobs_n - complete, "last_error": task["last_error"],
-            **taskqueue.summary(task["status"], jobs_n, task["stats"])}
+            **taskqueue.summary(task["status"], jobs_n, task["stats"], task["last_error"])}
+    return {**site, **_retry_info(task)} if site["outcome"] == "retrying" else site
 
 
 def _search(conn, keyword, city, tasks: list[dict]) -> dict:
@@ -351,7 +367,7 @@ def _search(conn, keyword, city, tasks: list[dict]) -> dict:
     newest = {t["provider"]: t for t in tasks}  # tasks arrive in id order, so the last one per platform is the newest
     return {"keyword": keyword, "city": city or None, "task_ids": ids,
             "created_at": max(t["created_at"] for t in tasks),
-            "status": _search_status({t["status"] for t in tasks}),
+            "status": _search_status(tasks),
             "jobs_total": sum(n for n, _ in found.values()),
             "whole": query.count(conn, query.where(search=(keyword, city))),
             "per_site": [_site(name, t, found) for name, t in newest.items()]}
@@ -466,6 +482,16 @@ def _running(conn) -> dict[str, dict]:
     return out
 
 
+def _retrying(conn) -> dict[str, list[dict]]:
+    """Per platform, the tasks that failed and wait for their next try, as {task_id, reason, retry_at}, oldest first."""
+    out: dict[str, list[dict]] = {}
+    for row in conn.execute("SELECT id, provider, status, last_error, next_run_at FROM tasks WHERE status='pending' "
+                            "ORDER BY id"):
+        if taskqueue.retrying(row["status"], row["last_error"]):
+            out.setdefault(row["provider"], []).append({"task_id": row["id"], **_retry_info(row)})
+    return out
+
+
 def _queue(conn) -> dict[str, int]:
     counts = dict.fromkeys(("pending", "running", "waiting_login", "done", "dead"), 0)
     counts.update({r["status"]: r["n"] for r in conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")})
@@ -486,10 +512,9 @@ def _browser_state() -> dict:
 
 def _problem(task) -> dict | None:
     """Why a platform's newest task failed or waits for a login, in plain words; None when it did neither."""
-    from djs import results  # late: results imports this module
     if task is None or task["status"] not in ("dead", "waiting_login"):
         return None
-    kind, reason = results.classify(task["last_error"])
+    kind, reason = _plain(task["last_error"])
     return {"task_id": task["id"], "status": task["status"], "kind": kind, "reason": reason}
 
 
@@ -512,11 +537,12 @@ def _platforms(conn) -> dict[str, dict]:
 
 def status(conn) -> dict:
     """What is going on, in one call: no network, well under a second. `workers` tells, per platform, whether THIS
-    process's worker thread is alive and the task the platform runs right now (the app, an MCP server and `djs work`
-    each run workers on the same database)."""
-    running, alive = _running(conn), engine.workers()
+    process's worker thread is alive, the task the platform runs right now and the tasks that failed and wait for their
+    next try (the app, an MCP server and `djs work` each run workers on the same database)."""
+    running, retrying, alive = _running(conn), _retrying(conn), engine.workers()
     return {"version": app_version() or "dev", "data_dir": str(db.home()),
-            "workers": {name: {"alive_in_this_process": alive[name], "running": running.get(name)} for name in alive},
+            "workers": {name: {"alive_in_this_process": alive[name], "running": running.get(name),
+                               "retrying": retrying.get(name, [])} for name in alive},
             "queue": _queue(conn), "browser": _browser_state(),
             "logins": {row["provider"]: {"state": row["state"], "expires_at": row["expires_at"]} for row in login_overview()},
             "platforms": _platforms(conn)}

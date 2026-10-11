@@ -35,6 +35,13 @@ def task(conn, provider, keyword, city=None, status="done"):
     return tid
 
 
+def retrying(conn, provider, keyword, city=None, error="Blocked: HTTP 403"):
+    """A task of the search that failed and waits for its next try: pending, with the error and a back-off."""
+    tid = task(conn, provider, keyword, city, status="pending")
+    taskqueue.retry(conn, tid, error)
+    return tid
+
+
 def job(conn, provider, sid, tasks, seen=1000.0, **cols):
     """A stored job linked to `tasks`; `complete=1` unless the test says otherwise (the page lists complete jobs by
     default). The columns that follow from the others (pay per month, fingerprint) are derived like the crawl does."""

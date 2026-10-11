@@ -19,7 +19,7 @@ ACTIVE_SQL = "(" + ", ".join(f"'{status}'" for status in ACTIVE) + ")"
 # One search = the tasks with the same keyword and city (named parameters :k and :c); a task without a city is the
 # search made without one.
 SEARCH = "json_extract(payload, '$.keyword') = :k AND IFNULL(json_extract(payload, '$.city'), '') = :c"
-_SEARCH_COLS = "id, provider, status, last_error, created_at, stats"
+_SEARCH_COLS = "id, provider, status, last_error, next_run_at, created_at, stats"
 
 
 def detail_mode(value) -> str:
@@ -151,8 +151,10 @@ def retry(conn, task, error: str, retry_after: float | None = None):
 
 
 def resume_login(conn, provider: str) -> int:
-    return conn.execute("UPDATE tasks SET status='pending', next_run_at=0 WHERE provider=? AND status='waiting_login'",
-                        (provider,)).rowcount
+    """The login is there: the platform's waiting tasks are due at once. The "login required" they were left with goes,
+    or they would read as tasks that failed and wait for a retry."""
+    return conn.execute("UPDATE tasks SET status='pending', next_run_at=0, last_error=NULL "
+                        "WHERE provider=? AND status='waiting_login'", (provider,)).rowcount
 
 
 def requeue(conn, task_ids) -> int:
@@ -174,10 +176,29 @@ def as_dict(row) -> dict:
     return d
 
 
-def outcome(status: str, jobs: int) -> str:
-    """How a task (or a platform's newest task in a search) stands, in one word: running (queued, working, or waiting
-    to retry), waiting_login, failed, found or no_results. A finished task that found nothing is no_results, never a
-    failure."""
+def retrying(status: str, error) -> bool:
+    """A task that failed and waits for its next try, out of a back-off or an exit's cooldown, until its next_run_at:
+    pending with an error. A queued task that never failed has none."""
+    return status == "pending" and bool(error)
+
+
+def working(status: str, error) -> bool:
+    """A task that runs, or is queued to run and never failed. One that waits for its next try does not work: a search
+    is under way only while some task of it works."""
+    return status in ACTIVE and not retrying(status, error)
+
+
+def searching(tasks: list[dict]) -> bool:
+    """A search, as its tasks (of_search, by_search), is under way while one of them works."""
+    return any(working(t["status"], t["last_error"]) for t in tasks)
+
+
+def outcome(status: str, jobs: int, error=None) -> str:
+    """How a task (or a platform's newest task in a search) stands, in one word: running (queued or working), retrying
+    (it failed and waits for its next try), waiting_login, failed, found or no_results. A finished task that found
+    nothing is no_results, never a failure."""
+    if retrying(status, error):
+        return "retrying"
     if status in ACTIVE:
         return "running"
     if status == "done":
@@ -185,12 +206,13 @@ def outcome(status: str, jobs: int) -> str:
     return {"waiting_login": "waiting_login", "dead": "failed"}[status]
 
 
-def summary(status: str, jobs: int, stats: dict | None) -> dict:
+def summary(status: str, jobs: int, stats: dict | None, error=None) -> dict:
     """{outcome} and, while a queued or running task is in its completion pass, {completing: {done, total}}: how many
-    of the details it set out to fetch are in (the engine writes details_total, details_ok and details_failed)."""
-    found = {"outcome": outcome(status, jobs)}
+    of the details it set out to fetch are in (the engine writes details_total, details_ok and details_failed). A task
+    that waits for its next try is in no pass."""
+    found = {"outcome": outcome(status, jobs, error)}
     total = (stats or {}).get("details_total")
-    if status in ACTIVE and total:
+    if working(status, error) and total:
         found["completing"] = {"done": stats.get("details_ok", 0) + stats.get("details_failed", 0), "total": total}
     return found
 
@@ -208,7 +230,7 @@ def list_(conn, status: str | None = None, limit: int = 20) -> list[dict]:
     rows = conn.execute("SELECT t.*, (SELECT COUNT(*) FROM task_jobs j WHERE j.task_id=t.id) AS jobs_found "
                         "FROM tasks t WHERE (? IS NULL OR t.status=?) ORDER BY t.id DESC LIMIT ?",
                         (status, status, limit)).fetchall()
-    return [{**t, **summary(t["status"], t["jobs_found"], t["stats"])} for t in map(as_dict, rows)]
+    return [{**t, **summary(t["status"], t["jobs_found"], t["stats"], t["last_error"])} for t in map(as_dict, rows)]
 
 
 def by_search(conn, limit: int = 20) -> list[dict]:

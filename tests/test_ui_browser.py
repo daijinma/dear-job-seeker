@@ -566,6 +566,38 @@ def test_the_page_polls_only_while_something_runs(page, app):
     assert app.calls["GET /api/searches"] == settled
 
 
+def test_a_site_that_waits_out_its_cooldown_does_not_keep_the_search_running(page, app):
+    """What a real client met: one site's exits rested for half an hour, and its search card said 查找中 all that time."""
+    conn = db.connect()
+    egress.report(conn, "direct", "zz", ok=False, blocked=True)   # every exit of 中智招聘 rests: its task is released, not run
+    conn.close()
+    card = finish_search(page)   # 已完成 although the site has not found anything yet
+    expect(card.locator(".bar.busy")).to_have_count(0)
+    expect(card).to_contain_text("已完成 5 / 6 个网站 · 已找到 125 个岗位")
+    waiting = card.locator(".dot", has_text="中智招聘")
+    expect(waiting.locator(".spin")).to_have_count(0)
+    expect(card.locator(".dot.run")).to_have_count(0)
+    expect(waiting.locator("svg.ic path")).to_have_attribute("d", "M12 7v5l3 2")   # the clock: it waits
+    expect(card.locator(".note.warn")).to_have_text("中智招聘 · 这个网站刚才连续出错，正在歇一会儿，稍后会自动重试")
+    settled = app.calls["GET /api/searches"]
+    page.wait_for_timeout(1200)
+    assert app.calls["GET /api/searches"] == settled   # nothing works: nothing is asked
+    page.get_by_role("link", name="查看结果：前端工程师 · 杭州").click()
+    expect(page.locator("#found")).to_have_text("找到 125 个岗位")
+    expect(page.locator(".notice")).to_have_count(0)   # no 还在查找中 banner, no spinner
+    expect(page.locator("#notice .note.warn")).to_have_text("中智招聘 · 这个网站刚才连续出错，正在歇一会儿，稍后会自动重试")
+
+
+def test_a_search_whose_every_site_waits_for_its_next_try_says_so(page, app):
+    """Nothing found yet and every site owes a retry: the card says 稍后重试, not 已完成 with nothing in it."""
+    conn = db.connect()
+    for name in providers.names():
+        egress.report(conn, "direct", name, ok=False, blocked=True)   # every exit of every site rests
+    conn.close()
+    start_search(page)
+    expect(newest_card(page).locator(".pill")).to_have_text("稍后重试")
+
+
 def test_typed_text_and_chosen_sites_survive_a_tab_change(page, app):
     page.get_by_label("岗位或关键词", exact=True).fill("数据分析")
     page.get_by_label("城市", exact=True).fill("上海")

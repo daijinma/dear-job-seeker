@@ -61,7 +61,7 @@ function siteNote(x) {
   if (x.status === "dead") {
     return { tone: "bad", text: x.reason, end: x.kind === "env" ? btn("如何配置", "how-keys") : btn("重试", "retry", { t: x.task_id }) };
   }
-  if (x.status === "pending" && x.reason) return { tone: "warn", text: `${x.reason}，稍后会自动重试`, end: "" };
+  if (x.outcome === "retrying") return { tone: "warn", text: `${x.reason}，稍后会自动重试`, end: "" };
   if (x.status === "done" && !x.jobs) return { tone: "none", text: "这个网站没有找到", end: "" };
   if (x.status === "done" && !x.complete) {   // found something, but not one job is whole: say why instead of looking broken
     return { tone: "none", always: true, text: `找到 ${x.jobs} 个岗位，但信息都不全${x.why ? `（${x.why}）` : ""}`, end: "" };

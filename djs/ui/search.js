@@ -75,7 +75,9 @@ function loginHint() {
 function searchState(s) {
   if (s.status === "running") return ["查找中", "", true];
   if (s.status === "waiting_login") return ["等你登录", "warn"];
-  return s.per_site.every((x) => x.status === "dead") ? ["没成功", "bad"] : ["已完成", "ok"];
+  if (s.per_site.every((x) => x.status === "dead")) return ["没成功", "bad"];
+  // nothing found yet and every site still owed a retry: say so rather than "done"
+  return !wholeJobs(s) && s.per_site.every((x) => x.outcome === "retrying" || x.status === "dead") ? ["稍后重试", "warn"] : ["已完成", "ok"];
 }
 
 /* a site's number is the jobs that are whole; "/ n" says how many it found in all */

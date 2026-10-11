@@ -11,9 +11,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from djs import browser, cli, db, egress, engine, pacer, providers, server, service, taskqueue
+from djs import browser, cli, db, egress, engine, pacer, providers, results, server, service, taskqueue
 from djs.providers.base import Login, Provider, get_json, need
-from provider_fakes import job, task
+from provider_fakes import job, retrying, task
 
 ITEMS = {  # what each fake platform lists for the keyword "py"
     "a": [{"id": 1, "title": "Python 后端", "company": "甲科技有限公司", "pay": "15-25K·14薪", "jd": "使用 Django 开发"},
@@ -242,9 +242,12 @@ def test_a_site_that_is_fetching_details_reports_how_far_it_is(env):
 def test_task_list_has_an_outcome_for_every_status(env):
     for provider, status in (("a", "pending"), ("a", "running"), ("a", "done"), ("a", "dead"), ("a", "waiting_login")):
         task(env.conn, provider, "py", status=status)
-    got = {t["status"]: t["outcome"] for t in call("task_list")["result"]}
-    assert got == {"pending": "running", "running": "running", "done": "no_results", "dead": "failed",
-                   "waiting_login": "waiting_login"}
+    retrying(env.conn, "a", "py")   # pending as well, but it failed: it waits for its next try
+    got = {(t["status"], bool(t["last_error"])): t["outcome"] for t in call("task_list")["result"]}
+    assert got == {("pending", False): "running", ("pending", True): "retrying", ("running", False): "running",
+                   ("done", False): "no_results", ("dead", False): "failed", ("waiting_login", False): "waiting_login"}
+    newest = call("task_list", status="pending", limit=1)["result"][0]
+    assert (newest["outcome"], newest["next_run_at"] > time.time()) == ("retrying", True)   # and next_run_at says when
 
 
 # ---- wait_for_search
@@ -270,6 +273,63 @@ def test_a_search_waiting_for_the_user_is_not_waited_on(env):
     tid = task(env.conn, "login", "py", status="waiting_login")
     status = call("wait_for_search", keyword="py", timeout=30)
     assert (status["status"], status["per_site"][0]["outcome"], tid) == ("waiting_login", "waiting_login", 1)
+
+
+@pytest.fixture
+def waiting(env):
+    """Search ('py', '杭州'): "a" is done and found a job, "b" failed and waits for its next try."""
+    a = task(env.conn, "a", "py", "杭州")
+    job(env.conn, "a", "x", [a], title="found")
+    return SimpleNamespace(a=a, b=retrying(env.conn, "b", "py", "杭州"))
+
+
+def test_wait_for_search_does_not_wait_for_a_site_that_only_waits_for_its_next_try(env, waiting):
+    started = time.monotonic()
+    status = call("wait_for_search", keyword="py", city="杭州", timeout=30)
+    assert time.monotonic() - started < 2   # the retry is seconds away at best; nobody waits for it
+    assert (status["status"], "timed_out" in status, status["jobs_total"]) == ("done", False, 1)
+    sites = {s["provider"]: s for s in status["per_site"]}
+    assert sites["a"]["outcome"] == "found" and not {"reason", "retry_at"} & set(sites["a"])
+    assert (sites["b"]["outcome"], sites["b"]["status"], sites["b"]["reason"]) == ("retrying", "pending", "被网站暂时限制，稍后再试")
+    assert sites["b"]["retry_at"] == taskqueue.get(env.conn, waiting.b)["next_run_at"]   # when it tries again
+    assert sites["b"]["retry_at"] > time.time() and "completing" not in sites["b"]
+    assert call("search_list")["result"][0]["status"] == "done"
+
+
+def test_jobs_get_and_the_results_page_say_searching_only_while_some_site_works(env, waiting):
+    assert call("jobs_get", keyword="py", city="杭州")["searching"] is False
+    assert results.search_jobs(env.conn, "py", "杭州")["searching"] is False
+    env.conn.execute("UPDATE tasks SET status='running' WHERE id=?", (waiting.b,))   # its retry begins: searching again
+    assert call("jobs_get", keyword="py", city="杭州")["searching"] is True
+    assert results.search_jobs(env.conn, "py", "杭州")["searching"] is True
+    assert call("search_list")["result"][0]["status"] == "running"
+
+
+def test_a_queued_site_that_never_failed_keeps_the_search_running_beside_one_that_waits(env, waiting):
+    queued = task(env.conn, "opt", "py", "杭州", status="pending")
+    status = call("wait_for_search", keyword="py", city="杭州", timeout=0.3)
+    assert (status["status"], status["timed_out"]) == ("running", True)
+    assert {s["provider"]: s["outcome"] for s in status["per_site"]} == {"a": "found", "b": "retrying", "opt": "running"}
+    assert call("jobs_get", keyword="py", city="杭州")["searching"] is True
+    assert results.search_jobs(env.conn, "py", "杭州")["searching"] is True
+    env.conn.execute("UPDATE tasks SET status='done' WHERE id=?", (queued,))
+    assert call("wait_for_search", keyword="py", city="杭州", timeout=30)["status"] == "done"   # "b" stays out of it
+
+
+def test_a_site_whose_exits_all_rest_is_retrying_and_a_search_does_not_wait_for_the_cooldown(env):
+    """What a real client met: one site waited out its exits' cooldown, minutes to half an hour, and the search said
+    running for all of it. The site tries again by itself; the search is done as soon as the others are."""
+    egress.report(env.conn, "direct", "b", ok=False, blocked=True)   # every exit of "b" rests for 30 minutes
+    engine.start_worker()
+    call("search", keyword="py", city="杭州", providers=["a", "b"])
+    status = call("wait_for_search", keyword="py", city="杭州", timeout=30)   # its retry is a minute away: it would time out
+    assert (status["status"], "timed_out" in status) == ("done", False)
+    sites = {s["provider"]: s for s in status["per_site"]}
+    assert (sites["a"]["outcome"], sites["a"]["jobs"]) == ("found", 2)
+    assert (sites["b"]["outcome"], sites["b"]["reason"]) == ("retrying", "这个网站刚才连续出错，正在歇一会儿")
+    assert sites["b"]["last_error"] == "all egress for b are cooling down"
+    assert sites["b"]["retry_at"] == pytest.approx(time.time() + engine.NO_EGRESS_DELAY, abs=20)
+    assert call("jobs_get", keyword="py", city="杭州")["searching"] is False
 
 
 def test_wait_for_search_polls_without_blocking_the_event_loop_and_returns_when_the_search_ends(env):
@@ -491,8 +551,9 @@ def test_the_server_teaches_the_recommended_flow():
     text = server.mcp.instructions
     steps = [text.index(name) for name in ("search(", "wait_for_search(", "jobs_get(", "job_detail(")]
     assert steps == sorted(steps)   # in the order a client should use them
-    for word in ("no_results", "waiting_login", "salary_month_min", "min_month_salary", "next_offset"):
+    for word in ("no_results", "waiting_login", "retrying", "retry_at", "salary_month_min", "min_month_salary", "next_offset"):
         assert word in text
+    assert "does not wait for it" in " ".join(text.split())   # a site that tries again later does not hold the call
     assert "call status first" in text   # and where to look when it does not go as described
     assert 'title="会计"' in text and 'text="双休"' in text            # the role goes in the title, a condition in the text
     assert "floor_month_salary=8000" in text and "benefits" in text    # a hard pay floor has its own filter; the tags are searched
@@ -502,6 +563,9 @@ def test_the_new_and_changed_tools_come_with_an_example_each():
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
     for name in ("search", "wait_for_search", "jobs_get", "job_detail", "task_list", "search_list", "status"):
         assert "Example:" in tools[name].description, name
+    for name in ("wait_for_search", "task_list", "search_list", "status"):   # where a site's retrying shows
+        assert "retrying" in tools[name].description, name
+    assert "is not waited for" in tools["wait_for_search"].description
     props = tools["jobs_get"].inputSchema["properties"]
     assert (props["limit"]["default"], props["fields"]["default"], props["dedupe"]["default"],
             props["complete_only"]["default"]) == (20, "summary", True, True)
@@ -581,6 +645,18 @@ def test_status_shows_the_task_a_platform_runs_with_its_progress_and_whether_thi
     assert {w["alive_in_this_process"] for w in got["workers"].values()} == {False}   # nobody started workers in this process
     engine.start_worker()
     assert {w["alive_in_this_process"] for w in call("status")["workers"].values()} == {True}
+
+
+def test_status_lists_the_tasks_that_wait_for_their_next_try_beside_the_one_a_platform_runs(env, chrome):
+    running = task(env.conn, "a", "py", "杭州", status="running")
+    first, second = retrying(env.conn, "a", "go", error="ConnectError: refused"), retrying(env.conn, "a", "rust")
+    task(env.conn, "b", "py", status="pending")   # queued, never failed: it waits for its turn, not for a retry
+    workers = call("status")["workers"]
+    due = lambda tid: taskqueue.get(env.conn, tid)["next_run_at"]   # noqa: E731
+    assert workers["a"]["running"]["task_id"] == running   # the running task stays as it was
+    assert workers["a"]["retrying"] == [{"task_id": first, "reason": "网络不通，稍后再试", "retry_at": due(first)},
+                                        {"task_id": second, "reason": "被网站暂时限制，稍后再试", "retry_at": due(second)}]
+    assert all(w["retrying"] == [] for name, w in workers.items() if name != "a")
 
 
 def test_status_tells_in_plain_words_why_the_newest_task_of_a_platform_failed_or_waits(env, chrome):

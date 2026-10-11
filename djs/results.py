@@ -68,7 +68,7 @@ def search_jobs(conn, keyword, city, provider=None, sort="mixed", limit=30, offs
             "merged": query.count(conn, everywhere, dedupe=False) - all_total,
             "per_site": _per_site(_sites(conn, base)),
             "incomplete": _incomplete(conn, keyword, city, provider),
-            "searching": any(t["status"] in taskqueue.ACTIVE for t in tasks),
+            "searching": taskqueue.searching(tasks),
             "task_ids": [t["id"] for t in tasks]}
 
 
