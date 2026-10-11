@@ -1,0 +1,6 @@
+{"_synthetic": true, "code": 0, "msg": "ok", "data": {"totalCount": 2, "datas": [
+ {"id": 463980, "name": "算法工程师", "createTime": 1787900099000, "updateTime": 1789027926000,
+  "salaryMin": 20, "salaryMax": 40, "salaryType": 2, "salaryMonth": 14, "city": "北京",
+  "recommendInternCompany": {"companyName": "示例科技"},
+  "ext": "{\"requirements\": \"熟悉机器学习\"}"},
+ {"id": 463981, "name": "实习算法", "createTime": 0, "salaryMin": 200, "salaryMax": 300, "salaryType": 1, "ext": "not json"}]}}
