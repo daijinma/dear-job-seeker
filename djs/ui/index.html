@@ -8,15 +8,18 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="#/search"><span class="logo"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4-4"/></svg></span>找岗位助手</a>
-  <nav>
+  <a class="brand" href="#/search"><span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m20 20-4-4"/></svg></span>找岗位助手</a>
+  <nav aria-label="主导航">
     <a href="#/search" data-tab="search">查找</a>
     <a href="#/results" data-tab="results">我的结果</a>
     <a href="#/settings" data-tab="settings">设置</a>
   </nav>
 </header>
+<div id="banner" class="banner" role="alert" hidden></div>
 <main id="view"></main>
-<div id="modal" class="overlay" hidden></div>
-<script src="app.js"></script>
+<div id="modal" class="scrim center" data-act="scrim" hidden></div>
+<div id="drawer" class="scrim side" data-act="scrim" hidden></div>
+<div id="toast" class="toast" role="status"></div>
+<!-- scripts -->
 </body>
 </html>

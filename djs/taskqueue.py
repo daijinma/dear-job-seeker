@@ -117,3 +117,10 @@ def by_search(conn, limit: int = 20) -> list[dict]:
            SELECT t.* FROM t JOIN g ON t.keyword IS g.keyword AND t.city = g.city
            ORDER BY g.last_id DESC, t.id""", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+def requeue(conn, task_ids) -> int:
+    """The user pressed retry: dead or login-blocked tasks start over with a fresh attempt budget."""
+    ids = [int(i) for i in task_ids]
+    return conn.execute(
+        "UPDATE tasks SET status='pending', attempts=0, next_run_at=0, last_error=NULL, locked_at=NULL "
+        f"WHERE status IN ('dead','waiting_login') AND id IN ({','.join('?' * len(ids))})", ids).rowcount

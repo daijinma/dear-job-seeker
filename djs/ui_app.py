@@ -3,20 +3,24 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 
 from djs import db, engine, envfile, ui_api
 
 UI_DIR = Path(__file__).with_name("ui")
+# One classic script, no modules: the files share a scope and run in this order (a file may only use, at load time,
+# what an earlier one defined).
+SCRIPTS = ("core.js", "components.js", "login.js", "search.js", "results.js", "settings.js", "main.js")
 
 
 def page() -> str:
     """index.html with CSS/JS inlined, so the window needs no file URL and pywebview starts no internal HTTP server."""
     html = (UI_DIR / "index.html").read_text(encoding="utf-8")
     css = (UI_DIR / "app.css").read_text(encoding="utf-8")
-    js = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    js = "\n".join((UI_DIR / name).read_text(encoding="utf-8") for name in SCRIPTS)
     return html.replace('<link rel="stylesheet" href="app.css">', f"<style>{css}</style>").replace(
-        '<script src="app.js"></script>', f"<script>{js}</script>")
+        "<!-- scripts -->", f"<script>{js}</script>")
 
 
 class Api:
@@ -29,10 +33,11 @@ class Api:
         conn = db.connect()
         try:
             return fn(conn, payload or {})
-        except (ValueError, KeyError) as e:
-            return {"error": str(e).strip("'\"")}
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+        except ValueError as e:  # the routes word their refusals in plain Chinese
+            return {"error": str(e)}
+        except Exception:
+            traceback.print_exc()  # for whoever started the app from a terminal; the window shows no exception names
+            return {"error": "出了点问题，请稍后再试"}
         finally:
             conn.close()
 
@@ -45,8 +50,9 @@ class Api:
             path = path if isinstance(path, str) else path[0]
             Path(path).write_text(text, encoding="utf-8")
             return {"saved": path}
-        except Exception as e:
-            return {"error": f"保存失败：{e}"}
+        except Exception:
+            traceback.print_exc()
+            return {"error": "保存失败，请换个位置或文件名再试"}
 
 
 def main(argv: list[str] | None = None) -> None:
