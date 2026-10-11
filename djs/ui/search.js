@@ -76,7 +76,8 @@ function searchState(s) {
   if (s.status === "running") return ["查找中", "", true];
   if (s.status === "waiting_login") return ["等你登录", "warn"];
   if (s.per_site.every((x) => x.status === "dead")) return ["没成功", "bad"];
-  // nothing found yet and every site still owed a retry: say so rather than "done"
+  // a search that is "retrying" (nothing works, a site owes a retry) ends up here like "done": nothing found yet and
+  // every site still owing a retry says so, rather than 已完成
   return !wholeJobs(s) && s.per_site.every((x) => x.outcome === "retrying" || x.status === "dead") ? ["稍后重试", "warn"] : ["已完成", "ok"];
 }
 
@@ -116,7 +117,7 @@ function paintSearches(searches) {
   paint($("#newest"), S.searched ? searchCard(searches[0]) : "");
   paint($("#sites"), sitePicker());
   paint($("#recent"), earlierHtml(searches));
-  return searches.some((s) => s.status === "running");
+  return searches.some((s) => s.status === "running");   // "retrying" is not polled: the retry comes by itself
 }
 
 async function refreshSearches(e) {

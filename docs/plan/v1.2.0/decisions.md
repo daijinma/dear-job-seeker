@@ -112,3 +112,7 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F48 | One site waiting out a cooldown (中智招聘) kept the whole search "running": wait_for_search waited its full 300 s, the app said 查找中 | fixed (3f35e78: `retrying` outcome; a search runs only while some site works; the app says 已完成 or 稍后重试 with the site's note) |
 | F49 | Review of the window close: the last wait had no timeout and only the main browser process was signalled | fixed (8ee5feb: own process group, one 15 s deadline for close → SIGTERM → SIGKILL of the group, taskkill /T on Windows, the profile reopens; real Chrome closed five ways) |
 | F50 | With no network the retry note read "网络不通，稍后再试，稍后会自动重试" | fixed ("later" said once) |
+| F51 | A 30 000-job database (60 searches × 14 sites): search list 7 ms, results page 5 ms, jobs_get 4 ms, a text search over everything 74 ms, status 0.3 ms | ok |
+| F52 | MCP host with the network down (every exit on a dead proxy): it named the cause (connection refused on all 12 sites, check the proxy) in 6 turns and made nothing up; but wait_for_search said "done" while every site was retrying | fixed (search status `retrying`; `done` = every site finished) |
+| F53 | Same run: status() showed no last_error for platforms whose tasks were failing and waiting to retry | fixed (retrying tasks report their reason and retry time) |
+| F54 | Same run: nothing showed that all traffic went through a proxy | fixed (status `exits`: the pool, masked, with what rests) |

@@ -295,6 +295,15 @@ def newest_card(page):
     return page.locator(".search-card").first
 
 
+def search_status(keyword=KEYWORD, city=CITY) -> str:
+    """How the service rolls the search up: running | retrying | waiting_login | done."""
+    conn = db.connect()
+    try:
+        return service.search_status(conn, keyword, city)["status"]
+    finally:
+        conn.close()
+
+
 def finish_search(page, **kw):
     start_search(page, **kw)
     expect(newest_card(page).locator(".pill")).to_have_text("已完成")
@@ -572,6 +581,7 @@ def test_a_site_that_waits_out_its_cooldown_does_not_keep_the_search_running(pag
     egress.report(conn, "direct", "zz", ok=False, blocked=True)   # every exit of 中智招聘 rests: its task is released, not run
     conn.close()
     card = finish_search(page)   # 已完成 although the site has not found anything yet
+    assert search_status() == "retrying"   # what the service says: nothing works, one site owes a retry. The page: a finished search
     expect(card.locator(".bar.busy")).to_have_count(0)
     expect(card).to_contain_text("已完成 5 / 6 个网站 · 已找到 125 个岗位")
     waiting = card.locator(".dot", has_text="中智招聘")
@@ -596,6 +606,10 @@ def test_a_search_whose_every_site_waits_for_its_next_try_says_so(page, app):
     conn.close()
     start_search(page)
     expect(newest_card(page).locator(".pill")).to_have_text("稍后重试")
+    assert search_status() == "retrying"   # not "done": the card says 稍后重试 and, like a finished search, is not polled
+    settled = app.calls["GET /api/searches"]
+    page.wait_for_timeout(1200)
+    assert app.calls["GET /api/searches"] == settled
 
 
 def test_a_retrying_site_says_later_once(page, app):

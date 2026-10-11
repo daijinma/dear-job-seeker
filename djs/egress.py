@@ -54,6 +54,21 @@ def list_(conn) -> list[dict]:
     return [{**dict(r), "id": mask(r["id"])} for r in rows]
 
 
+def _direct(conn) -> dict:
+    """The exit every request takes while none is configured, as a row of list_ (it rests and counts like any other)."""
+    return dict(conn.execute(
+        """SELECT 'direct' AS id, '*' AS provider, 1 AS enabled, COALESCE(MAX(blocked_until), 0) AS blocked_until,
+                  COALESCE(SUM(total_ok), 0) AS total_ok, COALESCE(SUM(total_fail), 0) AS total_fail
+           FROM egress_health WHERE egress_id='direct'""").fetchone())
+
+
+def exits(conn) -> list[dict]:
+    """The pool as status shows it: the rows of list_ (password masked, provider scope, health) and `cooling_down`: the
+    exit rests for at least one platform. 'direct' alone when none is configured."""
+    now = time.time()
+    return [{**r, "cooling_down": r["blocked_until"] > now} for r in list_(conn) or [_direct(conn)]]
+
+
 def _pool(conn, provider: str) -> list[str]:
     ids = lambda p: [r["id"] for r in conn.execute(  # noqa: E731
         "SELECT id FROM egress WHERE provider=? AND enabled=1 ORDER BY id", (p,))]

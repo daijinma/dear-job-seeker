@@ -275,6 +275,30 @@ def test_a_search_waiting_for_the_user_is_not_waited_on(env):
     assert (status["status"], status["per_site"][0]["outcome"], tid) == ("waiting_login", "waiting_login", 1)
 
 
+def test_a_search_is_done_when_every_site_finished_whether_it_found_nothing_or_failed(env):
+    job(env.conn, "a", "x", [task(env.conn, "a", "py")], title="t")   # found
+    task(env.conn, "b", "py")                                          # finished, found nothing
+    task(env.conn, "opt", "py", status="dead")                         # failed
+    status = call("wait_for_search", keyword="py", timeout=30)
+    assert (status["status"], "timed_out" in status) == ("done", False)
+    assert {s["provider"]: s["outcome"] for s in status["per_site"]} == {"a": "found", "b": "no_results", "opt": "failed"}
+    assert call("search_list")["result"][0]["status"] == "done"
+
+
+def test_a_search_whose_every_site_waits_for_its_next_try_is_retrying_not_done_and_not_waited_on(env):
+    """What a real client met with every exit pointing at a dead proxy: each site failed and waited for its next try,
+    and the search said "done", which reads as a success. It is retrying; the call still returns at once."""
+    for name in ("a", "b"):
+        retrying(env.conn, name, "py", "杭州", error="ConnectError: [Errno 61] Connection refused")
+    started = time.monotonic()
+    status = call("wait_for_search", keyword="py", city="杭州", timeout=30)
+    assert time.monotonic() - started < 2   # "retrying" is not "running": nothing is waited for
+    assert (status["status"], "timed_out" in status, status["jobs_total"]) == ("retrying", False, 0)
+    assert {s["provider"]: (s["outcome"], s["reason"]) for s in status["per_site"]} == {
+        "a": ("retrying", "网络不通，稍后再试"), "b": ("retrying", "网络不通，稍后再试")}
+    assert call("search_list")["result"][0]["status"] == "retrying"
+
+
 @pytest.fixture
 def waiting(env):
     """Search ('py', '杭州'): "a" is done and found a job, "b" failed and waits for its next try."""
@@ -287,13 +311,13 @@ def test_wait_for_search_does_not_wait_for_a_site_that_only_waits_for_its_next_t
     started = time.monotonic()
     status = call("wait_for_search", keyword="py", city="杭州", timeout=30)
     assert time.monotonic() - started < 2   # the retry is seconds away at best; nobody waits for it
-    assert (status["status"], "timed_out" in status, status["jobs_total"]) == ("done", False, 1)
+    assert (status["status"], "timed_out" in status, status["jobs_total"]) == ("retrying", False, 1)   # "b" is unfinished: not done
     sites = {s["provider"]: s for s in status["per_site"]}
     assert sites["a"]["outcome"] == "found" and not {"reason", "retry_at"} & set(sites["a"])
     assert (sites["b"]["outcome"], sites["b"]["status"], sites["b"]["reason"]) == ("retrying", "pending", "被网站暂时限制，稍后再试")
     assert sites["b"]["retry_at"] == taskqueue.get(env.conn, waiting.b)["next_run_at"]   # when it tries again
     assert sites["b"]["retry_at"] > time.time() and "completing" not in sites["b"]
-    assert call("search_list")["result"][0]["status"] == "done"
+    assert call("search_list")["result"][0]["status"] == "retrying"
 
 
 def test_jobs_get_and_the_results_page_say_searching_only_while_some_site_works(env, waiting):
@@ -313,17 +337,18 @@ def test_a_queued_site_that_never_failed_keeps_the_search_running_beside_one_tha
     assert call("jobs_get", keyword="py", city="杭州")["searching"] is True
     assert results.search_jobs(env.conn, "py", "杭州")["searching"] is True
     env.conn.execute("UPDATE tasks SET status='done' WHERE id=?", (queued,))
-    assert call("wait_for_search", keyword="py", city="杭州", timeout=30)["status"] == "done"   # "b" stays out of it
+    assert call("wait_for_search", keyword="py", city="杭州", timeout=30)["status"] == "retrying"   # "b" still owes its retry
 
 
 def test_a_site_whose_exits_all_rest_is_retrying_and_a_search_does_not_wait_for_the_cooldown(env):
     """What a real client met: one site waited out its exits' cooldown, minutes to half an hour, and the search said
-    running for all of it. The site tries again by itself; the search is done as soon as the others are."""
+    running for all of it. The site tries again by itself; the call returns as soon as the others are done, and says
+    retrying (not done: that site has not finished)."""
     egress.report(env.conn, "direct", "b", ok=False, blocked=True)   # every exit of "b" rests for 30 minutes
     engine.start_worker()
     call("search", keyword="py", city="杭州", providers=["a", "b"])
     status = call("wait_for_search", keyword="py", city="杭州", timeout=30)   # its retry is a minute away: it would time out
-    assert (status["status"], "timed_out" in status) == ("done", False)
+    assert (status["status"], "timed_out" in status) == ("retrying", False)
     sites = {s["provider"]: s for s in status["per_site"]}
     assert (sites["a"]["outcome"], sites["a"]["jobs"]) == ("found", 2)
     assert (sites["b"]["outcome"], sites["b"]["reason"]) == ("retrying", "这个网站刚才连续出错，正在歇一会儿")
@@ -553,8 +578,13 @@ def test_the_server_teaches_the_recommended_flow():
     assert steps == sorted(steps)   # in the order a client should use them
     for word in ("no_results", "waiting_login", "retrying", "retry_at", "salary_month_min", "min_month_salary", "next_offset"):
         assert word in text
-    assert "does not wait for it" in " ".join(text.split())   # a site that tries again later does not hold the call
-    assert "call status first" in text   # and where to look when it does not go as described
+    flat = " ".join(text.split())
+    assert "does not wait for it" in flat   # a site that tries again later does not hold the call
+    for line in ("- running: a site still works", "- retrying: no site works and at least one failed and waits for its next try",
+                 "- waiting_login: a site needs the user", "- done: every site finished"):
+        assert line in flat   # the four values of a search's status, one line each
+    assert "If every site is retrying, check status() for the exits and the reason before searching again" in flat
+    assert "call status first" in text and "exits" in text   # and where to look when it does not go as described
     assert 'title="会计"' in text and 'text="双休"' in text            # the role goes in the title, a condition in the text
     assert "floor_month_salary=8000" in text and "benefits" in text    # a hard pay floor has its own filter; the tags are searched
 
@@ -566,6 +596,10 @@ def test_the_new_and_changed_tools_come_with_an_example_each():
     for name in ("wait_for_search", "task_list", "search_list", "status"):   # where a site's retrying shows
         assert "retrying" in tools[name].description, name
     assert "is not waited for" in tools["wait_for_search"].description
+    for name in ("wait_for_search", "search_list"):   # the values of a search's status
+        assert all(value in tools[name].description for value in ("running", "retrying", "waiting_login", "done")), name
+    assert "check status() for the exits and the reason before searching again" in " ".join(tools["wait_for_search"].description.split())
+    assert "`exits`" in tools["status"].description and "'direct'" in tools["status"].description
     props = tools["jobs_get"].inputSchema["properties"]
     assert (props["limit"]["default"], props["fields"]["default"], props["dedupe"]["default"],
             props["complete_only"]["default"]) == (20, "summary", True, True)
@@ -621,7 +655,7 @@ def test_status_has_the_shape_clients_rely_on_and_needs_no_network_and_no_time(e
     begun = time.monotonic()
     got = call("status")
     assert time.monotonic() - begun < 1
-    assert set(got) == {"version", "data_dir", "workers", "queue", "browser", "logins", "platforms"}
+    assert set(got) == {"version", "data_dir", "workers", "queue", "exits", "browser", "logins", "platforms"}
     assert got["data_dir"] == str(db.home()) and got["version"]
     assert list(got["workers"]) == list(got["platforms"]) == list(env.provs)   # one entry per platform, in registry order
     assert set(got["browser"]) == {"executable", "hint", "playwright", "cdp_url_set", "login_windows", "profiles_in_use"}
@@ -675,6 +709,26 @@ def test_status_tells_in_plain_words_why_the_newest_task_of_a_platform_failed_or
     assert call("status")["queue"]["dead"] == 3 and call("status")["queue"]["waiting_login"] == 1
 
 
+def test_status_tells_why_a_platform_whose_newest_task_waits_for_its_next_try_is_not_getting_anywhere(env, chrome):
+    """What a real client met with the network down: every task failed and waited for its retry, and last_error was
+    null on every platform, so the cause showed in wait_for_search only."""
+    refused = retrying(env.conn, "a", "py", error="ConnectError: [Errno 61] Connection refused")
+    rested = retrying(env.conn, "b", "py", error="ConnectError: refused | then: all egress for b are cooling down")
+    retrying(env.conn, "opt", "py")                          # an old retry ...
+    task(env.conn, "opt", "py2")                             # ... behind a task that finished: history
+    running = retrying(env.conn, "login", "py")
+    env.conn.execute("UPDATE tasks SET status='running' WHERE id=?", (running,))   # its retry runs: it works now
+    task(env.conn, "window", "py", status="pending")        # queued, never failed: it waits for its turn only
+    platforms = call("status")["platforms"]
+    due = lambda tid: taskqueue.get(env.conn, tid)["next_run_at"]   # noqa: E731
+    assert platforms["a"]["last_error"] == {"task_id": refused, "status": "retrying", "kind": "network",
+                                            "reason": "网络不通，稍后再试", "retry_at": due(refused)}
+    assert platforms["b"]["last_error"] == {"task_id": rested, "status": "retrying", "kind": "network",
+                                            "reason": "网络不通，稍后再试", "retry_at": due(rested)}
+    assert platforms["a"]["last_error"]["retry_at"] > time.time()   # unix time, in the future
+    assert [platforms[name]["last_error"] for name in ("opt", "login", "window", "bro")] == [None] * 4   # "bro" never ran
+
+
 def test_status_lists_missing_keys_by_name_and_never_shows_a_value(env, chrome):
     platforms = call("status")["platforms"]
     assert platforms["keyed"]["configured"] is False and platforms["keyed"]["missing_env"] == ["DJS_FAKE_TOOLS_KEY"]
@@ -691,6 +745,36 @@ def test_status_names_the_exits_that_are_cooling_down_without_their_passwords(en
     [cooling] = got["platforms"]["a"]["cooling_down"]
     assert cooling["exit"] == "http://u:***@proxy.test:8080" and cooling["until"] == pytest.approx(time.time() + 1800, abs=60)
     assert got["platforms"]["b"]["cooling_down"] == [] and "pw@" not in json.dumps(got)
+
+
+def test_status_lists_the_exits_as_egress_list_shows_them_and_whether_they_cool_down(env, chrome, monkeypatch):
+    """What a real client could not see: that every request went out through a proxy, and that the proxy was dead."""
+    monkeypatch.setattr(httpx.Client, "send", lambda *a, **k: pytest.fail("status must not touch the network"))
+    half_hour = pytest.approx(time.time() + 1800, abs=60)
+
+    def exit_(id_, provider, **kw):
+        return {"id": id_, "provider": provider, "enabled": 1, "blocked_until": 0, "total_ok": 0, "total_fail": 0,
+                "cooling_down": False, **kw}
+
+    assert call("status")["exits"] == [exit_("direct", "*")]                # none configured: every request goes direct
+    egress.add(env.conn, "http://u:pw@proxy.test:8080")                     # shared by every platform
+    egress.add(env.conn, "http://other.test:3128", provider="a")            # dedicated to one
+    egress.report(env.conn, "http://u:pw@proxy.test:8080", "b", ok=False, blocked=True)   # it rests for one platform ...
+    egress.report(env.conn, "http://u:pw@proxy.test:8080", "a", ok=False)                 # ... and failed for another
+    egress.report(env.conn, "http://other.test:3128", "a", ok=True)
+    got = call("status")
+    assert got["exits"] == [exit_("http://other.test:3128", "a", total_ok=1),
+                            exit_("http://u:***@proxy.test:8080", "*", total_fail=2, blocked_until=half_hour, cooling_down=True)]
+    assert "pw@" not in json.dumps(got)                                     # the password is masked, as in egress_list
+    assert [{k: v for k, v in e.items() if k != "cooling_down"} for e in got["exits"]] == call("egress_list")["result"]
+    egress.remove(env.conn, "http://u:***@proxy.test:8080")                 # the masked form, as shown
+    egress.remove(env.conn, "http://other.test:3128")
+    assert call("status")["exits"] == [exit_("direct", "*")]                # nothing configured: direct again
+    egress.report(env.conn, "direct", "a", ok=False, blocked=True)          # and direct rests and counts like any exit
+    rested = {"total_fail": 1, "blocked_until": half_hour, "cooling_down": True}
+    assert call("status")["exits"] == [exit_("direct", "*", **rested)]
+    egress.add(env.conn, "direct", provider="a")                            # configured on purpose: listed with its scope
+    assert call("status")["exits"] == [exit_("direct", "a", **rested)]
 
 
 def test_status_says_which_browser_a_login_window_would_use_or_why_there_is_none(env, chrome):
@@ -720,4 +804,5 @@ def test_status_shows_the_open_login_windows_and_the_profiles_in_use(env, chrome
 
 def test_djs_call_status_prints_the_same_json(env, chrome, capsys):
     assert cli.main(["call", "status"]) == 0
-    assert set(json.loads(capsys.readouterr().out)) == {"version", "data_dir", "workers", "queue", "browser", "logins", "platforms"}
+    assert set(json.loads(capsys.readouterr().out)) == {"version", "data_dir", "workers", "queue", "exits", "browser", "logins",
+                                                        "platforms"}

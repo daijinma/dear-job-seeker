@@ -283,7 +283,7 @@ def test_a_task_that_waits_for_its_next_try_is_not_searching_until_it_runs_again
     conn.execute("UPDATE tasks SET status='done' WHERE id=?", (queued,))
     assert results.search_jobs(conn, "py", None)["searching"] is False   # only the retry is left, and that comes by itself
     assert service.jobs_get(conn, keyword="py")["searching"] is False
-    assert service.search_status(conn, "py")["status"] == "done"
+    assert service.search_status(conn, "py")["status"] == "retrying"   # nothing works, but that site has not finished: not done
     conn.execute("UPDATE tasks SET status='running' WHERE id=?", (waiting,))
     assert results.search_jobs(conn, "py", None)["searching"] is True    # the retry runs: the search is under way again
     assert service.search_status(conn, "py")["status"] == "running"
@@ -293,6 +293,35 @@ def test_a_search_that_waits_for_a_login_and_a_retry_is_waiting_for_the_user(con
     task(conn, "nowcoder", "py", status="waiting_login")
     retrying(conn, "chinahr", "py")
     assert service.search_status(conn, "py")["status"] == "waiting_login"   # the user is the one who can move it
+
+
+@pytest.mark.parametrize("states, want", [
+    (["done", "dead", "done"], "done"),                     # every site finished: found, nothing found or failed
+    (["done", "retrying"], "retrying"),                     # one site has yet to try again
+    (["retrying", "retrying", "retrying"], "retrying"),     # all of them
+    (["dead", "retrying"], "retrying"),
+    (["retrying", "waiting_login"], "waiting_login"),       # the user is the one who can move it
+    (["done", "waiting_login"], "waiting_login"),
+    (["retrying", "pending"], "running"),                   # a queued task that never failed will run
+    (["retrying", "running", "waiting_login"], "running"),  # and work beats everything else
+])
+def test_a_search_is_running_then_waiting_login_then_retrying_then_done(conn, states, want):
+    for provider, state in zip(("nowcoder", "chinahr", "iguopin"), states):
+        if state == "retrying":
+            retrying(conn, provider, "py")
+        else:
+            task(conn, provider, "py", status=state)
+    [search] = service.searches(conn)
+    assert search["status"] == want == service.search_status(conn, "py")["status"]
+
+
+def test_the_status_of_a_search_follows_the_newest_task_of_each_site(conn):
+    """The status rolls up what per_site shows: a site whose newest task finished is not retrying because an earlier
+    try of the same search still owes a retry."""
+    retrying(conn, "nowcoder", "py")
+    task(conn, "nowcoder", "py")   # the search was started again, and this one finished
+    [search] = service.searches(conn)
+    assert (search["status"], [s["outcome"] for s in search["per_site"]]) == ("done", ["no_results"])
 
 
 def test_description_is_the_stored_text_or_none(conn):
@@ -397,13 +426,13 @@ def test_annotate_searches_adds_reason_kind_and_the_newest_task_per_site(conn):
     assert all("last_error" not in s for s in search["per_site"])
 
 
-def test_a_site_that_waits_for_its_next_try_says_why_and_when_and_the_search_is_done(conn):
+def test_a_site_that_waits_for_its_next_try_says_why_and_when_and_the_search_is_retrying(conn):
     done, waiting = task(conn, "chinahr", "py", "杭州"), retrying(
         conn, "nowcoder", "py", "杭州", "ConnectError: refused | then: all egress for nowcoder are cooling down")
     job(conn, "chinahr", "a", [done])
     [search] = results.annotate_searches(conn, service.searches(conn))
     sites = {s["provider"]: s for s in search["per_site"]}
-    assert search["status"] == "done"   # nothing works: the retry comes by itself
+    assert search["status"] == "retrying"   # nothing works and the retry comes by itself: not finished, so not "done"
     assert (sites["nowcoder"]["status"], sites["nowcoder"]["outcome"], sites["nowcoder"]["task_id"]) == ("pending", "retrying", waiting)
     assert (sites["nowcoder"]["kind"], sites["nowcoder"]["reason"]) == ("network", "网络不通，稍后再试")
     assert sites["nowcoder"]["retry_at"] == taskqueue.get(conn, waiting)["next_run_at"]

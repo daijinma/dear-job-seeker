@@ -336,12 +336,15 @@ def _retry_info(task: dict) -> dict:
     return {"reason": _plain(task["last_error"])[1], "retry_at": task["next_run_at"]}
 
 
-def _search_status(tasks: list[dict]) -> str:
+def _search_status(tasks: list[dict], per_site: list[dict]) -> str:
     """running while some task works (one that waits for its next try does not), else waiting_login if one needs the
-    user, else done."""
+    user, else retrying if a site failed and waits for its next try (that site is not finished: it runs again by
+    itself), else done: every site finished (found, no_results or failed)."""
     if taskqueue.searching(tasks):
         return "running"
-    return "waiting_login" if any(t["status"] == "waiting_login" for t in tasks) else "done"
+    if any(t["status"] == "waiting_login" for t in tasks):
+        return "waiting_login"
+    return "retrying" if any(site["outcome"] == "retrying" for site in per_site) else "done"
 
 
 def _site(name: str, task: dict, found: dict) -> dict:
@@ -365,12 +368,13 @@ def _search(conn, keyword, city, tasks: list[dict]) -> dict:
         "FROM task_jobs tj JOIN tasks t ON t.id=tj.task_id JOIN jobs j ON j.id=tj.job_id "
         f"WHERE tj.task_id IN ({','.join('?' * len(ids))}) GROUP BY t.provider", ids)}
     newest = {t["provider"]: t for t in tasks}  # tasks arrive in id order, so the last one per platform is the newest
+    per_site = [_site(name, t, found) for name, t in newest.items()]
     return {"keyword": keyword, "city": city or None, "task_ids": ids,
             "created_at": max(t["created_at"] for t in tasks),
-            "status": _search_status(tasks),
+            "status": _search_status(tasks, per_site),
             "jobs_total": sum(n for n, _ in found.values()),
             "whole": query.count(conn, query.where(search=(keyword, city))),
-            "per_site": [_site(name, t, found) for name, t in newest.items()]}
+            "per_site": per_site}
 
 
 def searches(conn, limit=20) -> list[dict]:
@@ -511,11 +515,16 @@ def _browser_state() -> dict:
 
 
 def _problem(task) -> dict | None:
-    """Why a platform's newest task failed or waits for a login, in plain words; None when it did neither."""
-    if task is None or task["status"] not in ("dead", "waiting_login"):
+    """Why a platform's newest task failed, waits for a login or waits for its next try, in plain words (the last one is
+    reported as status 'retrying' and carries `retry_at`, unix time); None when it did none of these."""
+    if task is None:
+        return None
+    waits = taskqueue.retrying(task["status"], task["last_error"])
+    if not waits and task["status"] not in ("dead", "waiting_login"):
         return None
     kind, reason = _plain(task["last_error"])
-    return {"task_id": task["id"], "status": task["status"], "kind": kind, "reason": reason}
+    problem = {"task_id": task["id"], "status": "retrying" if waits else task["status"], "kind": kind, "reason": reason}
+    return {**problem, "retry_at": task["next_run_at"]} if waits else problem
 
 
 def _platform(name: str, newest, cooling: list) -> dict:
@@ -525,7 +534,7 @@ def _platform(name: str, newest, cooling: list) -> dict:
 
 def _platforms(conn) -> dict[str, dict]:
     """Per platform: its keys (names of the missing ones only), the exits that are cooling down, and its newest task's
-    problem, if any."""
+    problem, if any (failed, waiting for a login or waiting for its next try)."""
     newest = {r["provider"]: r for r in conn.execute(
         "SELECT * FROM tasks WHERE id IN (SELECT MAX(id) FROM tasks GROUP BY provider)")}
     cooling: dict[str, list] = {}
@@ -538,11 +547,12 @@ def _platforms(conn) -> dict[str, dict]:
 def status(conn) -> dict:
     """What is going on, in one call: no network, well under a second. `workers` tells, per platform, whether THIS
     process's worker thread is alive, the task the platform runs right now and the tasks that failed and wait for their
-    next try (the app, an MCP server and `djs work` each run workers on the same database)."""
+    next try (the app, an MCP server and `djs work` each run workers on the same database). `exits` is the egress pool
+    as egress_list shows it, plus whether each exit is cooling down (egress.exits)."""
     running, retrying, alive = _running(conn), _retrying(conn), engine.workers()
     return {"version": app_version() or "dev", "data_dir": str(db.home()),
             "workers": {name: {"alive_in_this_process": alive[name], "running": running.get(name),
                                "retrying": retrying.get(name, [])} for name in alive},
-            "queue": _queue(conn), "browser": _browser_state(),
+            "queue": _queue(conn), "exits": egress.exits(conn), "browser": _browser_state(),
             "logins": {row["provider"]: {"state": row["state"], "expires_at": row["expires_at"]} for row in login_overview()},
             "platforms": _platforms(conn)}
