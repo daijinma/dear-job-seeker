@@ -19,7 +19,7 @@ Decisions taken without a round-trip are marked `assumed:` and can be reversed.
 | A12 | assumed: the Intel Mac build runs on the native `macos-15-intel` runner; a repository variable switches it to Rosetta on the Apple-silicon runner | GitHub retires Intel runners over time |
 | A13 | assumed: the CI smoke test includes one real crawl (nowcoder); a release whose build cannot crawl fails instead of shipping | an untested download is worse than a late one |
 | A14 | assumed: duplicates are merged only across platforms; one platform's postings with the same title stay separate | in a live run all three same-site repeats were distinct postings (other pay, other JD) |
-| A15 | assumed: `search` without `providers` uses the same "usable right now" set as the app's preselection (A9), minus platforms that have no code for the asked city; BOSS only when named | an AI client must not open a browser window or wait for a login nobody asked for |
+| A15 | assumed: `search` without `providers` uses the same "usable right now" set as the app's preselection (A9), minus platforms that have no code for the asked city; BOSS only when named | an MCP client must not open a browser window or wait for a login nobody asked for |
 | A16 | assumed: one `wait_for_search` call blocks at most 600 s and then answers `timed_out: true` | MCP clients time out long calls; calling again is cheap |
 | A17 | assumed: `jobs_get` lists newest first; the results page keeps its interleaved order | a client filters and pages; the page is read top to bottom |
 | A18 | assumed: the app also preselects the sites that need a city (58同城, 赶集) and uses them only when a city is filled in; a site that cannot take a search is skipped and named instead of refusing the whole search (amends A9) | a typed city should reach every site that covers it, and one uncovered city must not cost the other sites |
@@ -37,7 +37,7 @@ Decisions taken without a round-trip are marked `assumed:` and can be reversed.
 | F6 | 公共招聘网 "会计 · 杭州" = 0 | not a bug: the site has few local postings ("会计 · 北京" = 17) |
 | F7 | MCP server: a platform's worker thread could die at startup and leave its tasks pending forever | fixed (DB init once per process, worker loops never exit) |
 
-## Findings from a real AI-client session (a job seeker's request over MCP: "杭州 Python 后端，月薪 ≥1.5 万，挑 5 个")
+## Findings from a real MCP host session (a job seeker's request over MCP: "杭州 Python 后端，月薪 ≥1.5 万，挑 5 个")
 The client produced 5 sound recommendations, and reported these tool problems:
 | # | Finding | Status |
 |---|---|---|
@@ -73,10 +73,10 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F25 | Starting a search next to running workers failed about 1 run in 6 with "database is locked" (the app's search start had the same flaw) | fixed (the write lock is taken first; regression test) |
 | F26 | Live run "Python 后端 · 杭州": 12 sites in 2 min 34 s, 9 found jobs, 3 had none, 0 failed; 147 records, 107 complete; one job on 智联 and 前程无忧 merged; ≥ 1.5 万/月 leaves 74 | ok |
 
-## Findings from the second round of real use (desktop tour and an AI client, same day)
+## Findings from the second round of real use (desktop tour and an MCP host, same day)
 | # | Finding | Status |
 |---|---|---|
-| F27 | AI client, same request as F8–F13: it used search → wait_for_search → jobs_get with filters and picked 5 sound jobs in 5 turns, no context trouble | ok |
+| F27 | MCP host, same request as F8–F13: it used search → wait_for_search → jobs_get with filters and picked 5 sound jobs in 5 turns, no context trouble | ok |
 | F28 | 鱼泡 jobs had no link, so the client could not recommend them (e.g. 阿里云 2–4 万/月) | fixed (`www.yupao.com/zhaogong/<jobId>.html`, checked on a live job) |
 | F29 | `text="Python"` also matched descriptions, so Java and 数据分析 roles came back | fixed (`title` filter; live: `title=会计` 125 vs `text=会计` 147) |
 | F30 | `wait_for_search(timeout=300)` timed out while 前程无忧 fetched its last details (no JD in its list: 145 details at 3 s ≈ 8 min); the client read the results anyway | note: the lists are there at once and the details fill in |
@@ -88,7 +88,7 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F36 | Real logins: 智联, 前程无忧 and 康强 worked; BOSS and 猎聘 showed the login page for ~1 s, then about:blank. Any Playwright-driven page is blanked within 1–2 s there (4/4 runs, with or without stealth scripts); a plain Chrome read only at the browser level kept both pages alive (4/4) | fix in progress (A19) |
 | F37 | A process that ended in the middle of a 前程无忧 detail pass left its task 'running'; other processes could not take it for 15 minutes (the lock is set once at claim time and never refreshed) | fixed (heartbeat with every request and every 30 s of waiting, 3-minute lock, claim-guarded writes, tasks handed back on a normal stop or SIGTERM; live: resumed 0.2 s after a restart) |
 | F38 | Logged-in vs anonymous, same searches (copies of the user's real logins): 康强 15 complete vs none (login required: works); 智联 20 vs 20 complete on page 1 (no gain seen; its anonymous API already carries the JD); 前程无忧 0 vs 50 complete: logged in it moved to the PC search in a browser, which hung on the WAF cookie (20 s timeout) until the site cooled down | 前程无忧 fixed (ac076ac: a login no longer switches the transport); 智联 over 3 pages (Java · 杭州): logged in 60 (59 complete) in a browser, anonymous 60 (60 complete) in 7 s, only 21 shared: a login changes which jobs come back, not how many; kept as is, union of both left to the user |
-| F39 | AI client, "宁波 会计，月薪 8000 以上，最好双休" on 1b7d88b: 12 sites done, 222 complete jobs, 5 sound picks with links (one alternative from 58同城) in 12 turns | ok |
+| F39 | MCP host, "宁波 会计，月薪 8000 以上，最好双休" on 1b7d88b: 12 sites done, 222 complete jobs, 5 sound picks with links (one alternative from 58同城) in 12 turns | ok |
 | F40 | `text="双休"` missed the best job: its 双休 was only in 前程无忧's welfare tags, which were not stored | fixed (`benefits` from welfare tags, searched by `text`; live 宁波 会计: 前程无忧 41/50, 58同城 23/50, 赶集 8/8, 智联 8/20, 鱼泡 1/15 jobs carry them) |
 | F41 | `min_month_salary` is an overlap, so 6k–9k came back for "8000 以上" | fixed (`floor_month_salary`: the lowest pay; live: 7 vs 22 with `min_month_salary`) |
 | F42 | `job_detail` returned the platform's raw JSON (share links, HR data): noisy for a client | fixed (clean by default: 8.4 KB → 1.7 KB on average; `raw=True`) |
@@ -100,9 +100,9 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | # | Check | Result |
 |---|---|---|
 | R1 | Desktop tour, fresh data folder, "Python 后端 · 杭州": 12 sites preselected (58同城 and 赶集 included with a city), one count everywhere (228), salary chips, a merged job with its other site, no page errors | ok |
-| R2 | AI client, "宁波 会计，月薪 8000 以上，最好双休": used title=, floor_month_salary= and text="双休"; 12 matches, 5 picks all with 双休 (mostly from welfare tags), 5 turns, no tool failures | ok |
+| R2 | MCP host, "宁波 会计，月薪 8000 以上，最好双休": used title=, floor_month_salary= and text="双休"; 12 matches, 5 picks all with 双休 (mostly from welfare tags), 5 turns, no tool failures | ok |
 | R3 | CI build of all three downloads with smoke tests (selftest, CLI, real crawl, MCP over stdio, app launch on macOS) | ok (run 38147690094 on 1b7d88b; the tag build repeats it) |
-| R4 | The released macOS arm64 zip, downloaded and unzipped like a user: selftest, `status` (version 1.2.0, Chrome found), an AI client using its `djs` as the MCP command with no keys configured ("北京 产品经理 2 万以上"): 5 sound picks in 5 turns | ok |
+| R4 | The released macOS arm64 zip, downloaded and unzipped like a user: selftest, `status` (version 1.2.0, Chrome found), an MCP host using its `djs` as the MCP command with no keys configured ("北京 产品经理 2 万以上"): 5 sound picks in 5 turns | ok |
 
 ## Findings after the release (simulated use on 1.2.0)
 | # | Finding | Status |
