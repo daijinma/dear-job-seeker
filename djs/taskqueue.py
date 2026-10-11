@@ -83,6 +83,7 @@ def as_dict(row) -> dict:
 
 
 def list_(conn, status: str | None = None, limit: int = 20) -> list[dict]:
-    rows = conn.execute("SELECT * FROM tasks WHERE (? IS NULL OR status=?) ORDER BY id DESC LIMIT ?",
+    rows = conn.execute("SELECT t.*, (SELECT COUNT(*) FROM jobs j WHERE j.task_id=t.id) AS jobs_found "
+                        "FROM tasks t WHERE (? IS NULL OR t.status=?) ORDER BY t.id DESC LIMIT ?",
                         (status, status, limit)).fetchall()
     return [as_dict(r) for r in rows]

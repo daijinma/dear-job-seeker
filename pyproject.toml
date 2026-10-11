@@ -19,4 +19,4 @@ build-backend = "setuptools.build_meta"
 include = ["djs*"]
 
 [tool.setuptools.package-data]
-djs = ["schema.sql"]
+djs = ["schema.sql", "ui/*"]

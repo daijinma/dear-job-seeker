@@ -1,0 +1,89 @@
+:root {
+  --ground: #F5F5F8; --card: #fff; --ink: #1A1A24; --sub: #666673; --line: #E4E4EC;
+  --primary: #7C4DEB; --primary-bg: #F0EAFD; --ok: #12A06A; --ok-bg: #E3F6EE; --warn: #C77700; --warn-bg: #FFF1D6;
+  --shadow: 0 8px 28px rgba(26, 26, 36, .07);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: 15px/1.5 "DM Sans", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+a { color: var(--primary); text-decoration: none; font-weight: 600; cursor: pointer; }
+h1, h2, h3 { margin: 0; letter-spacing: -.02em; }
+.top { display: flex; justify-content: space-between; align-items: center; padding: 16px 48px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 18px; font-weight: 700; }
+.logo { width: 32px; height: 32px; border-radius: 10px; background: var(--primary); display: grid; place-items: center; }
+.logo svg { width: 16px; height: 16px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; }
+nav { display: flex; gap: 28px; }
+nav a { color: var(--sub); font-weight: 400; }
+nav a.active { color: var(--primary); font-weight: 700; }
+main { max-width: 1440px; margin: 0 auto; padding: 24px 80px 64px; }
+.narrow { max-width: 1120px; margin: 0 auto; }
+.settings.narrow { max-width: 920px; }
+.card { background: var(--card); border-radius: 20px; box-shadow: var(--shadow); padding: 28px; }
+.sub { color: var(--sub); }
+.label { font-weight: 700; color: var(--sub); font-size: 14px; margin: 28px 0 12px; }
+
+.btn { border: 0; border-radius: 12px; padding: 12px 22px; font: inherit; font-weight: 700; cursor: pointer; background: var(--ground); color: var(--ink); }
+.btn.primary { background: var(--primary); color: #fff; }
+.btn.line { background: var(--card); border: 1px solid var(--line); }
+.btn:disabled { opacity: .55; cursor: default; }
+.chip { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 8px 18px; font: inherit; background: var(--card); color: var(--ink); border: 1px solid var(--line); cursor: pointer; }
+.chip.on { background: var(--primary-bg); border-color: var(--primary); color: var(--primary); font-weight: 700; }
+.chip.off { cursor: default; }
+.pill { border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; background: var(--primary-bg); color: var(--primary); }
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.gray { background: var(--ground); color: var(--sub); }
+
+.hero { text-align: center; padding-top: 24px; }
+.hero h1 { font-size: 56px; font-weight: 800; }
+.hero p { margin: 10px 0 0; font-size: 17px; }
+.accent { font: 400 30px Caveat, "Segoe Script", cursive; color: var(--primary); margin-top: 8px; }
+.searchbar { display: flex; gap: 12px; padding: 14px; margin-top: 28px; border-radius: 20px; }
+.field { flex: 1; background: var(--ground); border-radius: 12px; padding: 8px 18px; display: flex; flex-direction: column; }
+.field span { font-size: 12px; color: var(--sub); }
+.field input { border: 0; background: none; font: inherit; font-size: 16px; outline: none; padding: 2px 0; }
+.searchbar .btn { padding: 0 36px; font-size: 16px; }
+.msg { color: var(--warn); margin: 10px 4px 0; min-height: 22px; }
+.chips { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(2, 1fr); }
+.recent { padding: 18px 20px; box-shadow: none; border: 1px solid var(--line); border-radius: 16px; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.recent b { font-size: 16px; }
+
+.head { display: flex; justify-content: space-between; align-items: flex-start; }
+.head h1 { font-size: 40px; font-weight: 800; }
+.jobs { display: grid; gap: 20px; grid-template-columns: repeat(3, 1fr); margin-top: 24px; }
+.job { padding: 22px 24px; }
+.job h3 { font-size: 18px; }
+.salary { font-size: 26px; font-weight: 800; color: var(--primary); letter-spacing: -.02em; margin: 14px 0; }
+.tags { display: flex; gap: 8px; margin-bottom: 14px; }
+.empty { text-align: center; padding: 56px 0; }
+
+.overlay { position: fixed; inset: 0; background: rgba(26, 26, 36, .55); display: grid; place-items: start center; padding-top: 90px; }
+.overlay[hidden] { display: none; }
+.modal { width: 600px; max-width: 92vw; border-radius: 28px; padding: 40px; }
+.modal h2 { font-size: 32px; font-weight: 800; }
+.steps { list-style: none; padding: 0; margin: 20px 0; display: grid; gap: 14px; }
+.steps li { display: flex; gap: 14px; align-items: center; }
+.steps i { width: 30px; height: 30px; border-radius: 50%; background: var(--primary-bg); color: var(--primary); display: grid; place-items: center; font-style: normal; font-weight: 700; font-size: 13px; }
+.note { background: var(--ok-bg); color: var(--ok); border-radius: 12px; padding: 16px 18px; font-size: 14px; }
+.actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+
+.settings { display: grid; gap: 20px; }
+.settings h1 { font-size: 44px; font-weight: 800; margin-bottom: 4px; }
+.settings h2 { font-size: 20px; }
+.settings .sub { font-size: 13px; margin: 2px 0 18px; }
+.opts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.opt { text-align: left; border: 2px solid var(--line); background: var(--card); border-radius: 14px; padding: 16px 18px; font: inherit; cursor: pointer; }
+.opt b { display: block; font-size: 18px; }
+.opt small { color: var(--sub); }
+.opt.on { border-color: var(--primary); background: var(--primary-bg); }
+.opt.on b { color: var(--primary); }
+.switch { width: 48px; height: 28px; border-radius: 999px; border: 0; background: var(--line); position: relative; cursor: pointer; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: left .15s; }
+.switch.on { background: var(--primary); }
+.switch.on::after { left: 23px; }
+.proxy { margin-top: 18px; display: grid; gap: 10px; }
+.proxy input { flex: 1; border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; font: inherit; }
+
+@media (max-width: 1100px) { main { padding: 24px 32px 48px; } .jobs { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 900px) { .top { padding: 16px 24px; } .hero h1 { font-size: 40px; } .grid, .opts { grid-template-columns: 1fr; } .searchbar { flex-wrap: wrap; } }

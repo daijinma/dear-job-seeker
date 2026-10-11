@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
@@ -92,6 +93,9 @@ def egress_list() -> dict:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["ui"]:
+        from djs import ui_server
+        return ui_server.main(sys.argv[2:])
     engine.start_worker()
     mcp.run(transport="stdio")
 
