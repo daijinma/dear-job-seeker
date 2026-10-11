@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from urllib.parse import urlencode, urlparse
 
+import httpx
+
 from ._browser import XHR_ACCEPT, api_get, fresh_visit, is_browser
 from .base import Blocked, Login, LoginRequired, Provider, get_json, need
 
@@ -32,6 +34,16 @@ def check_body(d: dict) -> dict:
     if "未登录" in msg:
         raise LoginRequired(f"Boss code={code} {msg}")
     raise Blocked(f"Boss code={code} {msg}")
+
+
+def _api(client, url: str, params: dict) -> dict:
+    """One API call inside the page just visited. A call the page could not make at all ("Failed to fetch") means Boss
+    replaced or bounced the page (it blanks pages an automation drives): Blocked, a cooldown, not a network error whose
+    quick retries would load page after page under the same risk control."""
+    try:
+        return check_body(get_json(api_get(client, url, params=params, headers=HEADERS)))
+    except httpx.ConnectError as e:
+        raise Blocked(f"Boss page went away before the call: {e}") from e
 
 
 def _salary(*texts) -> str | None:
@@ -86,7 +98,7 @@ class Boss(Provider):
         params = {"query": payload["keyword"], "city": self.city_code(payload.get("city")) or NATIONWIDE,
                   "page": page, "pageSize": self.page_size, "scene": 1}
         self._visit(client, self._search_page(payload))
-        zp = check_body(get_json(api_get(client, SEARCH_URL, params=params, headers=HEADERS)))
+        zp = _api(client, SEARCH_URL, params)
         return need(zp, "jobList", typ=list)
 
     def job_id(self, job: dict) -> str:
@@ -97,7 +109,7 @@ class Boss(Provider):
         if job.get("lid"):
             params["lid"] = job["lid"]
         self._visit(client, SEARCH_PAGE)  # the job's own page drew a security check within two visits; the list page does not
-        zp = check_body(get_json(api_get(client, DETAIL_URL, params=params, headers=HEADERS)))
+        zp = _api(client, DETAIL_URL, params)
         need(zp, "jobInfo", typ=dict)
         return zp
 

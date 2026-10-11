@@ -332,3 +332,20 @@ def test_an_anonymous_detail_cannot_complete_a_job_that_lacks_a_salary():
     # logged in, the detail carries the salary as well
     assert b.detail_can_fill(["salary"], True) is True
     assert b.detail_can_fill(["salary", "description"], True) is True
+
+
+class _PageGone(FakeBrowser):
+    """The page Boss blanked: every call made inside it fails the way a browser's fetch does."""
+
+    def get(self, url, paced=True, **kwargs):
+        raise httpx.ConnectError("TypeError: Failed to fetch")
+
+
+def test_a_call_the_page_could_not_make_is_blocked_not_a_network_retry():
+    """Boss blanks a page an automation drives and the call fails with "Failed to fetch". That is risk control: a
+    cooldown, not a quick retry that loads more pages under the same eye (a logged-in run retried 8 times)."""
+    with pytest.raises(Blocked, match="went away"):
+        Boss().fetch(_PageGone(), {"keyword": "x"}, 1)
+    job = fixture("boss_list.json")["zpData"]["jobList"][0]
+    with pytest.raises(Blocked, match="went away"):
+        Boss().detail(_PageGone(), job)
