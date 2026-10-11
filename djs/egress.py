@@ -28,9 +28,26 @@ def mask(url: str) -> str:
     return url.replace(f":{u.password}@", ":***@", 1)
 
 
+def normalize(url: str) -> str:
+    """'direct', or an http(s) proxy URL with a host and a valid port. What people type is taken as they mean it: spaces
+    around it go, and "127.0.0.1:7890" (how most proxy apps show their address) is http://127.0.0.1:7890."""
+    url = (url or "").strip()
+    if url == "direct":
+        return url
+    if "://" not in url:
+        url = "http://" + url
+    parts = urlsplit(url)
+    try:
+        parts.port  # a port that is not a number from 0 to 65535 is a ValueError here
+    except ValueError:
+        raise ValueError("egress port must be a number from 1 to 65535") from None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("egress url must be 'direct', http(s)://host:port or host:port")
+    return url
+
+
 def add(conn, url: str, provider: str = "*") -> dict:
-    if url != "direct" and not url.startswith(("http://", "https://")):
-        raise ValueError("egress url must be 'direct' or http(s)://...")
+    url = normalize(url)
     if provider != "*":
         providers.get(provider)  # KeyError on typos instead of a silently unused dedicated row
     conn.execute("INSERT INTO egress(id, provider) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, enabled=1",

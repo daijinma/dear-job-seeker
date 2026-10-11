@@ -281,8 +281,10 @@ def test_egress_masks_password(call):
     assert "secret" not in json.dumps(body) and "u:***@proxy.test:8080" in json.dumps(body)
     call("DELETE /api/egress", {"url": "http://u:***@proxy.test:8080"})
     assert call("GET /api/egress") == {"egress": []}
-    assert call("POST /api/egress", {"url": "ftp://x"}) == {"error": "代理地址要以 http:// 或 https:// 开头"}
-    assert call("POST /api/egress", {"url": "direct"}) == {"error": "代理地址要以 http:// 或 https:// 开头"}
+    bad = {"error": "代理地址的格式不对，例如 http://127.0.0.1:7890"}
+    for typed in ("ftp://x", "direct", "http://127.0.0.1:99999", "socks5://127.0.0.1:1080"):
+        assert call("POST /api/egress", {"url": typed}) == bad
+    assert call("POST /api/egress", {"url": " 127.0.0.1:7890 "}) == {"url": "http://127.0.0.1:7890", "provider": "*"}
 
 
 # ---- exporting a table ----

@@ -1463,7 +1463,7 @@ def test_settings_proxy_list(page, app):
     expect(switch).to_have_attribute("aria-checked", "true")
     page.get_by_label("代理服务器地址").fill("ftp://nope")
     page.get_by_label("代理服务器地址").press("Enter")
-    expect(page.locator("#toast")).to_have_text("代理地址要以 http:// 或 https:// 开头")
+    expect(page.locator("#toast")).to_have_text("代理地址的格式不对，例如 http://127.0.0.1:7890")
     page.get_by_label("代理服务器地址").fill("http://u:pw@127.0.0.1:9")
     page.get_by_role("button", name="添加").click()
     row = page.locator(".item", has_text="127.0.0.1:9")

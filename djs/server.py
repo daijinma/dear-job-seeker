@@ -242,7 +242,8 @@ def set_transport(provider: str, transport: str | None = None) -> dict:
 
 @mcp.tool()
 def egress_add(url: str, provider: str = "*") -> dict:
-    """Add an egress ('direct' or http(s) proxy URL), shared ('*') or dedicated to one provider."""
+    """Add an egress ('direct', an http(s) proxy URL, or host:port such as 127.0.0.1:7890, taken as http), shared ('*')
+    or dedicated to one provider. Example: egress_add(url="127.0.0.1:7890")."""
     return _run(service.egress_add, url, provider)
 
 

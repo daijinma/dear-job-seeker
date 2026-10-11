@@ -132,10 +132,14 @@ def retry(conn, a) -> dict:
 
 
 def add_proxy(conn, a) -> dict:
-    url = (a.get("url") or "").strip()
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("代理地址要以 http:// 或 https:// 开头")
-    return service.egress_add(conn, url, "*")
+    """A proxy for every site, typed as the user's proxy app shows it (egress.normalize); "direct" is no proxy."""
+    url = a.get("url") or ""
+    if url.strip() != "direct":   # "direct" is no proxy at all
+        try:
+            return service.egress_add(conn, url, "*")
+        except ValueError:
+            pass
+    raise ValueError("代理地址的格式不对，例如 http://127.0.0.1:7890")
 
 
 def about(conn, a) -> dict:

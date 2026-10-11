@@ -285,6 +285,25 @@ def test_egress_dedicated_sticky_cooldown(env):
     assert egress.list_(c)[0]["id"] == "http://a:1"
 
 
+@pytest.mark.parametrize("typed, stored", [
+    ("http://a:1", "http://a:1"),
+    ("127.0.0.1:7890", "http://127.0.0.1:7890"),                 # how Clash and most proxy apps show their address
+    ("  http://127.0.0.1:7890 \n", "http://127.0.0.1:7890"),     # pasted with spaces around it
+    ("https://u:p@proxy.test:8443", "https://u:p@proxy.test:8443"),
+    ("http://proxy.lan", "http://proxy.lan"),                    # no port: the scheme's own
+    ("direct", "direct"),
+])
+def test_egress_takes_a_proxy_the_way_people_type_it(env, typed, stored):
+    egress.add(env.conn, typed)
+    assert stored in {r["id"] for r in env.conn.execute("SELECT id FROM egress")} or stored == "direct"
+
+
+@pytest.mark.parametrize("typed", ["socks5://127.0.0.1:1080", "http://127.0.0.1:99999", "http://127.0.0.1:port", "http://", ""])
+def test_egress_refuses_what_cannot_work(env, typed):
+    with pytest.raises(ValueError):
+        egress.add(env.conn, typed)
+
+
 def test_egress_fail_streak_cooldown(env):
     c = env.conn
     egress.add(c, "http://a:1")
