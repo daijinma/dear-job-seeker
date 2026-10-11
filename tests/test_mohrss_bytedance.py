@@ -81,11 +81,14 @@ def test_mohrss_happy_and_mapping():
     jobs = p.fetch(client(text=page(), seen=seen), {"keyword": "PMO(专员)", "city": "北京"}, 1)
     q = seen[0].url.params
     assert q["textfield"] == "PMO（专员）" and q["AREA"] == "110100" and q["pageNo"] == "1"
-    assert [p.job_id(j) for j in jobs] == ["J1", "abc"]
-    assert p.row(jobs[0], None) == {"title": "算法工程师", "company": "示例公司", "city": "北京",
-                                    "salary_text": "6000-9000元/月", "description": "负责算法"}
+    assert [p.job_id(j) for j in jobs] == ["J1", "abc", "J3"]
+    assert p.row(jobs[0], None) == {"title": "算法工程师", "company": "示例公司", "city": "北京", "district": "朝阳区",
+                                    "description": "负责算法", "salary_text": "6000-9000元/月", "salary_min": 6000,
+                                    "salary_max": 9000, "salary_unit": "元/月", "salary_months": None}
     r = p.row(jobs[1], None)   # 429004 is not a canonical city: fall back to the site's own label
-    assert r["salary_text"] is None and r["description"] is None and r["city"] == "仙桃市"
+    assert "salary_text" not in r and r["description"] is None and r["city"] == "仙桃市"
+    one_bound = p.row(jobs[2], None)   # one wage bound is a single figure in the text; there is no range to store
+    assert one_bound["salary_text"] == "4500元/月" and "salary_min" not in one_bound
     assert p.meta(jobs[0], None)["source_url"] == "http://example.org/j1"
     assert p.meta(jobs[1], None)["source_url"] is None
 
@@ -125,7 +128,8 @@ def test_bytedance_happy_and_mapping():
     assert json.loads(seen[0].content) == {"keyword": "算法", "limit": 20, "offset": 40}
     assert [p.job_id(j) for j in jobs] == ["7001", "7002", "7003"]
     assert p.row(jobs[0], None) == {"title": "后端工程师", "company": "字节跳动", "city": "北京、杭州",
-                                    "salary_text": None, "description": "岗位职责 A\n\n任职要求 B"}
+                                    "district": "海淀区、临平区", "salary_text": None,
+                                    "description": "岗位职责 A\n\n任职要求 B"}
     assert p.row(jobs[1], None)["city"] is None and p.row(jobs[1], None)["description"] is None
     assert p.row(jobs[2], None)["city"] == "杭州"       # no city_list: fall back to city_info
     m = p.meta(jobs[0], None)

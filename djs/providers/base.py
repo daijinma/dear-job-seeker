@@ -91,6 +91,17 @@ def join_places(names) -> str | None:
     return "、".join(n for n in names if n) or None
 
 
+def split_places(names, sep: str = "-") -> tuple[str | None, str | None]:
+    """['广州-黄埔区', '杭州'] -> ('广州、杭州', '黄埔区'): the cities and the districts of a job that lists several places."""
+    parts = [(n or "").partition(sep)[::2] for n in names]
+    return join_places(dict.fromkeys(c for c, _ in parts)), join_places(dict.fromkeys(d for _, d in parts))
+
+
+def district_of(area: str | None, city: str | None) -> str | None:
+    """The district in a 58-group place label: '西湖区·翠苑' and '杭州·余杭' both give the first part that is not the city."""
+    return next((p for p in (area or "").split("·") if p and p != city), None)
+
+
 def months_suffix(months) -> str:
     """'·14薪' for more than 12 monthly payments; 12 or fewer is the default and not worth showing."""
     return f"·{months}薪" if isinstance(months, int) and months > 12 else ""
@@ -138,6 +149,11 @@ class Provider:
     def missing_env(self) -> list[str]:
         return [n for n in self.requires_env if not os.environ.get(n, "").strip()]
 
+    @property
+    def has_detail(self) -> bool:
+        """True when detail() makes a second request (the default says the list item already is the detail)."""
+        return type(self).detail is not Provider.detail
+
     def city_code(self, city: str | None) -> str | None:
         """What the site's server expects for `city`; None = no city given (nationwide search).
         A missing required city or one we have no code for is a ValueError: never search nationwide by accident."""
@@ -158,6 +174,14 @@ class Provider:
 
     def job_id(self, job: dict) -> str:
         """Missing id MUST raise StructureError (use need), never return 'None'."""
+        raise NotImplementedError
+
+    def row(self, job: dict, detail: dict | None) -> dict:
+        """The jobs columns this platform publishes for a list item (and its detail once fetched); leave out the rest.
+        title, company, city, district, education, experience, salary_text, description (HTML is fine, the engine
+        makes it plain text) and, only when the site gives the figures as fields with a certain unit,
+        salary_min/salary_max/salary_unit/salary_months from djs.normalize.salary_range. With salary text alone,
+        return salary_text: the engine parses it."""
         raise NotImplementedError
 
     def meta(self, job: dict, detail: dict | None) -> dict:

@@ -15,7 +15,9 @@ import time
 
 import httpx
 
-from .base import Blocked, ParseError, Provider, StructureError, env, get_json, need
+from djs import cities
+
+from .base import Blocked, ParseError, Provider, StructureError, district_of, env, get_json, need
 
 APPID = "wxc97b21c63d084d92"
 APP_VER = "681"
@@ -44,6 +46,11 @@ def _json(r, what: str) -> dict:
         if r.text[:200].lstrip().lower().startswith(("<!doctype html", "<html")):
             raise Blocked(f"job58 {what}: got home-page HTML (risk control)") from e
         raise
+
+
+def _price(job: dict) -> str:
+    """The list's own wording of the pay: price '15000_25000' + priceUnit '元' -> '15000-25000元'; '面议' stays."""
+    return (job.get("price") or "").replace("_", "-") + (job.get("priceUnit") or "")
 
 
 class Job58(Provider):
@@ -111,8 +118,11 @@ class Job58(Provider):
 
     def row(self, job: dict, detail: dict | None) -> dict:
         ext = (detail or {}).get("extParamMap") or {}
-        return {"title": job.get("title"), "company": job.get("companyName"), "city": job.get("location"),
-                "salary_text": ext.get("salary"), "description": ext.get("content") or None}
+        city = cities.name_of("city58", job.get("cityId"))   # `location` is a district label ("余杭·五常"), not the city
+        return {"title": job.get("title"), "company": job.get("companyName"), "city": city,
+                "district": district_of(job.get("location"), city),
+                "education": ext.get("xueliyaoqiu"), "experience": ext.get("gongzuonianxian"),
+                "salary_text": ext.get("salary") or _price(job), "description": ext.get("content") or None}
 
     def probe_payload(self) -> dict:
         return {"keyword": "服务员", "city": "北京"}

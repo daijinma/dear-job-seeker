@@ -5,6 +5,7 @@ treated as Blocked (Aliyun WAF challenge page), a non-zero business code as Stru
 package version in the text so a rotated salt is easy to spot. Page size is fixed ~15 by the server;
 the end is detected by short/empty page, page_cap is only a runaway fuse (~500 results per query).
 The list has no original publish time (sortTime is a refresh/sort time), and there is no web URL.
+Education and experience are tags in `showTags` (type 17 and 15); the place is `areaInfo` (city + district).
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from . import _yupao_sign as ys
 from .base import Blocked, Provider, StructureError, check_http, need
 
 URL = "https://yupao-prod.yupaowang.com/job/v2/search/job/search"
+TAG_EXPERIENCE, TAG_EDUCATION = 15, 17     # showTags[].type
 
 
 def _json(r) -> dict:
@@ -63,9 +65,12 @@ class Yupao(Provider):
 
     def row(self, job: dict, detail: dict | None) -> dict:
         title = re.sub(r"<[^>]+>", "", job.get("title") or "") or None
+        area = job.get("areaInfo") or {}
+        tags = {t.get("type"): t.get("name") for t in job.get("showTags") or [] if isinstance(t, dict)}
         return {"title": title, "company": (job.get("companyInfo") or {}).get("enterpriseName") or None,
-                "city": job.get("address"), "salary_text": (job.get("showPerfect") or {}).get("salary"),
-                "description": job.get("detail") or None}
+                "city": area.get("cityName") or job.get("address"), "district": area.get("countyName") or None,
+                "education": tags.get(TAG_EDUCATION), "experience": tags.get(TAG_EXPERIENCE),
+                "salary_text": (job.get("showPerfect") or {}).get("salary"), "description": job.get("detail") or None}
 
     def probe_payload(self) -> dict:
         return {"keyword": "普工"}

@@ -3,13 +3,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   provider    TEXT NOT NULL,
   kind        TEXT NOT NULL DEFAULT 'keyword',          -- keyword | tenant (copied from provider.kind)
-  payload     TEXT NOT NULL,                            -- JSON: {keyword, city?, max_pages?, detail?} | {tenant}
+  payload     TEXT NOT NULL,                            -- JSON: {keyword, city?, max_pages?, detail? auto|always|never} | {tenant}
   status      TEXT NOT NULL DEFAULT 'pending',          -- pending|running|waiting_login|done|dead
   attempts    INTEGER NOT NULL DEFAULT 0,
   locked_at   REAL,
   next_run_at REAL NOT NULL DEFAULT 0,
   last_error  TEXT,
-  stats       TEXT,                                     -- JSON {pages, jobs_new, jobs_seen, details_ok, details_failed}; live after each page
+  stats       TEXT,                                     -- JSON {pages, jobs_new, jobs_seen, details_ok, details_failed, complete, incomplete}; live while running
   created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS tasks_claim ON tasks(status, next_run_at);
@@ -19,9 +19,17 @@ CREATE TABLE IF NOT EXISTS jobs (
   provider         TEXT NOT NULL,
   source_job_id    TEXT NOT NULL,
   task_id          INTEGER REFERENCES tasks(id),        -- first discovered by
-  title            TEXT, company TEXT, city TEXT, salary_text TEXT,
-  description      TEXT,
+  -- the data contract (djs.normalize.CORE): title, company, city, salary range (both numbers), description
+  title            TEXT, company TEXT, city TEXT, district TEXT,
+  salary_text      TEXT,                                -- as the site words it
+  salary_min       INTEGER, salary_max INTEGER,         -- the range as numbers, in salary_unit
+  salary_unit      TEXT,                                -- 元/月 | 元/天 | 元/时 | 元/年
+  salary_months    INTEGER,                             -- paid months per year when stated ("·14薪" -> 14)
+  description      TEXT,                                -- plain text
+  education        TEXT, experience TEXT,
   source_url       TEXT, published_at TEXT, published_at_kind TEXT,
+  missing          TEXT,                                -- core elements still absent, comma-joined; '' when complete
+  complete         INTEGER NOT NULL DEFAULT 0,          -- 1 = every core element present
   payload          TEXT,                                -- raw list item JSON
   detail           TEXT,                                -- raw detail JSON, NULL if none/failed
   detail_error     TEXT,

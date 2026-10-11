@@ -1,3 +1,3 @@
 {"_synthetic": true, "code": 0, "message": "Success",
- "zpData": {"jobInfo": {"jobName": "Python Engineer", "salaryDesc": "20-30K", "locationName": "北京", "postDescription": "Synthetic JD text."},
+ "zpData": {"jobInfo": {"jobName": "Python Engineer", "salaryDesc": "20-30K", "locationName": "北京", "degreeName": "本科", "experienceName": "3-5年", "postDescription": "Synthetic JD text."},
   "bossInfo": {"name": "Zhang", "title": "HR"}, "brandComInfo": {"brandName": "Example Co"}}}

@@ -6,7 +6,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from djs.providers.base import Blocked, LoginRequired, StructureError
+from djs.providers.base import Blocked, LoginRequired, StructureError, district_of, split_places
 from djs.providers.chinahr import Chinahr
 from djs.providers.iguopin import Iguopin
 from djs.providers.nowcoder import NowCoder
@@ -89,17 +89,29 @@ def test_nowcoder_happy_and_mapping():
     seen = []
     p = NowCoder()
     jobs = p.fetch(client(fx("nowcoder_list.json"), seen=seen), SEARCH, 1)
-    assert [p.job_id(j) for j in jobs] == ["463980", "463981"]
+    assert [p.job_id(j) for j in jobs] == ["463980", "463981", "463982", "463983"]
     assert seen[0].method == "POST" and "jobCity" not in parse_qs(seen[0].content.decode())   # no city, no filter
     m = p.meta(jobs[0], None)
     assert m["published_at"] == "2026-08-28T06:54:59+00:00" and m["published_at_kind"] == "original"
     assert m["source_url"] == "https://www.nowcoder.com/jobs/detail/463980"
     assert p.meta(jobs[1], None)["published_at_kind"] == "unknown"
-    assert p.row(jobs[0], None) == {"title": "算法工程师", "company": "示例科技", "city": "杭州、上海",
-                                    "salary_text": "20-40K·14薪", "description": "熟悉机器学习"}
+    assert p.row(jobs[0], None) == {"title": "算法工程师", "company": "示例科技", "city": "杭州、上海", "education": "本科",
+                                    "description": "负责算法研发\n\n熟悉机器学习", "salary_text": "20-40K·14薪",
+                                    "salary_min": 20000, "salary_max": 40000, "salary_unit": "元/月",
+                                    "salary_months": 14}
     r = p.row(jobs[1], None)   # empty jobCityList falls back to jobCity; salaryMonth is only for the K/month unit
-    assert r["salary_text"] == "200-300元/天" and r["city"] == "北京"
-    assert r["description"] is None and r["company"] is None
+    assert (r["salary_text"], r["salary_min"], r["salary_max"], r["salary_unit"], r["salary_months"]) == (
+        "200-300元/天", 200, 300, "元/天", None)
+    assert r["city"] == "北京" and r["description"] is None and r["company"] is None and r["education"] is None
+
+
+def test_nowcoder_no_salary_sentinel_unknown_type_and_repeated_description():
+    p = NowCoder()
+    sentinel, odd = (p.row(j, None) for j in p.fetch(client(fx("nowcoder_list.json")), SEARCH, 1)[2:])
+    for r in (sentinel, odd):   # "0-9999999" and an unknown salaryType are not salaries
+        assert not any(k.startswith("salary") for k in r)
+    assert sentinel["education"] == "不限" and sentinel["description"] == "同一段文字"   # infos == requirements: once
+    assert odd["description"] is None                                                  # a non-text requirement is no JD
 
 
 def test_nowcoder_city_is_sent_as_plain_name():
@@ -116,11 +128,16 @@ def test_iguopin_happy_and_mapping():
     body = json.loads(seen[0].content)
     assert body["search"]["keyword"] == "护士" and body["search"]["district"] == ["000000.330000.330100"]
     assert "recom" in body
-    assert [p.job_id(j) for j in jobs] == ["j1", "2", "3"]
-    assert p.row(jobs[0], None) == {"title": "护士", "company": "示例医院", "city": "北京、杭州-西湖区",
-                                    "salary_text": "8000-12000元/月·14薪", "description": "【工作职责】护理"}
-    assert p.row(jobs[1], None)["salary_text"] == "面议" and p.row(jobs[1], None)["city"] is None
-    assert p.row(jobs[2], None)["salary_text"] == "101-150元/天"      # unit comes from the site; 12 months: no suffix
+    assert [p.job_id(j) for j in jobs] == ["j1", "2", "3", "4"]
+    assert p.row(jobs[0], None) == {"title": "护士", "company": "示例医院", "city": "北京、杭州", "district": "西湖区",
+                                    "education": "本科", "experience": "3-5年", "description": "【工作职责】护理",
+                                    "salary_text": "8000-12000元/月·14薪", "salary_min": 8000, "salary_max": 12000,
+                                    "salary_unit": "元/月", "salary_months": 14}
+    negotiable = p.row(jobs[1], None)   # 0-0 wages are "negotiable", never a salary
+    assert negotiable["salary_text"] == "面议" and negotiable["city"] is None and "salary_min" not in negotiable
+    daily = p.row(jobs[2], None)         # the unit comes from the site; 12 months: no suffix in the text
+    assert (daily["salary_text"], daily["salary_min"], daily["salary_unit"]) == ("101-150元/天", 101, "元/天")
+    assert "salary_text" not in p.row(jobs[3], None)                # a unit we have no column value for is not guessed
     m = p.meta(jobs[0], None)
     assert m["published_at"] == "2026-09-12T10:00:00+08:00" and m["published_at_kind"] == "refresh"
     assert m["source_url"] == "https://www.iguopin.com/job/detail?id=j1"
@@ -166,9 +183,12 @@ def test_chinahr_happy_detail_and_mapping():
     d = p.detail(client(fx("chinahr_detail.json"), seen=seen), jobs[0])
     assert seen[1].url.params["id"] == jobs[0]["jobId"]
     assert d == {"jobDesc": "<p>负责造价</p>", "companyDesc": "示例简介"}
-    assert p.row(jobs[0], d) == {"title": "兼职造价员", "company": "示例咨询有限公司", "city": "南京",
-                                 "salary_text": "6-9K", "description": "<p>负责造价</p>"}
+    assert p.row(jobs[0], d) == {"title": "兼职造价员", "company": "示例咨询有限公司", "city": "南京", "district": "鼓楼区",
+                                 "education": "本科", "experience": "1年以上", "salary_text": "6-9K",
+                                 "description": "<p>负责造价</p>"}
     assert p.row(jobs[0], None)["description"] is None
+    province = p.row(jobs[1], None)   # a job placed in a whole province: the platform's own label, no district
+    assert (province["city"], province["district"], province["salary_text"]) == ("湖北省", None, "面议")
     m = p.meta(jobs[0], d)
     assert m["source_url"] == f"https://www.chinahr.com/detail/{jobs[0]['jobId']}"   # /job/<id>.html is a search page
     assert m["published_at"] is None and m["published_at_kind"] == "unknown"
@@ -188,3 +208,15 @@ def test_chinahr_detail_failures():
         p.detail(client({}, status=429), job)
     ok_empty = {"code": 1, "data": {"jobInfo": {}}}
     assert p.detail(client(ok_empty), job) == {"jobDesc": "", "companyDesc": ""}
+
+
+# ---- place helpers
+def test_split_places_keeps_every_city_and_every_district_once():
+    assert split_places(["广州-黄埔区", "杭州", "广州-天河区", None]) == ("广州、杭州", "黄埔区、天河区")
+    assert split_places(["湖北省"]) == ("湖北省", None) and split_places([]) == (None, None)
+    assert split_places(["北京|朝阳"], sep="|") == ("北京", "朝阳")
+
+
+def test_district_of_skips_the_city_label():
+    assert district_of("西湖区·翠苑", "杭州") == "西湖区" and district_of("杭州·余杭", "杭州") == "余杭"
+    assert district_of("余杭", "杭州") == "余杭" and district_of("杭州", "杭州") is None and district_of(None, None) is None

@@ -55,8 +55,10 @@ def test_class_attrs():
 
 
 # ---- yupao ----
-YP = {"_synthetic": True, "jobBizId": 77, "title": "<em>普工</em>", "address": "北京", "sortTime": "2026-09-14 16:20:32",
-      "detail": "招普工", "showPerfect": {"salary": "4000元/月"}, "companyInfo": {"enterpriseName": "甲"}}
+YP = {"_synthetic": True, "jobBizId": 77, "title": "<em>普工</em>", "address": "北京 丰台区",
+      "sortTime": "2026-09-14 16:20:32", "detail": "招普工", "showPerfect": {"salary": "4000元/月"},
+      "companyInfo": {"enterpriseName": "甲"}, "areaInfo": {"cityName": "北京", "countyName": "丰台区"},
+      "showTags": [{"name": "4000元/月", "type": 1}, {"name": "经验不限", "type": 15}, {"name": "大专", "type": 17}]}
 
 
 def test_yupao_happy_headers_and_mapping():
@@ -67,8 +69,11 @@ def test_yupao_happy_headers_and_mapping():
     assert b'"areaIds":["25"]' in seen[0].content.replace(b" ", b"")
     p = Yupao()
     assert p.job_id(YP) == "77"
-    assert p.row(YP, None) == {"title": "普工", "company": "甲", "city": "北京", "salary_text": "4000元/月",
+    assert p.row(YP, None) == {"title": "普工", "company": "甲", "city": "北京", "district": "丰台区",
+                               "education": "大专", "experience": "经验不限", "salary_text": "4000元/月",
                                "description": "招普工"}
+    bare = p.row({"title": "x", "address": "上海", "areaInfo": {"cityName": "上海", "countyName": ""}}, None)
+    assert (bare["city"], bare["district"], bare["education"], bare["experience"]) == ("上海", None, None, None)
     assert p.meta(YP, None) == {"source_url": None, "apply_url": None,
                                 "published_at": "2026-09-14T16:20:32+08:00", "published_at_kind": "refresh"}
 
@@ -92,8 +97,9 @@ def test_yupao_failures():
 
 # ---- job51 ----
 J51 = {"_synthetic": True, "jobId": 9, "jobName": "会计", "fullCompanyName": "乙公司", "provideSalaryString": "1-2万",
-       "hrefAreaPinYin": "shanghai-ypq", "issueDateString": "2026-09-10 10:00:00",
-       "jobAreaLevelDetail": {"cityString": "上海"}}
+       "hrefAreaPinYin": "shanghai-ypq", "issueDateString": "2026-09-10 10:00:00", "degreeString": "本科",
+       "workYearString": "3-5年", "jobSalaryMin": "10000", "jobSalaryMax": "20000",
+       "jobAreaLevelDetail": {"cityString": "上海", "districtString": "浦东新区"}}
 J51_DETAIL = {"detailJobInfo": {"jobDescribe": "做账"}}
 
 
@@ -106,8 +112,9 @@ def test_job51_happy_url_signed_and_mapping():
     assert req.url.params["jobArea"] == "020000" and req.url.params["pageNum"] == "2"
     p = Job51()
     assert p.job_id(J51) == "9"
-    assert p.row(J51, J51_DETAIL) == {"title": "会计", "company": "乙公司", "city": "上海",
-                                      "salary_text": "1-2万", "description": "做账"}
+    assert p.row(J51, J51_DETAIL) == {"title": "会计", "company": "乙公司", "city": "上海", "district": "浦东新区",
+                                      "education": "本科", "experience": "3-5年", "salary_text": "1-2万",
+                                      "description": "做账"}
     assert p.meta(J51, None)["source_url"] == "https://jobs.51job.com/shanghai-ypq/9.html"
     assert p.meta({}, None)["published_at_kind"] == "unknown"
 
@@ -128,9 +135,10 @@ def test_job51_detail_and_failures():
 
 
 # ---- job58 ----
-J58 = {"_synthetic": True, "infoId": 5, "title": "服务员", "companyName": "丙", "location": "朝阳", "originUrl": "https://bj.58.com/x/5x.shtml",
-       "dispLocalName": "bj"}
-J58_DETAIL = {"extParamMap": {"salary": "5000元/月", "content": "端盘子", "posttime": "2026-09-14 10:00:00"}}
+J58 = {"_synthetic": True, "infoId": 5, "title": "服务员", "companyName": "丙", "cityId": 1, "location": "朝阳·三里屯",
+       "price": "5000_8000", "priceUnit": "元", "originUrl": "https://bj.58.com/x/5x.shtml", "dispLocalName": "bj"}
+J58_DETAIL = {"extParamMap": {"salary": "5000元/月", "content": "端盘子", "posttime": "2026-09-14 10:00:00",
+                              "xueliyaoqiu": "学历不限", "gongzuonianxian": "经验不限"}}
 
 
 def test_job58_happy_cursor_and_mapping():
@@ -140,8 +148,13 @@ def test_job58_happy_cursor_and_mapping():
     assert p.fetch(client(body, seen=seen), payload, 1) == [J58]
     assert seen[0].url.params["cityId"] == "1" and seen[0].headers["thirdkey"] == payload["_cursor"]["thirdKey"]
     assert payload["_cursor"]["done"] and p.fetch(client(body), payload, 2) == []  # hasMore=False ends the session
-    assert p.row(J58, J58_DETAIL) == {"title": "服务员", "company": "丙", "city": "朝阳",
-                                      "salary_text": "5000元/月", "description": "端盘子"}
+    assert p.row(J58, J58_DETAIL) == {"title": "服务员", "company": "丙", "city": "北京", "district": "朝阳",
+                                      "education": "学历不限", "experience": "经验不限", "salary_text": "5000元/月",
+                                      "description": "端盘子"}
+    listed = p.row(J58, None)   # before the detail: the list's own price wording, no education, no JD
+    assert (listed["salary_text"], listed["education"], listed["description"]) == ("5000-8000元", None, None)
+    assert p.row({**J58, "price": "面议", "priceUnit": "", "location": "北京·朝阳"}, None)["salary_text"] == "面议"
+    assert p.row({**J58, "location": "北京·朝阳"}, None)["district"] == "朝阳"   # the label may start with the city
     assert p.meta(J58, J58_DETAIL)["published_at"] == "2026-09-14T10:00:00+08:00"
     assert p.meta(J58, None)["published_at_kind"] == "unknown"
 
@@ -172,7 +185,8 @@ def test_job58_detail_signed_and_failures():
 
 
 # ---- ganji ----
-GJ = {"_synthetic": True, "infoId": 8, "title": "销售", "enterpriseName": "丁", "area": "房山", "salary": "8000元",
+GJ = {"_synthetic": True, "infoId": 8, "title": "销售", "enterpriseName": "丁", "area": "房山区·长阳", "salary": "8000元",
+      "education": "学历不限", "experience": "1-3年", "dispLocalFullPath": "1,12,345",
       "weappQuery": {"listName": "yewu", "localName": "bj"}}
 GJ_SHARE = "https://h5.example/m-position-share/index.html?infoid=8"
 GJ_RESULT = {"info": [{"position_publisher_area_v1": [{"position_desc": {"text": "卖货"}}]}],
@@ -186,8 +200,10 @@ def test_ganji_happy_and_mapping():
     assert p.fetch(client(body, seen=seen), {"keyword": "销售", "city": "北京"}, 1) == [GJ]
     assert seen[0].headers["cid"] == "1"
     assert p.detail(client({"status": "0", "result": GJ_RESULT}), GJ) == GJ_RESULT
-    assert p.row(GJ, GJ_RESULT) == {"title": "销售", "company": "丁", "city": "房山", "salary_text": "8000元",
+    assert p.row(GJ, GJ_RESULT) == {"title": "销售", "company": "丁", "city": "北京", "district": "房山区",
+                                    "education": "学历不限", "experience": "1-3年", "salary_text": "8000元",
                                     "description": "卖货"}
+    assert p.row({**GJ, "dispLocalFullPath": None}, None)["city"] is None   # no city id: not guessed from the district
     # the detail path is a JSON API; the page a person can open is the share URL the detail response carries
     assert p.meta(GJ, GJ_RESULT) == {"source_url": GJ_SHARE, "apply_url": GJ_SHARE,
                                      "published_at": None, "published_at_kind": "unknown"}

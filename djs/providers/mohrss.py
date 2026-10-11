@@ -12,6 +12,7 @@ import json
 import re
 
 from djs import cities
+from djs.normalize import salary_range
 
 from .base import ParseError, Provider, StructureError, check_http, need
 
@@ -70,10 +71,11 @@ class Mohrss(Provider):
 
     def row(self, job: dict, detail: dict | None) -> dict:
         # `area_` is a province label for some provinces and a city label for others; the code is authoritative.
+        # aab302 is the name of the district the job's area code points at.
         return {"title": job.get("aca112"), "company": job.get("aab004"),
                 "city": cities.gb_name(job.get("area")) or job.get("area_"),
-                "salary_text": _salary(job.get("acb241"), job.get("acb242")),
-                "description": job.get("acb22a") or None}
+                "district": job.get("aab302") or None,
+                "description": job.get("acb22a") or None, **_salary(job.get("acb241"), job.get("acb242"))}
 
     def probe_payload(self) -> dict:
         return {"keyword": "算法"}
@@ -85,7 +87,8 @@ def _without_contacts(jobs) -> list[dict]:
     return [{k: v for k, v in j.items() if k not in HR_CONTACT} for j in jobs]
 
 
-def _salary(lo, hi) -> str | None:
+def _salary(lo, hi) -> dict:
+    """acb241 / acb242 are the wage bounds in yuan per month; with only one bound given the text is a single figure."""
     def num(v):
         try:
             f = float(v)
@@ -94,5 +97,5 @@ def _salary(lo, hi) -> str | None:
         return f if f > 0 else None
     lo, hi = num(lo), num(hi)
     if lo and hi:
-        return f"{lo:g}-{hi:g}元/月"
-    return f"{(lo or hi):g}元/月" if (lo or hi) else None
+        return {"salary_text": f"{lo:g}-{hi:g}元/月", **salary_range(lo, hi)}
+    return {"salary_text": f"{(lo or hi):g}元/月"} if (lo or hi) else {}

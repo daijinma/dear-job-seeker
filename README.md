@@ -87,16 +87,34 @@ QR login, cookie storage (0600, local only) and the list/detail calls are implem
 | Tool | Purpose |
 |---|---|
 | `provider_list` | every platform: label, auth, city rule, effective interval/jitter/max pages, floor, page cap, login/config state |
-| `crawl_start(provider, keyword, city?, max_pages?, detail=true)` | queue a crawl task (validates city rule and missing keys). `detail=false` is **quick mode**: list items only, one request per page instead of one per job on platforms with a detail hop |
-| `task_list(status?, limit)` | task status and stats; stats update after every page while the task runs |
-| `search_list(limit=20)` | recent searches (same keyword + city = one search): aggregate status, distinct job count, per-platform status / job count / last error |
-| `jobs_get(task_id?, provider?, limit, with_detail)` | stored jobs; `task_id` returns every job that task saw, including ones an earlier task found first |
-| `job_detail(job_id)` | full text of one stored job: fetched once with the platform's own pacing and exit, then served from the database |
+| `crawl_start(provider, keyword, city?, max_pages?, detail="auto")` | queue a crawl task (validates city rule and missing keys). `detail`: `auto` requests a job's detail page only while the job still lacks a required element, `always` for every job that has none stored yet, `never` keeps the list items only (**quick mode**: one request per page); `true` / `false` still mean always / never |
+| `task_list(status?, limit)` | task status and stats (pages, new / seen jobs, details, **complete / incomplete**); stats update while the task runs |
+| `search_list(limit=20)` | recent searches (same keyword + city = one search): aggregate status, distinct job count, per-platform status / job count / complete / incomplete / last error |
+| `jobs_get(task_id?, provider?, limit, with_detail, complete_only=true)` | stored jobs; `task_id` returns every job that task saw, including ones an earlier task found first. Only **complete** jobs by default; `complete_only=false` adds the rest, each with `missing` and `incomplete_reason` |
+| `job_detail(job_id)` | full text of one stored job: fetched once with the platform's own pacing and exit, its fields derived again from it, then served from the database |
 | `login(provider)` / `login_status` / `logout` | QR login for `auth=login` platforms; waiting tasks resume on success |
 | `set_frequency(provider, interval?, jitter?, max_pages?, force?)` | per-platform override; below the floor needs `force=true` |
 | `egress_add(url, provider="*")` / `egress_remove(url)` / `egress_list` | proxy pool (`direct` or `http(s)://…`; passwords are masked in output) |
 
 Errors come back as `{"error": "..."}`; tools never raise.
+
+## Data completeness
+
+A stored job is final only when none of its required elements is missing.
+
+| Element | Columns | Rule |
+|---|---|---|
+| position | `title` | non-empty |
+| company | `company` | non-empty |
+| city | `city` (+ `district` when known) | non-empty |
+| salary | `salary_min`, `salary_max`, `salary_unit`, `salary_months` | two whole numbers, never text. `salary_unit` is `元/月`, `元/天`, `元/时` or `元/年`; `salary_months` the paid months when stated (`·14薪` → 14, never multiplied in). Taken from a platform's numeric fields where it states the unit (nowcoder, iguopin, mohrss), otherwise parsed from its salary text (`15-25K·14薪`, `1-1.5万`, `8千-1.8万`, `20-30万/年`, `200-400元/天`, `100元/时`). 面议 has no numbers, so the job stays incomplete |
+| JD | `description` | plain text (HTML tags stripped, line breaks kept) |
+
+Stored when the site has them, not required: `education`, `experience`, `salary_text` (as the site words it), `source_url`, `published_at`.
+
+**How records get completed.** A crawl stores the list pages first, so results appear at once, then makes a second pass: with `detail="auto"` a job's detail page is requested only if the job still lacks a required element (zhaopin, yupao, nowcoder, iguopin, mohrss and bytedance carry the JD in the list, so they need no detail request at all). A later search over the same jobs completes the ones an earlier quick search left open. Every job carries `missing` (the absent elements), `complete`, and in tool output an `incomplete_reason`: `面议`, `需登录才能看到薪资`, `详情获取失败` or `平台未提供…`.
+
+**What the sites do not publish** (those jobs stay incomplete and say why): ByteDance gives no salary at all; Boss hides the salary until you log in; 国聘, 新华英才, 58同城 and 赶集 word some salaries as 面议. 公共招聘网 publishes education and experience only as opaque codes, which are not mapped.
 
 ## How it works
 
@@ -118,7 +136,7 @@ For scripts, cron and agents that do not speak MCP. Both commands load `.env` li
 | `djs work [--until-idle] [--timeout SEC]` | run the per-platform workers in the foreground and print one line per finished task (`task 3 nowcoder done pages=1 new=20 seen=0`). `--until-idle` exits once nothing is queued or running (tasks waiting for a login do not count; a failing task is retried with growing back-off, so pair it with `--timeout`); `--timeout` stops after SEC seconds (exit 2 if `--until-idle` was not reached) |
 
 ```bash
-djs call crawl_start '{"provider":"nowcoder","keyword":"python","max_pages":1,"detail":false}' \
+djs call crawl_start '{"provider":"nowcoder","keyword":"python","max_pages":1,"detail":"never"}' \
   && djs work --until-idle --timeout 120 \
   && djs call jobs_get '{"task_id":1,"limit":3}'
 djs call job_detail '{"job_id":7}'      # full text on demand
@@ -142,7 +160,7 @@ Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite
 .venv/bin/python -m pytest -q          # no network, no browser, no window
 ```
 
-Layout: `djs/{db,taskqueue,pacer,egress,engine,service}.py` (core), `djs/server.py` (MCP tools, thin wrappers over `service`), `djs/cli.py` (`call` / `work`), `djs/envfile.py` (`.env` autoload), `djs/providers/` (one file per platform; contract in `base.py`), `djs/ui_app.py` + `djs/ui_api.py` + `djs/ui/` (desktop app).
+Layout: `djs/{db,taskqueue,pacer,egress,engine,service}.py` (core), `djs/jobs.py` (the jobs table: one derivation of every column, the completeness verdict), `djs/normalize.py` (the data contract: salary parsing, plain-text JD, missing elements), `djs/server.py` (MCP tools, thin wrappers over `service`), `djs/cli.py` (`call` / `work`), `djs/envfile.py` (`.env` autoload), `djs/providers/` (one file per platform; contract in `base.py`), `djs/ui_app.py` + `djs/ui_api.py` + `djs/ui/` (desktop app).
 
 ## Compliance
 

@@ -242,9 +242,18 @@ def test_meta_and_row():
     assert m["source_url"] == "https://www.zhipin.com/job_detail/synthJobAAA1.html"
     assert m["published_at"] is None and m["published_at_kind"] == "unknown"
     assert b.row(job, fixture("boss_detail.json")["zpData"]) == {
-        "title": "Python Engineer", "company": "Example Co", "city": "北京",
-        "salary_text": "20-30K", "description": "Synthetic JD text."}
+        "title": "Python Engineer", "company": "Example Co", "city": "北京", "district": "海淀区",
+        "education": "本科", "experience": "3-5年", "salary_text": "20-30K", "description": "Synthetic JD text."}
     assert b.row(job, None)["description"] is None
+
+
+def test_salary_is_empty_until_logged_in_and_the_detail_may_fill_it():
+    b = Boss()
+    anonymous = fixture("boss_list.json")["zpData"]["jobList"][1]       # salaryDesc: "" (not logged in)
+    assert b.row(anonymous, None)["salary_text"] is None
+    detail = {"jobInfo": {"salaryDesc": "25-35K", "degreeName": "硕士", "experienceName": "1-3年"}}
+    r = b.row(anonymous, detail)
+    assert (r["salary_text"], r["education"], r["experience"]) == ("25-35K", "硕士", "1-3年")
 
 
 def test_probe_payload_city_is_known():

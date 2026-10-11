@@ -8,10 +8,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from djs.normalize import salary_range
+
 from .base import Provider, StructureError, get_json, join_places, months_suffix, need
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+# eduLevel is a code; 0 and 5000 were checked against live job texts, the others follow the site's own ladder
+EDUCATION = {0: "不限", 4000: "大专", 5000: "本科", 6000: "硕士", 7000: "博士"}
 
 
 class NowCoder(Provider):
@@ -56,30 +60,34 @@ class NowCoder(Provider):
         return {"title": job.get("jobName"),
                 "company": company.get("companyName"),
                 "city": join_places(job.get("jobCityList") or [job.get("jobCity")]),
-                "salary_text": _salary(job),
-                "description": _requirements(job)}
+                "education": EDUCATION.get(job.get("eduLevel")),
+                "description": _description(job),
+                **_salary(job)}
 
     def probe_payload(self) -> dict:
         return {"keyword": "算法"}
 
 
-def _salary(job: dict) -> str | None:
-    """salaryType gives the unit: 2 = K/month (+ salaryMonth), 1 = yuan/day. Unknown unit -> None."""
-    lo, hi = job.get("salaryMin"), job.get("salaryMax")
-    if not (isinstance(lo, int) and isinstance(hi, int) and 0 < lo and 0 < hi < 9999999):
-        return None
+def _salary(job: dict) -> dict:
+    """salaryType gives the unit: 2 = K/month (+ salaryMonth payments), 1 = yuan/day. 0-9999999 is the site's "no
+    salary" and an unknown type is not guessed at: both give no salary at all."""
+    lo, hi, months = job.get("salaryMin"), job.get("salaryMax"), job.get("salaryMonth")
     kind = str(job.get("salaryType") or "")
     if kind == "1":
-        return f"{lo}-{hi}元/天"
-    if kind == "2":
-        return f"{lo}-{hi}K{months_suffix(job.get('salaryMonth'))}"
-    return None
+        numbers, text = salary_range(lo, hi, "元/天"), f"{lo}-{hi}元/天"
+    elif kind == "2" and isinstance(lo, int) and isinstance(hi, int):
+        numbers, text = salary_range(lo * 1000, hi * 1000, "元/月", months), f"{lo}-{hi}K{months_suffix(months)}"
+    else:
+        return {}
+    return {"salary_text": text, **numbers} if numbers else {}
 
 
-def _requirements(job: dict) -> str | None:
-    """`ext` is itself a JSON string; the JD lives in its `requirements` key."""
+def _description(job: dict) -> str | None:
+    """`ext` is itself a JSON string: `infos` is the intro and duties, `requirements` what the candidate needs (some
+    jobs repeat one text in both)."""
     try:
-        v = json.loads(job.get("ext") or "")["requirements"]
-    except (ValueError, TypeError, KeyError):
+        ext = json.loads(job.get("ext") or "")
+    except (ValueError, TypeError):
         return None
-    return v if isinstance(v, str) and v else None
+    texts = [ext.get(k) for k in ("infos", "requirements")] if isinstance(ext, dict) else []
+    return "\n\n".join(dict.fromkeys(t.strip() for t in texts if isinstance(t, str) and t.strip())) or None

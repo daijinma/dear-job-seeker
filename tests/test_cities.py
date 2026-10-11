@@ -89,3 +89,12 @@ def test_city_code_error_is_friendly_and_lists_examples():
         providers.get("job58").city_code("火星")
     msg = str(e.value)
     assert "58同城" in msg and "「火星」" in msg and "北京" in msg
+
+
+def test_name_of_is_the_reverse_of_code():
+    assert cities.name_of("city58", 79) == "杭州" and cities.name_of("ganji", "1") == "北京"   # the 58 group shares ids
+    assert cities.name_of("boss", "101210100") == "杭州" and cities.name_of("zhaopin", 530) == "北京"
+    assert cities.name_of("job58", 999999) is None and cities.name_of("job58", None) is None
+    for platform in ("zhaopin", "boss", "job51", "city58", "yupao", "chinahr", "bytedance"):
+        for name in cities.supported(platform):
+            assert cities.name_of(platform, cities.code(platform, name)) == name

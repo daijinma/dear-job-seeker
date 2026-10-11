@@ -32,32 +32,42 @@ async def provider_list() -> dict:
 
 @mcp.tool()
 def crawl_start(provider: str, keyword: str | None = None, city: str | None = None,
-                tenant: str | None = None, max_pages: int | None = None, detail: bool = True) -> dict:
-    """Queue a crawl task. detail=False is quick mode (list items only); load one job's full text with job_detail."""
+                tenant: str | None = None, max_pages: int | None = None, detail: str | bool = "auto") -> dict:
+    """Queue a crawl task. A finished job has title, company, city, a salary range (two numbers) and a job
+    description. detail: 'auto' (default) requests a job's detail page only while one of these is still missing,
+    'always' for every job that has no stored detail yet, 'never' keeps the list items as they are (job_detail
+    loads one on demand); true / false mean always / never."""
     return _run(service.crawl_start, provider, keyword, city, tenant, max_pages, detail)
 
 
 @mcp.tool()
 def task_list(status: str | None = None, limit: int = 20) -> dict:
-    """List recent tasks, optionally by status."""
+    """List recent tasks, optionally by status. stats has pages, jobs_new, jobs_seen, details_ok, details_failed and
+    how many of the task's jobs are complete / incomplete."""
     return _run(service.task_list, status, limit)
 
 
 @mcp.tool()
-def jobs_get(task_id: int | None = None, provider: str | None = None, limit: int = 50, with_detail: bool = False) -> dict:
-    """Read stored jobs."""
-    return _run(service.jobs_get, task_id, provider, limit, with_detail)
+def jobs_get(task_id: int | None = None, provider: str | None = None, limit: int = 50, with_detail: bool = False,
+             complete_only: bool = True) -> dict:
+    """Read stored jobs, newest first. Salary is salary_min / salary_max (whole numbers) in salary_unit (元/月, 元/天,
+    元/时 or 元/年), with salary_months when the site states paid months; the description is plain text. By default
+    only complete jobs (every required element present); complete_only=false also returns the rest, each listing
+    what is `missing` and an `incomplete_reason`."""
+    return _run(service.jobs_get, task_id, provider, limit, with_detail, complete_only)
 
 
 @mcp.tool()
 async def job_detail(job_id: int) -> dict:
-    """Full description of one stored job: fetched from the platform once, then served from the database."""
+    """Full detail of one stored job: fetched from the platform once, its fields (salary range, education, ...)
+    derived again from it, then served from the database."""
     return await asyncio.to_thread(_run, service.job_detail, job_id)  # paced network call: keep the event loop free
 
 
 @mcp.tool()
 def search_list(limit: int = 20) -> dict:
-    """Recent searches (same keyword + city) with status, job counts and per-platform progress."""
+    """Recent searches (same keyword + city) with status, job counts and per-platform progress, including how many
+    of each platform's jobs are complete / incomplete."""
     return _run(service.searches, limit)
 
 

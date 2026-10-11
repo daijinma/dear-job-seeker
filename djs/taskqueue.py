@@ -10,6 +10,18 @@ from djs import providers
 LOCK_TTL = 15 * 60
 MAX_ATTEMPTS = 8
 BACKOFF_CAP = 360
+DETAIL_MODES = ("auto", "always", "never")
+
+
+def detail_mode(value) -> str:
+    """A task's `detail` setting as one of DETAIL_MODES. auto = the detail request only for jobs still missing a core
+    element, always = for every job without a stored detail, never = list items only. True / False are the older
+    always / never."""
+    if isinstance(value, bool):
+        return "always" if value else "never"
+    if value in DETAIL_MODES:
+        return value
+    raise ValueError(f"detail must be one of {', '.join(DETAIL_MODES)} (or true/false), not {value!r}")
 
 
 def create(conn, provider: str, payload: dict) -> int:
@@ -21,8 +33,7 @@ def create(conn, provider: str, payload: dict) -> int:
     mp = payload.get("max_pages")
     if mp is not None and (not isinstance(mp, int) or isinstance(mp, bool) or mp < 1):
         raise ValueError("max_pages must be an integer >= 1")
-    if not isinstance(payload.get("detail", True), bool):
-        raise ValueError("detail must be true or false")
+    detail_mode(payload.get("detail", "auto"))
     cur = conn.execute("INSERT INTO tasks(provider, kind, payload) VALUES (?,?,?)",
                        (provider, prov.kind, json.dumps(payload, ensure_ascii=False)))
     return cur.lastrowid
@@ -83,6 +94,14 @@ def resume_login(conn, provider: str) -> int:
                         (provider,)).rowcount
 
 
+def requeue(conn, task_ids) -> int:
+    """The user pressed retry: dead or login-blocked tasks start over with a fresh attempt budget."""
+    ids = [int(i) for i in task_ids]
+    return conn.execute(
+        "UPDATE tasks SET status='pending', attempts=0, next_run_at=0, last_error=NULL, locked_at=NULL "
+        f"WHERE status IN ('dead','waiting_login') AND id IN ({','.join('?' * len(ids))})", ids).rowcount
+
+
 def as_dict(row) -> dict:
     d = dict(row)
     d["payload"] = json.loads(d["payload"])
@@ -117,10 +136,3 @@ def by_search(conn, limit: int = 20) -> list[dict]:
            SELECT t.* FROM t JOIN g ON t.keyword IS g.keyword AND t.city = g.city
            ORDER BY g.last_id DESC, t.id""", (limit,)).fetchall()
     return [dict(r) for r in rows]
-
-def requeue(conn, task_ids) -> int:
-    """The user pressed retry: dead or login-blocked tasks start over with a fresh attempt budget."""
-    ids = [int(i) for i in task_ids]
-    return conn.execute(
-        "UPDATE tasks SET status='pending', attempts=0, next_run_at=0, last_error=NULL, locked_at=NULL "
-        f"WHERE status IN ('dead','waiting_login') AND id IN ({','.join('?' * len(ids))})", ids).rowcount

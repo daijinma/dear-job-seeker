@@ -24,11 +24,16 @@ FIELDS = {
     "title": re.compile(r'class="job-name ellipsis"[^>]*>\s*<a[^>]*title="([^"]*)"', re.S),
     "salary": re.compile(r'class="job-salary ellipsis" title="([^"]*)"'),
     "address": re.compile(r'class="job-address ellipsis" title="([^"]*)"'),
+    "education": re.compile(r'class="job-education ellipsis" title="([^"]*)"'),
     "companyName": re.compile(r'<h3>\s*<a title="([^"]*)"', re.S),
 }
 # The page has two describe-content blocks (job + company); anchor on the job heading.
 JD_RE = re.compile(r'职位描述</h4>\s*<p class="describe-content">(.*?)</p>', re.S)
 REFRESH_RE = re.compile(r"更新于[:：]\s*(\d{4}-\d{2}-\d{2})")
+# The detail page's header is a row of class-less spans: place, headcount, experience, education, update date.
+INFO_RE = re.compile(r'<div class="job-info-container"[^>]*>(.*?)</div>', re.S)
+SPAN_RE = re.compile(r"<span>([^<]*)</span>")
+EXPERIENCE_RE = re.compile(r"^(\d+-\d+年|\d+年以[上下]|应届生?|经验不限|不限)$")
 
 
 class Ciic(Provider):
@@ -67,9 +72,12 @@ class Ciic(Provider):
         if not m:
             raise ParseError(f"ciic detail {uuid}: 职位描述 block not found, len={len(r.text)}")
         refresh = REFRESH_RE.search(r.text)
+        box = INFO_RE.search(r.text)
+        spans = [html.unescape(v).strip() for v in SPAN_RE.findall(box.group(1))] if box else []
         # JD kept as-is (contains <br>); a short JD is the employer's, not a failure.
         return {"description": html.unescape(m.group(1)).strip(),
-                "refresh_date": refresh.group(1) if refresh else None}
+                "refresh_date": refresh.group(1) if refresh else None,
+                "experience": next((v for v in spans if EXPERIENCE_RE.match(v)), None)}
 
     def meta(self, job: dict, detail: dict | None) -> dict:
         uuid = job.get("uuid")
@@ -82,7 +90,8 @@ class Ciic(Provider):
 
     def row(self, job: dict, detail: dict | None) -> dict:
         return {"title": job.get("title"), "company": job.get("companyName"),
-                "city": job.get("city"), "salary_text": job.get("salary") or None,
+                "city": job.get("city"), "district": job.get("district"), "education": job.get("education"),
+                "experience": (detail or {}).get("experience"), "salary_text": job.get("salary") or None,
                 "description": (detail or {}).get("description") or None}
 
     def probe_payload(self) -> dict:
@@ -99,7 +108,9 @@ def _parse_row(row: str, uuid: str) -> dict:
         if not out.get(key):
             raise ParseError(f"ciic row {uuid}: {key} not found, row={row[:200]!r}")
     if out.get("address"):
-        # "广东|广州" -> 广州, "上海|上海|黄浦" -> 上海: second segment is the city level.
+        # "广东|广州" -> 广州, "上海|上海|黄浦" -> 上海 + 黄浦: province | city | district.
         parts = [p for p in out["address"].split("|") if p]
         out["city"] = parts[1] if len(parts) > 1 else parts[0]
+        if len(parts) > 2:
+            out["district"] = parts[2]
     return out

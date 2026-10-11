@@ -8,8 +8,10 @@ from djs.providers.zhaopin import Zhaopin
 
 SEARCH = {"keyword": "算法"}
 JOB = {"_synthetic": True, "number": "CC1", "name": "算法工程师", "companyName": "甲公司",
-       "workCity": "北京", "salary60": "20K-40K", "publishTime": "2026-09-10 12:30:00"}
+       "workCity": "北京", "cityDistrict": "海淀", "education": "本科", "workingExp": "3-5年", "salary60": "20K-40K",
+       "publishTime": "2026-09-10 12:30:00"}
 DETAIL = {"_synthetic": True, "position": {"desc": {"description": "写算法"}}}
+EMBEDDED = {"position": {"desc": {"description": "列表里就有的职位描述"}}}   # the list item's own copy of the job module
 
 
 def client(body=None, status=200, text=None, seen=None):
@@ -20,11 +22,12 @@ def client(body=None, status=200, text=None, seen=None):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def li(uuid="ab12", title="前端开发", company="乙公司", address="广东|广州", salary="10-20K"):
+def li(uuid="ab12", title="前端开发", company="乙公司", address="广东|广州", salary="10-20K", education="本科"):
     return (f'<li class="position-info-item" uuid="{uuid}"><div class="job-name ellipsis">'
             f'<a href="x" title="{title}">{title}</a></div>'
             f'<span class="job-salary ellipsis" title="{salary}">{salary}</span>'
             f'<span class="job-address ellipsis" title="{address}">x</span>'
+            f'<span class="job-education ellipsis" title="{education}">{education}</span>'
             f'<h3><a title="{company}">{company}</a></h3></li>')
 
 
@@ -90,9 +93,18 @@ def test_zhaopin_job_id_detail_meta_row():
     assert m["source_url"].endswith("/CC1.htm") and m["published_at"] == "2026-09-10T12:30:00+08:00"
     assert m["published_at_kind"] == "refresh"
     assert z.meta({"number": "A"}, None)["published_at_kind"] == "unknown"
-    assert z.row(JOB, d) == {"title": "算法工程师", "company": "甲公司", "city": "北京",
-                             "salary_text": "20K-40K", "description": "写算法"}
+    assert z.row(JOB, d) == {"title": "算法工程师", "company": "甲公司", "city": "北京", "district": "海淀",
+                             "education": "本科", "experience": "3-5年", "salary_text": "20K-40K",
+                             "description": "写算法"}
     assert z.row(JOB, None)["description"] is None
+
+
+def test_zhaopin_list_item_already_carries_the_jd():
+    z = Zhaopin()
+    assert z.row({**JOB, "jobDetailData": EMBEDDED}, None)["description"] == "列表里就有的职位描述"
+    assert z.row({**JOB, "jobDetailData": EMBEDDED}, DETAIL)["description"] == "列表里就有的职位描述"   # list copy first
+    empty = {"position": {"desc": {"description": ""}}}
+    assert z.row({**JOB, "jobDetailData": empty}, DETAIL)["description"] == "写算法"   # the detail is the fallback
 
 
 # ---- ciic ----
@@ -102,6 +114,7 @@ def test_ciic_happy_path():
                         {**SEARCH, "city": "广州"}, 1)
     assert [j["uuid"] for j in jobs] == ["ab12", "cd34"]
     assert jobs[0]["city"] == "广州" and jobs[1]["city"] == "上海"
+    assert "district" not in jobs[0] and jobs[1]["district"] == "黄浦" and jobs[0]["education"] == "本科"
     assert seen[0].url.params["workplace"] == "广州"
 
 
@@ -138,16 +151,20 @@ def test_ciic_job_id_detail_meta_row():
     assert c.job_id(job) == "ab12"
     with pytest.raises(StructureError):
         c.job_id({"title": "x"})
-    html_ = ('<h4>职位描述</h4> <p class="describe-content">做前端<br>要求&amp;细则</p>'
-             '<h4>公司简介</h4><p class="describe-content">公司</p><span>更新于: 2026-09-16</span>')
+    html_ = ('<div class="job-info-container" v-if="!fixFlag"><p><span>浙江|杭州</span><i class="vline"></i>'
+             '<span>招聘1人</span><i class="vline"></i><span>1-3年</span><i class="vline"></i><span>本科</span></p>'
+             '<span>更新于: 2026-09-16</span></div>'
+             '<h4>职位描述</h4> <p class="describe-content">做前端<br>要求&amp;细则</p>'
+             '<h4>公司简介</h4><p class="describe-content">公司</p>')
     d = c.detail(client(text=html_), job)
-    assert d == {"description": "做前端<br>要求&细则", "refresh_date": "2026-09-16"}
+    assert d == {"description": "做前端<br>要求&细则", "refresh_date": "2026-09-16", "experience": "1-3年"}
     with pytest.raises(ParseError):
         c.detail(client(text="<html></html>"), job)
     m = c.meta(job, d)
     assert m["source_url"].endswith("uuid=ab12") and m["published_at"] == "2026-09-16T00:00:00+08:00"
     assert m["published_at_kind"] == "refresh"
     assert c.meta(job, None)["published_at_kind"] == "unknown"
-    assert c.row(job, d) == {"title": "前端开发", "company": "乙公司", "city": "广州",
-                             "salary_text": "10-20K", "description": "做前端<br>要求&细则"}
-    assert c.row(job, None)["description"] is None
+    assert c.row(job, d) == {"title": "前端开发", "company": "乙公司", "city": "广州", "district": None,
+                             "education": "本科", "experience": "1-3年", "salary_text": "10-20K",
+                             "description": "做前端<br>要求&细则"}
+    assert c.row(job, None)["description"] is None and c.row(job, None)["experience"] is None

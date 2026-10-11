@@ -8,7 +8,7 @@ or "全国", so row()['city'] is not always the searched city.
 """
 from __future__ import annotations
 
-from .base import Provider, StructureError, get_json, need
+from .base import Provider, StructureError, get_json, need, split_places
 
 
 class Chinahr(Provider):
@@ -54,8 +54,9 @@ class Chinahr(Provider):
                 "published_at": None, "published_at_kind": "unknown"}
 
     def row(self, job: dict, detail: dict | None) -> dict:
-        return {"title": job.get("jobName"), "company": job.get("comName"),
-                "city": job.get("workPlace"), "salary_text": job.get("salary"),
+        city, district = split_places([job.get("workPlace")])   # workPlace is "咸阳-秦都区", or just a province
+        return {"title": job.get("jobName"), "company": job.get("comName"), "city": city, "district": district,
+                "education": job.get("degree"), "experience": job.get("workExp"), "salary_text": job.get("salary"),
                 "description": (detail or {}).get("jobDesc") or None}
 
     def probe_payload(self) -> dict:

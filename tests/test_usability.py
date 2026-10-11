@@ -52,14 +52,14 @@ def test_old_database_is_migrated_and_keeps_working(home):
     write_old_db(home)
     conn = db.connect()
     assert sorted(map(tuple, conn.execute("SELECT task_id, job_id FROM task_jobs"))) == [(1, 1), (1, 2), (2, 3)]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-    assert [j["title"] for j in service.jobs_get(conn, task_id=1)] == ["B", "A"]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert [j["title"] for j in service.jobs_get(conn, task_id=1, complete_only=False)] == ["B", "A"]
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 4
     conn.execute("INSERT INTO task_jobs VALUES (2, 1)")  # a link the engine made after the upgrade
     conn.execute("PRAGMA user_version = 0")  # as if another process were migrating right now
     db.connect().close()
     assert conn.execute("SELECT COUNT(*) FROM task_jobs").fetchone()[0] == 4  # nothing duplicated, nothing dropped
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert taskqueue.claim(conn, "nowcoder") is None  # old tasks are done; the queue itself works
     tid = taskqueue.create(conn, "nowcoder", {"keyword": "go"})
     assert taskqueue.claim(conn, "nowcoder")["id"] == tid
@@ -67,7 +67,7 @@ def test_old_database_is_migrated_and_keeps_working(home):
 
 def test_fresh_database_is_at_the_current_version(home):
     conn = db.connect()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert conn.execute("SELECT COUNT(*) FROM task_jobs").fetchone()[0] == 0
 
 

@@ -129,6 +129,12 @@ def code(platform: str, name: str) -> str | None:
     return TABLES.get(ALIASES.get(platform, platform), {}).get(n)
 
 
+def name_of(platform: str, platform_code) -> str | None:
+    """The canonical city a platform's own city code stands for (the reverse of code()), else None."""
+    table = TABLES.get(ALIASES.get(platform, platform), {})
+    return next((name for name, c in table.items() if c == str(platform_code)), None)
+
+
 def supported(platform: str) -> list[str]:
     """Canonical cities the platform can be searched by (examples only for the BY_NAME sites, which take any name)."""
     return [n for n in GB if code(platform, n)]

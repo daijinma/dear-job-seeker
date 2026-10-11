@@ -1,10 +1,13 @@
-"""Zhaopin (zhaopin.com) mini-program gateway. Keyword search; JD needs a detail hop.
+"""Zhaopin (zhaopin.com) mini-program gateway. Keyword search; the list item carries the JD.
 
 All four x-zp-* headers are required (none -> code 211). They are constants the mini-program
 itself ships, not credentials. x-zp-version is a capture-day version: an outdated one is
 reported through the business code check (version is put in the error text), never as [].
 The list envelope uses `statusCode`, the detail envelope uses `code`.
 Hard cap: 3 pages x 20; each city slice has its own independent quota.
+The list item already embeds the whole job (`jobDetailData`, the same shape the detail request returns), JD included,
+so detail() is only the fallback for an item whose embedded JD is empty. `salaryReal` (the platform's monthly
+equivalent, lower bound +1) is not used: `salary60` is the advertised figure and keeps its own unit ("100元/时").
 """
 from __future__ import annotations
 
@@ -66,13 +69,16 @@ class Zhaopin(Provider):
 
     def row(self, job: dict, detail: dict | None) -> dict:
         return {"title": job.get("name"), "company": job.get("companyName"),
-                "city": job.get("workCity"), "salary_text": job.get("salary60"),
-                "description": _jd(detail)}
+                "city": job.get("workCity"), "district": job.get("cityDistrict"),
+                "education": job.get("education"), "experience": job.get("workingExp"),
+                "salary_text": job.get("salary60"),
+                "description": _jd(job.get("jobDetailData")) or _jd(detail)}
 
     def probe_payload(self) -> dict:
         return {"keyword": "算法工程师"}
 
 
-def _jd(detail: dict | None) -> str | None:
-    desc = ((detail or {}).get("position") or {}).get("desc") or {}
+def _jd(module: dict | None) -> str | None:
+    """The JD of a job module: the detail response, or the `jobDetailData` embedded in a list item."""
+    desc = ((module or {}).get("position") or {}).get("desc") or {}
     return desc.get("description") or None

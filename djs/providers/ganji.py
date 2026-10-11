@@ -8,7 +8,9 @@ The user-facing page is the share URL the detail response carries (the detail pa
 """
 from __future__ import annotations
 
-from .base import Blocked, Provider, StructureError, get_json, need
+from djs import cities
+
+from .base import Blocked, Provider, StructureError, district_of, get_json, need
 
 APPID = "wx8a53973ba8aa631e"
 APP_VER = "191"
@@ -80,8 +82,12 @@ class Ganji(Provider):
         return {"source_url": url, "apply_url": url, "published_at": None, "published_at_kind": "unknown"}
 
     def row(self, job: dict, detail: dict | None) -> dict:
-        return {"title": job.get("title"), "company": job.get("enterpriseName"), "city": job.get("area"),
-                "salary_text": job.get("salary"), "description": jd_text(detail) if detail else None}
+        # `area` is a district label ("西湖区·翠苑"); the city is the first id of dispLocalFullPath ("79,81,8593")
+        city = cities.name_of("city58", str(job.get("dispLocalFullPath") or "").split(",")[0])
+        return {"title": job.get("title"), "company": job.get("enterpriseName"), "city": city,
+                "district": district_of(job.get("area"), city), "education": job.get("education"),
+                "experience": job.get("experience"), "salary_text": job.get("salary"),
+                "description": jd_text(detail) if detail else None}
 
     def probe_payload(self) -> dict:
         return {"keyword": "服务员", "city": "北京"}

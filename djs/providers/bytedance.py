@@ -3,7 +3,8 @@
 Paging is offset based: offset = page * page_size. Path /api/v1/search/job/posts works; the old
 /public/supplier/... path returns 400.
 City: `location_code_list` takes the portal's own city codes ("CT_52" = 杭州, dictionary at
-/api/v1/config/location/nodes). A post can list several cities (`city_list`); `city_info` is only the first.
+/api/v1/config/location/nodes). A post can list several cities (`city_list`); `city_info` is only the first;
+the districts are in `job_post_info.address_list`. The portal publishes no salary, education or experience.
 """
 from __future__ import annotations
 
@@ -56,8 +57,10 @@ class Bytedance(Provider):
     def row(self, job: dict, detail: dict | None) -> dict:
         jd = "\n\n".join(s for s in (str(job.get(k) or "").strip() for k in ("description", "requirement")) if s)
         places = [c.get("name") for c in job.get("city_list") or []] or [(job.get("city_info") or {}).get("name")]
-        return {"title": job.get("title"), "company": "字节跳动",
-                "city": join_places(places), "salary_text": None, "description": jd or None}
+        addresses = (job.get("job_post_info") or {}).get("address_list") or []
+        districts = ((a.get("district") or {}).get("name") for a in addresses if isinstance(a, dict))
+        return {"title": job.get("title"), "company": "字节跳动", "city": join_places(places),
+                "district": join_places(districts), "salary_text": None, "description": jd or None}
 
     def probe_payload(self) -> dict:
         return {"keyword": "算法"}

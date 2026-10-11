@@ -68,9 +68,13 @@ class Boss(Provider):
                 "published_at": None, "published_at_kind": "unknown"}
 
     def row(self, job: dict, detail: dict | None) -> dict:
-        info = (detail or {}).get("jobInfo", {})
+        info = (detail or {}).get("jobInfo") or {}
+        # salaryDesc is an empty string until the user is logged in
         return {"title": job.get("jobName"), "company": job.get("brandName"),
-                "city": job.get("cityName"), "salary_text": job.get("salaryDesc"),
+                "city": job.get("cityName"), "district": job.get("areaDistrict"),
+                "education": job.get("jobDegree") or info.get("degreeName"),
+                "experience": job.get("jobExperience") or info.get("experienceName"),
+                "salary_text": job.get("salaryDesc") or info.get("salaryDesc") or None,
                 "description": info.get("postDescription")}
 
     def probe_payload(self) -> dict:

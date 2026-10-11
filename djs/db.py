@@ -1,6 +1,7 @@
 """SQLite access. One connection per thread; autocommit so every statement is atomic on its own."""
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -35,6 +36,38 @@ def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
                 raise
 
 
+# jobs columns added by schema v3 (the data contract); a fresh database gets them from schema.sql
+JOBS_V3 = (("district", "TEXT"), ("salary_min", "INTEGER"), ("salary_max", "INTEGER"), ("salary_unit", "TEXT"),
+           ("salary_months", "INTEGER"), ("education", "TEXT"), ("experience", "TEXT"), ("missing", "TEXT"),
+           ("complete", "INTEGER NOT NULL DEFAULT 0"))
+
+
+def _backfill_jobs(conn) -> None:
+    """Fill the v3 columns of every stored job with the code the crawl uses (imported late: it imports this package)."""
+    from djs import jobs, providers
+    for (job_pk,) in conn.execute("SELECT id FROM jobs").fetchall():  # ids only: the raw payloads can be large
+        row = conn.execute("SELECT provider, payload, detail FROM jobs WHERE id=?", (job_pk,)).fetchone()
+        try:
+            jobs.rederive(conn, job_pk, providers.get(row["provider"]), json.loads(row["payload"]),
+                          json.loads(row["detail"]) if row["detail"] else None)
+        except Exception:  # a platform since removed, a row without payload: judge it by what is stored
+            jobs.refresh(conn, job_pk)
+
+
+def _migrate_jobs_v3(conn) -> None:
+    """One transaction, so a crash half way leaves version 2 and the next start does it all again."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for column, ddl in JOBS_V3:
+            _add_column_if_missing(conn, "jobs", column, ddl)
+        _backfill_jobs(conn)
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _migrate(conn) -> None:
     """Bring a database written by an older version up to date. Gated on PRAGMA user_version (this runs on every
     connect) and idempotent, so two processes migrating at the same moment is harmless."""
@@ -47,6 +80,8 @@ def _migrate(conn) -> None:
     if version < 2:
         _add_column_if_missing(conn, "provider_settings", "transport", "TEXT")  # v2: per-platform capture transport
         conn.execute("PRAGMA user_version = 2")
+    if version < 3:
+        _migrate_jobs_v3(conn)  # v3: the data contract's columns on jobs, derived for what is already stored
 
 
 _init_lock = threading.Lock()

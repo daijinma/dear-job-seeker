@@ -262,8 +262,10 @@ def test_engine_happy_path_and_dedupe(env):
     engine.run_task(env.conn, t)
     row = status(env, t["id"])
     assert row["status"] == "done"
-    assert taskqueue.as_dict(row)["stats"] == {"pages": 2, "jobs_new": 3, "jobs_seen": 0, "details_ok": 3, "details_failed": 0}
-    jobs = {j["source_job_id"]: j for j in service.jobs_get(env.conn, task_id=t["id"], with_detail=True)}
+    assert taskqueue.as_dict(row)["stats"] == {"pages": 2, "jobs_new": 3, "jobs_seen": 0, "details_ok": 3,
+                                               "details_failed": 0, "complete": 0, "incomplete": 3}
+    jobs = {j["source_job_id"]: j for j in service.jobs_get(env.conn, task_id=t["id"], with_detail=True,
+                                                            complete_only=False)}
     assert jobs["1"]["description"] == "jd1" and jobs["2"]["detail"] is None and jobs["2"]["detail_error"] is None
     t2 = task(env)
     engine.run_task(env.conn, t2)
@@ -358,7 +360,7 @@ def test_quick_mode_stores_list_items_only(env):
     engine.run_task(env.conn, t)
     stats = taskqueue.as_dict(status(env, t["id"]))["stats"]
     assert asked == [] and stats["jobs_new"] == 2 and stats["details_ok"] == 0
-    job = service.jobs_get(env.conn, task_id=t["id"], with_detail=True)[0]
+    job = service.jobs_get(env.conn, task_id=t["id"], with_detail=True, complete_only=False)[0]
     assert job["title"] and job["description"] is None and job["detail"] is None and job["detail_error"] is None
 
 
@@ -370,7 +372,7 @@ def test_job_detail_on_demand_then_cached(env):
                                                     "salary_text": detail and "20-30K",
                                                     "description": detail and detail["jd"]})
     engine.run_task(env.conn, task(env, detail=False))
-    job_id = service.jobs_get(env.conn)[0]["id"]
+    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
     env.conn.execute("UPDATE jobs SET city='Hangzhou' WHERE id=?", (job_id,))  # the detail knows no city: keep ours
     got = service.job_detail(env.conn, job_id)
     assert got["description"] == "jd1" and got["salary_text"] == "20-30K" and got["city"] == "Hangzhou"
@@ -382,7 +384,7 @@ def test_job_detail_on_demand_then_cached(env):
 def test_job_detail_failures_are_friendly_and_store_nothing(env):
     mock_client(env, pages({1: [{"id": 1}]}))
     engine.run_task(env.conn, task(env, detail=False))
-    job_id = service.jobs_get(env.conn)[0]["id"]
+    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
     with pytest.raises(ValueError, match="not found"):
         service.job_detail(env.conn, 999)
     env.mp.setattr(env.provs["fake"], "detail", boom(StructureError("shape")))
@@ -395,14 +397,14 @@ def test_job_detail_failures_are_friendly_and_store_nothing(env):
         egress.lease(env.conn, "fake", "x")
     with pytest.raises(ValueError, match="cooling down"):
         service.job_detail(env.conn, job_id)
-    assert service.jobs_get(env.conn, with_detail=True)[0]["detail"] is None
+    assert service.jobs_get(env.conn, with_detail=True, complete_only=False)[0]["detail"] is None
 
 
 def test_job_detail_on_login_platform_needs_a_cookie(env):
     env.auth.cookies = {"s": "1"}
     mock_client(env, pages({1: [{"id": 1}]}))
     engine.run_task(env.conn, task(env, "fakelogin", city="x", detail=False))
-    job_id = service.jobs_get(env.conn)[0]["id"]
+    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
     env.mp.setattr(env.provs["fakelogin"], "detail", boom(LoginRequired("401")))
     with pytest.raises(ValueError, match="login required"):  # cookie expired on the server
         service.job_detail(env.conn, job_id)
@@ -413,9 +415,11 @@ def test_job_detail_on_login_platform_needs_a_cookie(env):
 
 def test_crawl_start_passes_and_validates_detail(env):
     tid = service.crawl_start(env.conn, "fake", keyword="x", detail=False)["task_id"]
-    assert taskqueue.get(env.conn, tid)["payload"] == {"keyword": "x", "detail": False}
+    assert taskqueue.get(env.conn, tid)["payload"] == {"keyword": "x", "detail": False}   # the old boolean still works
     default = service.crawl_start(env.conn, "fake", keyword="x")["task_id"]
-    assert taskqueue.get(env.conn, default)["payload"]["detail"] is True
+    assert taskqueue.get(env.conn, default)["payload"]["detail"] == "auto"
+    for mode in ("always", "never"):
+        assert service.crawl_start(env.conn, "fake", keyword="x", detail=mode)["task_id"]
     with pytest.raises(ValueError, match="detail"):
         service.crawl_start(env.conn, "fake", keyword="x", detail="no")
 
@@ -428,8 +432,10 @@ def test_repeat_search_gets_its_own_results(env):
     engine.run_task(env.conn, again)
     assert taskqueue.as_dict(status(env, again["id"]))["stats"]["jobs_new"] == 0
     for t in (first, again):
-        assert sorted(j["source_job_id"] for j in service.jobs_get(env.conn, task_id=t["id"])) == ["1", "2"]
-    assert {j["task_id"] for j in service.jobs_get(env.conn)} == {first["id"]}  # still "first discovered by"
+        found = service.jobs_get(env.conn, task_id=t["id"], complete_only=False)
+        assert sorted(j["source_job_id"] for j in found) == ["1", "2"]
+    discoverers = {j["task_id"] for j in service.jobs_get(env.conn, complete_only=False)}
+    assert discoverers == {first["id"]}  # still "first discovered by"
     assert [t["jobs_found"] for t in taskqueue.list_(env.conn)] == [2, 2]
 
 
@@ -447,7 +453,8 @@ def test_progress_is_written_after_each_page(env):
 
     mock_client(env, handler)
     engine.run_task(env.conn, t)
-    assert seen == [{"pages": 1, "jobs_new": 2, "jobs_seen": 0, "details_ok": 2, "details_failed": 0}]
+    assert seen == [{"pages": 1, "jobs_new": 2, "jobs_seen": 0, "details_ok": 0, "details_failed": 0,
+                     "complete": 0, "incomplete": 2}]   # the list is stored first; the detail pass comes after it
     assert taskqueue.get(env.conn, t["id"])["stats"]["pages"] == 2
 
 
@@ -468,7 +475,7 @@ def test_searches_group_tasks_by_keyword_and_city(env):
         ("fake", "fake", "done", 3), ("fake2", "fake2", "done", 3)]
     assert got[1]["task_ids"] == [go["id"]] and got[1]["per_site"][0]["status"] == "pending"
     assert got[0]["per_site"] == [{"provider": "fakelogin", "label": "fakelogin", "status": "waiting_login",
-                                   "jobs": 0, "last_error": "login required"}]
+                                   "jobs": 0, "complete": 0, "incomplete": 0, "last_error": "login required"}]
     assert [s["keyword"] for s in service.searches(env.conn, limit=1)] == ["rust"]
 
 

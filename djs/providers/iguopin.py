@@ -8,7 +8,9 @@ returns 0 rows), see djs.cities. A job can list several cities (`district_list`)
 """
 from __future__ import annotations
 
-from .base import Blocked, Provider, StructureError, get_json, join_places, months_suffix, need
+from djs.normalize import salary_range
+
+from .base import Blocked, Provider, StructureError, get_json, months_suffix, need, split_places
 
 URL = "https://gp-api.iguopin.com/api/jobs/v1/recom-job"
 OK_CODE = 200                      # business success is 200, not 0
@@ -57,9 +59,11 @@ class Iguopin(Provider):
                 "published_at_kind": "refresh" if rt else "unknown"}
 
     def row(self, job: dict, detail: dict | None) -> dict:
-        places = (d.get("area_cn") for d in job.get("district_list") or [] if isinstance(d, dict))
-        return {"title": job.get("job_name"), "company": job.get("company_name"),
-                "city": join_places(places), "salary_text": _salary(job), "description": job.get("contents")}
+        places = [d.get("area_cn") for d in job.get("district_list") or [] if isinstance(d, dict)]
+        city, district = split_places(places)   # area_cn is "杭州-西湖区"
+        return {"title": job.get("job_name"), "company": job.get("company_name"), "city": city, "district": district,
+                "education": job.get("education_cn"), "experience": job.get("experience_cn"),
+                "description": job.get("contents"), **_salary(job)}
 
     def probe_payload(self) -> dict:
         return {"keyword": "算法"}
@@ -77,11 +81,11 @@ def _items(data: dict) -> list[dict]:
     return lst
 
 
-def _salary(job: dict) -> str | None:
-    """The unit comes from the site (`wage_unit_cn`: 元/月, 元/天, ...), so no code table is needed."""
+def _salary(job: dict) -> dict:
+    """The unit comes from the site (`wage_unit_cn`: 元/月, 元/天), so no code table is needed. A negotiable job has
+    0-0 wages; a unit we do not know is not guessed at."""
     if job.get("is_negotiable"):
-        return "面议"
-    lo, hi, unit = job.get("min_wage"), job.get("max_wage"), job.get("wage_unit_cn")
-    if not (lo and hi and unit):
-        return None
-    return f"{lo}-{hi}{unit}{months_suffix(job.get('months'))}"
+        return {"salary_text": "面议"}
+    lo, hi, unit, months = job.get("min_wage"), job.get("max_wage"), job.get("wage_unit_cn"), job.get("months")
+    numbers = salary_range(lo, hi, unit, months)
+    return {"salary_text": f"{lo}-{hi}{unit}{months_suffix(months)}", **numbers} if numbers else {}

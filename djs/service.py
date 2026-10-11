@@ -1,15 +1,18 @@
 """Tool-level operations (one function per MCP tool). server.py only wraps these."""
 from __future__ import annotations
 
+import functools
 import json
 
 import httpx
 
-from djs import auth, browser, egress, engine, pacer, providers, taskqueue
+from djs import auth, browser, egress, engine, jobs, pacer, providers, taskqueue
+from djs.normalize import CORE
 from djs.providers.base import Blocked, FetchError, LoginRequired
 
-JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, salary_text, description, source_url, "
-            "published_at, published_at_kind, detail_error, first_seen_at, last_seen_at")
+JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, district, education, experience, "
+            "salary_text, salary_min, salary_max, salary_unit, salary_months, description, source_url, "
+            "published_at, published_at_kind, missing, complete, detail_error, first_seen_at, last_seen_at")
 
 
 def _label(prov) -> str:
@@ -33,8 +36,10 @@ def provider_list(conn) -> list[dict]:
     return out
 
 
-def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=None, detail=True) -> dict:
-    """detail=False is quick mode: store the list items only; job_detail fetches a job's full text on demand."""
+def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=None, detail="auto") -> dict:
+    """detail: 'auto' requests the detail only for jobs still missing a core element, 'always' for every job without a
+    stored detail, 'never' stores the list items only (job_detail loads one on demand). True / False mean always /
+    never."""
     missing = providers.get(provider).missing_env()
     if missing:
         raise ValueError(f"{provider} needs environment variable(s) {', '.join(missing)}; "
@@ -52,25 +57,63 @@ def task_list(conn, status=None, limit=20) -> list[dict]:
 
 def _load(row) -> dict:
     job = dict(row)
+    job["missing"] = [name for name in (job["missing"] or "").split(",") if name]
+    job["complete"] = bool(job["complete"])
     if job.get("detail"):
         job["detail"] = json.loads(job["detail"])
     return job
 
 
-def jobs_get(conn, task_id=None, provider=None, limit=50, with_detail=False) -> list[dict]:
+def _login_hides_salary(provider: str, logged_in) -> bool:
+    try:
+        return providers.get(provider).auth != "public" and not logged_in(provider)
+    except KeyError:  # a platform that was removed after the job was stored
+        return False
+
+
+def _why(job: dict, element: str, logged_in) -> str:
+    """Why one core element is absent from a job."""
+    if element == "salary" and "面议" in (job.get("salary_text") or ""):
+        return "面议"
+    if element == "salary" and _login_hides_salary(job["provider"], logged_in):
+        return "需登录才能看到薪资"
+    if element == "description" and job.get("detail_error"):
+        return "详情获取失败"
+    return f"平台未提供{CORE[element]}"
+
+
+def incomplete_reason(job: dict, logged_in=None) -> str | None:
+    """Why a job lacks core elements, in a few Chinese words (None when nothing is missing). `job["missing"]` is the
+    stored comma-joined text or a list; `logged_in(provider)` defaults to the saved login state."""
+    names = job["missing"].split(",") if isinstance(job["missing"], str) else job["missing"]
+    logged_in = logged_in or (lambda provider: auth.status(provider)["logged_in"])
+    return "；".join(_why(job, name, logged_in) for name in names if name) or None
+
+
+def _explained(rows: list[dict]) -> list[dict]:
+    """Adds `incomplete_reason` to each job; the login state is asked once per platform, not once per job."""
+    logged_in = functools.cache(lambda provider: auth.status(provider)["logged_in"])
+    for job in rows:
+        job["incomplete_reason"] = incomplete_reason(job, logged_in)
+    return rows
+
+
+def jobs_get(conn, task_id=None, provider=None, limit=50, with_detail=False, complete_only=True) -> list[dict]:
+    """Stored jobs, newest first. By default only the complete ones (every core element present); complete_only=False
+    adds the rest, each with `missing` and `incomplete_reason`."""
     cols = JOB_COLS + (", detail" if with_detail else "")
     rows = conn.execute(
         f"SELECT {cols} FROM jobs WHERE (? IS NULL OR id IN (SELECT job_id FROM task_jobs WHERE task_id=?))"
-        " AND (? IS NULL OR provider=?) ORDER BY id DESC LIMIT ?",
-        (task_id, task_id, provider, provider, limit)).fetchall()
-    return [_load(r) for r in rows]
+        " AND (? IS NULL OR provider=?) AND (? = 0 OR complete = 1) ORDER BY id DESC LIMIT ?",
+        (task_id, task_id, provider, provider, int(bool(complete_only)), limit)).fetchall()
+    return _explained([_load(r) for r in rows])
 
 
 def _job(conn, job_id: int) -> dict:
     row = conn.execute(f"SELECT {JOB_COLS}, detail FROM jobs WHERE id=?", (job_id,)).fetchone()
     if row is None:
         raise ValueError(f"job {job_id} not found")
-    return _load(row)
+    return _explained([_load(row)])[0]
 
 
 def _friendly(prov, exc: Exception) -> str:
@@ -83,12 +126,14 @@ def _friendly(prov, exc: Exception) -> str:
 
 
 def job_detail(conn, job_id: int) -> dict:
-    """The stored job with its full detail. Fetched from the platform once (same egress and pacing as a crawl),
-    then served from the database."""
+    """The stored job with its full detail. Fetched from the platform once (same egress and pacing as a crawl), the
+    columns derived from it again, then served from the database."""
     job = _job(conn, job_id)
     if job["detail"] is not None:
         return job
     prov = providers.get(job["provider"])
+    if not prov.has_detail:  # the list item was all there is
+        return job
     item = json.loads(conn.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
     try:
         with engine.leased_client(conn, prov, f"job:{job_id}", {}) as client:
@@ -99,7 +144,7 @@ def job_detail(conn, job_id: int) -> dict:
         raise ValueError(str(e)) from e
     except (FetchError, httpx.HTTPError) as e:
         raise ValueError(_friendly(prov, e)) from e
-    engine.update_job(conn, job_id, prov, item, detail)
+    jobs.update(conn, job_id, prov, item, detail)
     return _job(conn, job_id)
 
 
@@ -109,18 +154,25 @@ def _search_status(statuses: set[str]) -> str:
     return "waiting_login" if "waiting_login" in statuses else "done"
 
 
+def _site(name: str, task: dict, found: dict) -> dict:
+    jobs_n, complete = found.get(name, (0, 0))
+    return {"provider": name, "label": _label(providers.get(name)), "status": task["status"], "jobs": jobs_n,
+            "complete": complete, "incomplete": jobs_n - complete, "last_error": task["last_error"]}
+
+
 def _search(conn, keyword, city, tasks: list[dict]) -> dict:
     ids = [t["id"] for t in tasks]
-    found = {r[0]: r[1] for r in conn.execute(
-        "SELECT t.provider, COUNT(DISTINCT j.job_id) FROM task_jobs j JOIN tasks t ON t.id=j.task_id "
-        f"WHERE j.task_id IN ({','.join('?' * len(ids))}) GROUP BY t.provider", ids)}
+    found = {r["provider"]: (r["jobs"], r["complete"]) for r in conn.execute(
+        "SELECT t.provider, COUNT(DISTINCT tj.job_id) AS jobs, "
+        "COUNT(DISTINCT CASE WHEN j.complete THEN tj.job_id END) AS complete "
+        "FROM task_jobs tj JOIN tasks t ON t.id=tj.task_id JOIN jobs j ON j.id=tj.job_id "
+        f"WHERE tj.task_id IN ({','.join('?' * len(ids))}) GROUP BY t.provider", ids)}
     newest = {t["provider"]: t for t in tasks}  # tasks arrive in id order, so the last one per platform is the newest
     return {"keyword": keyword, "city": city or None, "task_ids": ids,
             "created_at": max(t["created_at"] for t in tasks),
             "status": _search_status({t["status"] for t in tasks}),
-            "jobs_total": sum(found.values()),
-            "per_site": [{"provider": name, "label": _label(providers.get(name)), "status": t["status"],
-                          "jobs": found.get(name, 0), "last_error": t["last_error"]} for name, t in newest.items()]}
+            "jobs_total": sum(n for n, _ in found.values()),
+            "per_site": [_site(name, t, found) for name, t in newest.items()]}
 
 
 def searches(conn, limit=20) -> list[dict]:

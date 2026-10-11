@@ -1,4 +1,4 @@
 {"_synthetic": true, "code": 0, "data": {"count": 3, "job_post_list": [
- {"id": "7001", "title": "后端工程师", "description": "岗位职责 A", "requirement": "任职要求 B", "city_info": {"code": "CT_11", "name": "北京"}, "publish_time": 1700000000000, "city_list": [{"code": "CT_11", "name": "北京"}, {"code": "CT_52", "name": "杭州"}]},
+ {"id": "7001", "title": "后端工程师", "description": "岗位职责 A", "requirement": "任职要求 B", "city_info": {"code": "CT_11", "name": "北京"}, "publish_time": 1700000000000, "city_list": [{"code": "CT_11", "name": "北京"}, {"code": "CT_52", "name": "杭州"}], "job_post_info": {"address_list": [{"district": {"name": "海淀区"}, "city": {"name": "北京"}}, {"district": {"name": "临平区"}, "city": {"name": "杭州"}}, {"district": null}]}},
  {"id": 7002, "title": "产品经理", "description": "", "requirement": "", "city_info": null},
  {"id": 7003, "title": "算法", "description": "d", "requirement": "r", "city_info": {"code": "CT_52", "name": "杭州"}}]}}

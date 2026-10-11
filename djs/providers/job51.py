@@ -75,8 +75,11 @@ class Job51(Provider):
 
     def row(self, job: dict, detail: dict | None) -> dict:
         info = (detail or {}).get("detailJobInfo") or {}
+        place = job.get("jobAreaLevelDetail") or {}
+        # provideSalaryString has the unit and the paid months; jobSalaryMin/Max have neither (empty for yearly pay)
         return {"title": job.get("jobName"), "company": job.get("fullCompanyName") or job.get("companyName"),
-                "city": (job.get("jobAreaLevelDetail") or {}).get("cityString"),
+                "city": place.get("cityString"), "district": place.get("districtString"),
+                "education": job.get("degreeString"), "experience": job.get("workYearString"),
                 "salary_text": job.get("provideSalaryString"), "description": info.get("jobDescribe") or None}
 
     def probe_payload(self) -> dict:

@@ -9,24 +9,12 @@ from contextlib import contextmanager
 
 import httpx
 
-from djs import auth, browser, db, egress, pacer, providers, taskqueue
+from djs import auth, browser, db, egress, jobs, pacer, providers, taskqueue
 from djs.providers.base import Blocked, Delisted, FetchError, LoginRequired
 
 NO_EGRESS_DELAY = 60
 POLL_SECONDS = 1
 ERROR_BACKOFF = 5
-# jobs columns a provider derives from a list item (row) and its metadata (meta)
-FIELDS = ("title", "company", "city", "salary_text", "description", "source_url", "published_at", "published_at_kind")
-
-
-def _job_fields(prov, job, detail) -> dict:
-    """The derived jobs columns for a list item, plus its detail once that has been fetched."""
-    derived = {**prov.row(job, detail), **prov.meta(job, detail)}
-    return {k: derived.get(k) for k in FIELDS}
-
-
-def _dump(detail) -> str | None:
-    return json.dumps(detail, ensure_ascii=False) if detail else None
 
 
 def _login_expired(prov, exc) -> bool:
@@ -83,24 +71,9 @@ def fetch_detail(client, prov, job):
         return None, e
 
 
-def _insert(conn, task_id, prov, jid, job, detail, err) -> int:
-    fields = _job_fields(prov, job, detail)
-    cur = conn.execute(
-        f"INSERT INTO jobs(provider, source_job_id, task_id, payload, detail, detail_error, {', '.join(FIELDS)}) "
-        f"VALUES (?,?,?,?,?,?,{', '.join('?' * len(FIELDS))})",
-        (prov.name, jid, task_id, json.dumps(job, ensure_ascii=False), _dump(detail), err and str(err),
-         *fields.values()))
-    return cur.lastrowid
-
-
-def update_job(conn, job_id, prov, job, detail) -> None:
-    """Store a detail fetched after the fact. A column only changes when the provider now knows a value."""
-    sets = ", ".join(f"{k}=COALESCE(?, {k})" for k in FIELDS)
-    conn.execute(f"UPDATE jobs SET detail=?, detail_error=NULL, {sets} WHERE id=?",
-                 (_dump(detail), *_job_fields(prov, job, detail).values(), job_id))
-
-
-def _store(conn, task_id, prov, client, job, stats, with_detail) -> None:
+def _store(conn, task_id, prov, job, stats) -> None:
+    """One list item: a known job only gets its last-seen time touched, a new one is derived and inserted. Either way
+    the task is linked to it."""
     jid = prov.job_id(job)
     known = conn.execute(
         "UPDATE jobs SET last_seen_at=strftime('%s','now') WHERE provider=? AND source_job_id=? RETURNING id",
@@ -109,28 +82,46 @@ def _store(conn, task_id, prov, client, job, stats, with_detail) -> None:
         stats["jobs_seen"] += 1
         job_pk = known["id"]
     else:
-        detail = err = None
-        if with_detail:
-            detail, err = fetch_detail(client, prov, job)
-            stats["details_failed" if err else "details_ok"] += 1
-        job_pk = _insert(conn, task_id, prov, jid, job, detail, err)
+        job_pk = jobs.insert(conn, task_id, prov, jid, job)
         stats["jobs_new"] += 1
     conn.execute("INSERT OR IGNORE INTO task_jobs(task_id, job_id) VALUES (?,?)", (task_id, job_pk))
 
 
+def _progress(conn, task_id, stats) -> None:
+    taskqueue.progress(conn, task_id, {**stats, **jobs.tally(conn, task_id)})
+
+
+def _complete(conn, task_id, prov, client, mode: str, stats) -> None:
+    """The second pass: the detail request, for the task's jobs that still miss a core element ('auto') or for all of
+    them ('always'). Skipped when the list item already is the detail. Blocked ends the task (it is retried and
+    carries on with what is still missing); any other failure is kept on the job."""
+    if mode == "never" or not prov.has_detail:
+        return
+    for row in jobs.awaiting_detail(conn, task_id, everything=mode == "always"):
+        item = json.loads(row["payload"])
+        detail, err = fetch_detail(client, prov, item)
+        if err:
+            jobs.fail_detail(conn, row["id"], err)
+        else:
+            jobs.update(conn, row["id"], prov, item, detail)
+        stats["details_failed" if err else "details_ok"] += 1
+        _progress(conn, task_id, stats)
+
+
 def _crawl(conn, task_id, prov, client, payload, max_pages) -> dict:
+    """List pages first (stored at once, so results show up early), then the completion pass."""
     stats = {"pages": 0, "jobs_new": 0, "jobs_seen": 0, "details_ok": 0, "details_failed": 0}
-    with_detail = payload.get("detail", True)
     limit = max_pages if prov.page_cap is None else min(max_pages, prov.page_cap)
     for page in range(prov.first_page, prov.first_page + limit):
         items = prov.fetch(client, payload, page)
         stats["pages"] += 1
         for job in items:
-            _store(conn, task_id, prov, client, job, stats, with_detail)
-        taskqueue.progress(conn, task_id, stats)
+            _store(conn, task_id, prov, job, stats)
+        _progress(conn, task_id, stats)
         if len(items) < prov.page_size:  # empty or short page = last page
             break
-    return stats
+    _complete(conn, task_id, prov, client, taskqueue.detail_mode(payload.get("detail", "auto")), stats)
+    return {**stats, **jobs.tally(conn, task_id)}
 
 
 def run_task(conn, task) -> None:
