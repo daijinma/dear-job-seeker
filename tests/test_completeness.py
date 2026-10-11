@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from djs import db, egress, engine, jobs, providers, server, service, taskqueue
-from djs.providers.base import Blocked, Delisted, Provider, StructureError, get_json, need
+from djs.providers.base import Blocked, Delisted, Login, Provider, StructureError, get_json, need
 
 LIST_JD = "列表里的职位描述"
 PAGES = {1: [{"id": 1, "title": "t1", "salary": "15-25K·14薪", "jd": LIST_JD},   # complete from the list alone
@@ -52,6 +52,7 @@ class Closed(Shop):
     """A platform that needs a login to show salaries."""
     name = "closed"
     auth = "optional"
+    login = Login(url="https://shop.test/login", method="qr", domain="shop.test", cookies_any=("s",))
 
 
 class Flat(Provider):

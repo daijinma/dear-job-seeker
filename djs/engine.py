@@ -9,7 +9,7 @@ from contextlib import contextmanager
 
 import httpx
 
-from djs import auth, browser, db, egress, jobs, pacer, providers, taskqueue
+from djs import auth, browser, cities, db, egress, jobs, pacer, providers, taskqueue
 from djs.providers.base import Blocked, Delisted, FetchError, LoginRequired
 
 NO_EGRESS_DELAY = 60
@@ -18,8 +18,18 @@ ERROR_BACKOFF = 5
 
 
 def _login_expired(prov, exc) -> bool:
-    """A login provider answering "log in": the cookie is dead (for a public provider that answer is a block)."""
+    """A login provider answering "log in": the session is dead and the task waits for a new one (for an optional
+    provider it only means the saved session is dead, and the task goes on without it)."""
     return isinstance(exc, LoginRequired) and prov.auth == "login"
+
+
+def transport_for(conn, prov, session: bool) -> str:
+    """How the platform is captured: the user's own choice (set_transport) if there is one, else, while a session
+    exists, the transport logged-in crawling needs (login_transport), else the platform's first."""
+    row = conn.execute("SELECT transport FROM provider_settings WHERE provider=?", (prov.name,)).fetchone()
+    if row and row["transport"] in prov.transports:
+        return row["transport"]
+    return prov.login_transport if session and prov.login_transport in prov.transports else prov.transports[0]
 
 
 @contextmanager
@@ -35,14 +45,15 @@ def _open(transport: str, prov, exit_id: str, interval: float, jitter: float, co
 
 @contextmanager
 def leased_client(conn, prov, key: str, payload: dict):
-    """Paced client on a leased exit, over the platform's transport (httpx or browser). A 'login' provider needs a
-    live session first; 'optional' ones never wait for one (an http client still carries a saved cookie).
-    Reports the exit's health afterwards. A dead login is the login's fault, not the exit's, so it only
-    invalidates the cookie."""
-    transport = pacer.transport(conn, prov.name)
-    if prov.auth == "login" and not auth.logged_in(prov.name):
+    """Paced client on a leased exit, over the platform's transport (httpx or browser). A platform with a login gets
+    its session on every transport (saved cookies on http, the shared profile in a browser); a 'login' platform
+    needs one first, an 'optional' one never waits for it. Reports the exit's health afterwards. A dead session is
+    the session's fault, not the exit's, so it only invalidates the saved login."""
+    session = prov.login is not None and auth.logged_in(prov.name)
+    if prov.auth == "login" and not session:
         raise LoginRequired(f"no login for {prov.name}")
-    cookies = auth.load_cookies(prov.name) if prov.auth != "public" and transport == "http" else None
+    transport = transport_for(conn, prov, session)
+    cookies = auth.load_cookies(prov.name) if session and transport == "http" else None
     exit_id = egress.lease(conn, prov.name, key)
     interval, jitter, _ = pacer.effective(conn, prov.name)
     try:
@@ -50,7 +61,7 @@ def leased_client(conn, prov, key: str, payload: dict):
             prov.warmup(client, payload)
             yield client
     except (FetchError, httpx.HTTPError) as e:
-        if _login_expired(prov, e):
+        if session and isinstance(e, LoginRequired):
             auth.invalidate(prov.name)
         else:
             egress.report(conn, exit_id, prov.name, ok=False, blocked=isinstance(e, Blocked),
@@ -108,17 +119,29 @@ def _complete(conn, task_id, prov, client, mode: str, stats) -> None:
         _progress(conn, task_id, stats)
 
 
+def _store_page(conn, task_id, prov, items: list, city: str, stats) -> None:
+    """One list page. A platform that cannot filter by city (city_filter 'client') still returns every city: only the
+    jobs placed in the asked `city` are stored, the rest is counted in stats['filtered']."""
+    for job in items:
+        if city and city not in (prov.row(job, None).get("city") or ""):
+            stats["filtered"] += 1
+        else:
+            _store(conn, task_id, prov, job, stats)
+
+
 def _crawl(conn, task_id, prov, client, payload, max_pages) -> dict:
     """List pages first (stored at once, so results show up early), then the completion pass."""
     stats = {"pages": 0, "jobs_new": 0, "jobs_seen": 0, "details_ok": 0, "details_failed": 0}
+    city = cities.norm(payload.get("city")) if prov.city_filter == "client" else ""
+    if city:
+        stats["filtered"] = 0
     limit = max_pages if prov.page_cap is None else min(max_pages, prov.page_cap)
     for page in range(prov.first_page, prov.first_page + limit):
         items = prov.fetch(client, payload, page)
         stats["pages"] += 1
-        for job in items:
-            _store(conn, task_id, prov, job, stats)
+        _store_page(conn, task_id, prov, items, city, stats)
         _progress(conn, task_id, stats)
-        if len(items) < prov.page_size:  # empty or short page = last page
+        if len(items) < prov.page_size:  # empty or short page = last page: the site's own page, not what the filter kept
             break
     _complete(conn, task_id, prov, client, taskqueue.detail_mode(payload.get("detail", "auto")), stats)
     return {**stats, **jobs.tally(conn, task_id)}

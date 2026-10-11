@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from djs import db, egress, engine, pacer, providers, server, service, taskqueue
-from djs.providers.base import Blocked, Delisted, LoginRequired, Provider, StructureError, get_json, need
+from djs.providers.base import Blocked, Delisted, Login, LoginRequired, Provider, StructureError, get_json, need
 
 
 class Fake(Provider):
@@ -45,6 +45,7 @@ class Fake2(Fake):
 class FakeLogin(Fake):
     name = "fakelogin"
     auth = "login"
+    login = Login(url="https://fake.test/login", method="qr", domain="fake.test", cookies_any=("s",))
     requires_city = True
 
 

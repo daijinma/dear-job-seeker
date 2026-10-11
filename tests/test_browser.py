@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from djs import auth, browser, cli, db, egress, engine, pacer, providers, service, taskqueue
-from djs.providers.base import Blocked, LoginRequired, Provider, check_http, get_json, need
+from djs.providers.base import Blocked, Login, LoginRequired, Provider, check_http, get_json, need
 
 PROBE = SimpleNamespace(name="probe", needs_headed=False)
 
@@ -269,22 +269,6 @@ def test_logged_in_with_cdp_reads_the_attached_browsers_cookies(home, monkeypatc
     assert "SECRET" not in json.dumps(auth.status("boss"))
 
 
-def test_login_uses_the_shared_browser_opener_and_saves_the_auth_cookies(home, monkeypatch):
-    calls = []
-    page = SimpleNamespace(goto=calls.append, context=SimpleNamespace(cookies=lambda: [
-        {"name": "wt2", "value": "S", "domain": ".zhipin.com"}, {"name": "x", "value": "y", "domain": ".other.com"}]))
-
-    @contextmanager
-    def fake_open_page(provider_name, headless, proxy=None):
-        calls.append((provider_name, headless))
-        yield page
-
-    monkeypatch.setattr(browser, "open_page", fake_open_page)
-    assert auth.login("boss", timeout=1) == {"logged_in": True, "saved_at": pytest.approx(time.time(), abs=5)}
-    assert calls == [("boss", False), auth.LOGIN["boss"]["url"]]  # headed, same opener as crawling
-    assert auth.load_cookies("boss") == {"wt2": "S"}
-
-
 def test_default_warmup_loads_the_home_page_only_in_a_browser():
     class Site(Provider):
         home = "https://x.test/"
@@ -352,15 +336,20 @@ class BrowserOnly(Dual):
     transports = ("browser",)
 
 
+SESSION = Login(url="https://dual.test/login", method="qr", domain="dual.test", cookies_any=("s",), unlocks="能看到更多")
+
+
 class Optional(Dual):
     name = "opt"
     auth = "optional"
+    login = SESSION
     transports = ("browser", "http")
 
 
 class NeedsLogin(BrowserOnly):
     name = "req"
     auth = "login"
+    login = SESSION
 
 
 class FakeAuth:
@@ -518,13 +507,13 @@ def test_login_platforms_wait_for_a_session_but_optional_ones_never_do(env, fake
     assert env.auth.invalidated == []
 
 
-@pytest.mark.parametrize("name, status, invalidated", [("opt", "pending", []), ("req", "waiting_login", ["req"])])
-def test_login_required_answer_depends_on_whether_login_is_required(env, fake_browser, name, status, invalidated):
+@pytest.mark.parametrize("name, status, attempts", [("opt", "pending", 1), ("req", "waiting_login", 0)])
+def test_a_dead_session_waits_for_a_login_or_is_dropped_by_an_optional_platform(env, fake_browser, name, status, attempts):
     env.auth.session = True
     fake_browser.client.fail = LoginRequired("code 7")
     row = run(env, name)
-    assert (row["status"], env.auth.invalidated) == (status, invalidated)  # optional: an ordinary retry
-    assert row["attempts"] == (1 if name == "opt" else 0)
+    assert (row["status"], row["attempts"], env.auth.invalidated) == (status, attempts, [name])  # optional: retried without it
+    assert env.conn.execute("SELECT COUNT(*) FROM egress_health WHERE blocked_until > 0").fetchone()[0] == 0  # not the exit's fault
 
 
 def test_optional_platform_over_http_still_carries_a_saved_cookie(env):

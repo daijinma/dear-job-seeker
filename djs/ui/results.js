@@ -1,39 +1,47 @@
 /* 我的结果: pick a search, filter and sort its jobs, read them as cards, open one in the drawer, export a table.
+   Only jobs with every core element are listed unless asked; a quiet line says how many are held back and why.
    Job text comes from third-party sites: it only ever enters the page through esc() or textContent. */
 
 const PAGE = 30;
-const SORT_OPTIONS = [["new", "最新发现"], ["company", "公司"]];
-const CSV_HEAD = ["岗位", "公司", "薪资", "城市", "网站", "链接"];
-let R = null;   // the open results page: { search, searches, provider, sort, jobs, total, perSite, searching, state, error, desc, open }
+const REASONS_SHOWN = 3;
+const SORT_OPTIONS = [["mixed", "综合"], ["salary", "薪资从高到低"], ["company", "公司"]];
+const CSV_HEAD = ["岗位", "公司", "薪资", "城市", "网站", "链接", "区", "学历", "经验", "最低薪资", "最高薪资", "薪资单位", "发薪月数", "缺少的信息"];
+let R = null;   // the open results page: { search, searches, provider, sort, showIncomplete, jobs, total, perSite, incomplete, searching, state, error, desc, open }
 
 const sameSearch = (a, b) => a.keyword === b.keyword && (a.city || "") === (b.city || "");
 const allCount = () => R.perSite.reduce((n, x) => n + x.count, 0);
-const jobQuery = (extra = {}) => ({ keyword: R.search.keyword, city: R.search.city || "", provider: R.provider, sort: R.sort, ...extra });
-
-function ago(ts) {
-  const s = Math.max(0, Date.now() / 1000 - ts);
-  if (s < 60) return "刚刚发现";
-  const [n, unit] = s < 3600 ? [s / 60, "分钟"] : s < 86400 ? [s / 3600, "小时"] : [s / 86400, "天"];
-  return `${Math.floor(n)} ${unit}前发现`;
-}
+const jobQuery = (extra = {}) => ({
+  keyword: R.search.keyword, city: R.search.city || "", provider: R.provider, sort: R.sort, complete_only: !R.showIncomplete, ...extra,
+});
 
 /* ---- pieces of a job, shared by the card and the drawer ---- */
 const jobTitle = (j) => esc(j.title || "（没有标题）");
 const jobCompany = (j) => esc(j.company || "公司未公开");
-/* The one place a salary becomes text: today the platform's own wording, later it can be built from structured fields. */
-const salaryLabel = (j) => j.salary_text || "";
+
+/* the pay as people write it: "1.5-2.5万/月 · 14薪", "200-400元/天", "20-30万/年"; the site's own words when it gave no figures */
+const toWan = (n) => String(Math.round(n / 100) / 100);   // 15000 -> "1.5", 20000 -> "2", 8000 -> "0.8"
+function salaryLabel(j) {
+  if (j.salary_min == null || j.salary_max == null) return j.salary_text || "";
+  const unit = j.salary_unit || "元/月";
+  const wan = unit !== "元/天" && unit !== "元/时" && j.salary_max >= 10000;
+  const fmt = (n) => (wan ? toWan(n) : String(n));
+  const range = j.salary_min === j.salary_max ? fmt(j.salary_max) : `${fmt(j.salary_min)}-${fmt(j.salary_max)}`;
+  return `${range}${wan ? "万" : "元"}/${unit.slice(2)}${j.salary_months ? ` · ${j.salary_months}薪` : ""}`;
+}
+
 const jobPay = (j, cls = "") => (salaryLabel(j) ? `<div class="salary ${cls}">${esc(salaryLabel(j))}</div>` : '<div class="salary none">薪资未公开</div>');
-const jobTags = (j) => `<div class="tags">${j.city ? pill(j.city, "gray") : ""}${pill(j.label)}<span class="when">${ago(j.first_seen_at)}</span></div>`;
+const jobMissing = (j) => (j.complete ? "" : `<p class="miss">信息不全：${esc(j.incomplete_reason)}</p>`);
+const jobTags = (j) => `<div class="tags">${j.city ? pill(j.city, "gray") : ""}${pill(j.label)}<span class="when">${since(j.first_seen_at)}发现</span></div>`;
 
 function jobCard(j) {
   return `<article class="card job"><h3><button type="button" class="job-open" ${act("job", { id: j.id })}>${jobTitle(j)}</button></h3>
-    <p class="sub">${jobCompany(j)}</p>${jobPay(j)}${jobTags(j)}</article>`;
+    <p class="sub">${jobCompany(j)}</p>${jobPay(j)}${jobMissing(j)}${jobTags(j)}</article>`;
 }
 
 /* ---- page regions ---- */
 function stripChip(s) {
   const on = sameSearch(s, R.search);
-  const label = `${esc(searchTitle(s))} · ${s.jobs_total} 个`;
+  const label = `${esc(searchTitle(s))} · ${wholeJobs(s)} 个`;
   return `<a class="chip${on ? " on" : ""}" href="${esc(resultsHref(s))}"${on ? ' aria-current="true"' : ""}>${on ? icon("check") : ""}${label}</a>`;
 }
 
@@ -54,16 +62,32 @@ function filtersHtml() {
   return one("all", "全部", allCount()) + R.perSite.map((x) => one(x.provider, x.label, x.count)).join("");
 }
 
+/* what the list leaves out, and why: "另有 12 条信息不全（原因：面议 12 · 需登录才能看到薪资 5）" + the switch that shows them */
+function incompleteHtml() {
+  const x = R.incomplete;
+  if (R.state !== "ready" || !x.count) return "";
+  const why = x.reasons.slice(0, REASONS_SHOWN).map((r) => `${r.text} ${r.count}`).join(" · ") + (x.reasons.length > REASONS_SHOWN ? " · …" : "");
+  return `<div class="quiet"><p class="sub">${R.showIncomplete ? "其中" : "另有"} ${x.count} 条信息不全（原因：${esc(why)}）</p>
+    <label class="switch-label"><span>显示信息不全的岗位</span>${switchBtn(R.showIncomplete, "显示信息不全的岗位", act("show-incomplete"))}</label></div>`;
+}
+
 function noJobs() {
   return `<div class="card empty"><h2>这次没有找到岗位</h2>
     <ul class="tips"><li>放宽关键词，比如把“高级前端工程师”改成“前端”</li><li>去掉城市，看看全国的结果</li><li>换几个网站再找一次</li></ul>
     ${notesHtml(R.search, true)}${linkBtn("回到查找", "#/search", "primary")}</div>`;
 }
 
+/* found something, but not one job is whole: the list is empty for a reason the user can act on */
+function onlyIncomplete() {
+  return `<div class="card empty"><h2>找到的岗位信息都不全</h2>
+    <p class="sub">共有 ${R.incomplete.count} 个岗位缺少薪资等必要信息，默认先不显示。打开上面的“显示信息不全的岗位”就能看到它们。</p>${notesHtml(R.search, true)}</div>`;
+}
+
 function listHtml() {
   if (R.state === "error") return emptyState("没能读取结果", R.error, btn("重试", "reload", {}, "primary"));
   if (R.jobs.length) return `<div class="jobs">${R.jobs.map(jobCard).join("")}</div>`;
-  return R.state === "loading" || R.searching ? `<div class="jobs">${skeletons(6)}</div>` : noJobs();
+  if (R.state === "loading" || R.searching) return `<div class="jobs">${skeletons(6)}</div>`;
+  return R.incomplete.count && !R.showIncomplete ? onlyIncomplete() : noJobs();
 }
 
 function moreHtml() {
@@ -80,6 +104,7 @@ function paintResults() {
   paint($("#tools"), toolsHtml());
   paint($("#notice"), noticeHtml());
   paint($("#filters"), filtersHtml());
+  paint($("#incomplete"), incompleteHtml());
   paint($("#list"), listHtml());
   paint($("#more"), moreHtml());
 }
@@ -88,13 +113,13 @@ const resultsFrame = () => `<section class="results">
   <nav class="strip" id="strip" aria-label="最近的查找"></nav>
   <div class="head"><div><h1 id="found"></h1><p class="sub" id="what"></p></div><div class="tools" id="tools"></div></div>
   <div id="notice"></div><div class="chips" id="filters" role="group" aria-label="按网站筛选"></div>
-  <div id="list"></div><div class="more-row" id="more"></div></section>`;
+  <div id="incomplete"></div><div id="list"></div><div class="more-row" id="more"></div></section>`;
 
 /* ---- loading ---- */
 function takePage(d, append) {
   const have = new Set(R.jobs.map((j) => j.id));
   R.jobs = append ? [...R.jobs, ...d.jobs.filter((j) => !have.has(j.id))] : d.jobs;
-  Object.assign(R, { total: d.total, perSite: d.per_site, searching: d.searching, state: "ready" });
+  Object.assign(R, { total: d.total, perSite: d.per_site, incomplete: d.incomplete, searching: d.searching, state: "ready" });
 }
 
 /* the first page (view start, filter, sort): a failure here becomes the error state with a retry button */
@@ -151,8 +176,8 @@ async function viewResults(params, e) {
   }
   const wanted = { keyword: params.get("k"), city: params.get("c") || "" };
   R = {
-    search: searches.find((s) => sameSearch(s, wanted)) || searches[0], searches, provider: null, sort: "new",
-    jobs: [], total: 0, perSite: [], searching: false, state: "loading", desc: new Map(), open: null,
+    search: searches.find((s) => sameSearch(s, wanted)) || searches[0], searches, provider: null, sort: "mixed", showIncomplete: false,
+    jobs: [], total: 0, perSite: [], incomplete: { count: 0, reasons: [] }, searching: false, state: "loading", desc: new Map(), open: null,
   };
   $("#view").innerHTML = resultsFrame();
   paintResults();
@@ -176,12 +201,13 @@ function paintDescription() {
   paint($("#drawer-status"), descStatus(d, R.open));
 }
 
+/* the close button is a labelled button and takes the focus when the drawer opens, so it is the first thing to reach */
 function drawerHtml(j) {
   const open = j.source_url ? btn("打开原页面", "open-source", {}, "primary") : "";
   return `<aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
-    <div class="drawer-head"><button type="button" class="icon-btn" data-close ${act("close-drawer")} aria-label="关闭">${icon("x", 18)}</button></div>
+    <div class="drawer-head"><button type="button" class="btn line sm" data-close data-autofocus ${act("close-drawer")}>${icon("x", 14)}关闭</button></div>
     <div class="drawer-body"><h2 id="drawer-title">${jobTitle(j)}</h2><p class="sub">${jobCompany(j)}</p>
-      ${jobPay(j, "big")}${jobTags(j)}<h3 class="label">岗位介绍</h3>
+      ${jobPay(j, "big")}${jobMissing(j)}${jobTags(j)}<h3 class="label">岗位介绍</h3>
       <div id="drawer-status"></div><div id="drawer-text" class="prose" hidden></div></div>
     <div class="drawer-foot">${open}</div></aside>`;
 }
@@ -217,16 +243,16 @@ async function allJobs() {
 }
 
 const csvCell = (v) => `"${String(v ?? "").replace(/^[=+\-@\t\r]/, "'$&").replace(/"/g, '""')}"`;   // a leading = + - @ would run as a formula in a spreadsheet
-const csvRow = (j) => [j.title, j.company, salaryLabel(j), j.city, j.label, j.source_url];
+const csvRow = (j) => [j.title, j.company, salaryLabel(j), j.city, j.label, j.source_url, j.district, j.education, j.experience,
+  j.salary_min, j.salary_max, j.salary_unit, j.salary_months, j.incomplete_reason];
 const csvText = (rows) => "\ufeff" + [CSV_HEAD, ...rows.map(csvRow)].map((r) => r.map(csvCell).join(",")).join("\r\n");
 
+/* Python writes the file into the Downloads folder (no save dialog) and says where; the toast offers to show it there */
 async function exportCsv(el) {
   el.disabled = true;
   try {
-    const name = `${R.search.keyword}${R.search.city ? "-" + R.search.city : ""}`.replace(/[\\/:*?"<>|]/g, "_");
-    const saved = await window.pywebview.api.save_csv(`${name}.csv`, csvText(await allJobs()));
-    if (saved.error) throw new Error(saved.error);
-    if (saved.saved) toast(`已保存到：${saved.saved}`, "ok");
+    const { path, reveal } = await api("POST /api/export_csv", { keyword: R.search.keyword, city: R.search.city || "", text: csvText(await allJobs()) });
+    toast("已导出到「下载」文件夹", "ok", { label: reveal, name: "reveal", data: { path } });
   } finally {
     el.disabled = false;
   }
@@ -239,6 +265,8 @@ Object.assign(ACTIONS, {
   "open-source": () => api("POST /api/open_url", { url: R.open.source_url }),
   site: (el) => { R.provider = el.dataset.k === "all" ? null : el.dataset.k; return showJobs(); },
   sort: (el) => { R.sort = el.dataset.k; return showJobs(); },
+  "show-incomplete": () => { R.showIncomplete = !R.showIncomplete; return showJobs(); },
   more: loadMore,
   export: exportCsv,
+  reveal: (el) => api("POST /api/reveal", { path: el.dataset.path }),
 });

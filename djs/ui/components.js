@@ -9,7 +9,6 @@ const ICONS = {
   chevron: '<path d="m6 9 6 6 6-6"/>',
   shield: '<path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/>',
 };
-const LOGIN_HINT = { optional: "登录后能看到薪资", login: "要先登录才能使用" };
 
 const icon = (name, size = 14) => `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 const spinner = () => '<span class="spin" aria-hidden="true"></span>';
@@ -18,6 +17,9 @@ const act = (name, data = {}) => `data-act="${name}"${Object.entries(data).map((
 const pill = (text, tone = "", lead = "") => `<span class="pill ${tone}">${lead}${esc(text)}</span>`;
 const btn = (text, name, data, cls = "line sm") => `<button type="button" class="btn ${cls}" ${act(name, data)}>${esc(text)}</button>`;
 const linkBtn = (text, href, cls = "line", label = "") => `<a class="btn ${cls}" href="${esc(href)}"${label ? ` aria-label="${esc(label)}"` : ""}>${esc(text)}</a>`;
+/* An on/off switch; the label is its name for screen readers (it has no text of its own). */
+const switchBtn = (on, label, attrs, disabled = false) =>
+  `<button type="button" class="switch${on ? " on" : ""}" role="switch" aria-checked="${on}" aria-label="${esc(label)}"${disabled ? " disabled" : ""} ${attrs}></button>`;
 const chip = (text, on, attrs, { count, sm } = {}) => {
   const n = count === undefined ? "" : ` <span class="n">${count}</span>`;
   return `<button type="button" class="chip${on ? " on" : ""}${sm ? " sm" : ""}" aria-pressed="${!!on}" ${attrs}>${on ? icon("check") : ""}${esc(text)}${n}</button>`;
@@ -48,10 +50,12 @@ function disclosure(id, title, body, hint = "") {
 }
 
 const searchTitle = (s) => `${s.keyword} · ${s.city || "全国"}`;
+const wholeJobs = (s) => s.per_site.reduce((n, x) => n + x.complete, 0);   // the jobs of a search that have every core element
 const resultsHref = (s) => `#/results?${new URLSearchParams({ k: s.keyword, c: s.city || "" })}`;
 
 /* What to say about one site of a search, or null when there is nothing to say. Tone "none" is a plain fact (the
-   site found nothing); only a dead task or a login wall is a problem. */
+   site found nothing, or only jobs that lack something); only a dead task or a login wall is a problem. A fact
+   with `always` is shown even where the plain "found nothing" ones are not. */
 function siteNote(x) {
   if (x.status === "waiting_login") return { tone: "warn", text: "需要先登录", end: btn("去登录", "login", { k: x.provider }) };
   if (x.status === "dead") {
@@ -59,6 +63,9 @@ function siteNote(x) {
   }
   if (x.status === "pending" && x.reason) return { tone: "warn", text: `${x.reason}，稍后会自动重试`, end: "" };
   if (x.status === "done" && !x.jobs) return { tone: "none", text: "这个网站没有找到", end: "" };
+  if (x.status === "done" && !x.complete) {   // found something, but not one job is whole: say why instead of looking broken
+    return { tone: "none", always: true, text: `找到 ${x.jobs} 个岗位，但信息都不全${x.why ? `（${x.why}）` : ""}`, end: "" };
+  }
   return null;
 }
 
@@ -67,7 +74,7 @@ const noteLine = (x, n) =>
 
 /* the <ul> of per-site notes of a search; facts = also list the sites that simply found nothing */
 function notesHtml(s, facts = false) {
-  const lines = s.per_site.map((x) => [x, siteNote(x)]).filter(([, n]) => n && (facts || n.tone !== "none")).map(([x, n]) => noteLine(x, n));
+  const lines = s.per_site.map((x) => [x, siteNote(x)]).filter(([, n]) => n && (facts || n.tone !== "none" || n.always)).map(([x, n]) => noteLine(x, n));
   return lines.length ? `<ul class="notes">${lines.join("")}</ul>` : "";
 }
 

@@ -1,6 +1,6 @@
 /* Navigation and the page-wide event wiring. Runs last. */
 
-const VIEWS = { search: viewSearch, results: viewResults, settings: viewSettings };
+const VIEWS = { search: viewSearch, results: viewResults, settings: viewSettings, logins: viewLogins };
 
 async function route() {
   clearTimeout(pollTimer);
@@ -8,10 +8,21 @@ async function route() {
   hideLayer("drawer");
   const [, tab = "search", query = ""] = location.hash.match(/^#\/(\w+)(?:\?(.*))?$/) || [];
   document.querySelectorAll("nav a").forEach((a) => (a.dataset.tab === tab ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
-  const { providers, ...prefs } = await api("GET /api/providers");
+  const { providers, logins, ...prefs } = await api("GET /api/providers");
   if (e !== epoch) return;
-  Object.assign(S, { providers, prefs });
+  Object.assign(S, { providers, logins, prefs });
+  paintBadge();
   await (VIEWS[tab] || viewSearch)(new URLSearchParams(query), e);
+}
+
+/* the number of sites that have a login but are not logged in (or whose login ran out), next to 平台登录 */
+function paintBadge() {
+  const todo = S.logins.filter((x) => !x.logged_in).length;
+  const badge = $("#login-badge");
+  badge.textContent = todo;
+  badge.hidden = !todo;
+  const link = $('nav a[data-tab="logins"]');
+  todo ? link.setAttribute("aria-label", `平台登录，还有 ${todo} 个没登录`) : link.removeAttribute("aria-label");
 }
 
 function viewError(e) {

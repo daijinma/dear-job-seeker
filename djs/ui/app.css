@@ -3,7 +3,7 @@
   --ground: #F5F5F8; --card: #fff; --ink: #1A1A24; --sub: #666673; --line: #E4E4EC;
   --primary: #7C4DEB; --primary-ink: #6A3BD8; --primary-bg: #F0EAFD;
   --ok: #12A06A; --ok-ink: #0B7A50; --ok-bg: #E3F6EE;
-  --warn: #C77700; --warn-ink: #8A5200; --warn-bg: #FFF1D6;
+  --warn: #C77700; --warn-ink: #8A5200; --warn-bg: #FFF1D6; --orange: #B35F00;
   --bad: #D14343; --bad-ink: #B3261E; --bad-bg: #FDECEC;
   --shadow: 0 8px 28px rgba(26, 26, 36, .07); --shadow-up: 0 14px 34px rgba(26, 26, 36, .13);
   --r-card: 20px; --r-ctl: 12px; --r-item: 14px;
@@ -28,14 +28,15 @@ code { background: var(--ground); padding: 1px 6px; border-radius: 6px; font-siz
 .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 
 /* ---- frame ---- */
-.top { display: flex; justify-content: space-between; align-items: center; padding: 14px 48px; }
+.top { position: sticky; top: 0; z-index: 30; display: flex; justify-content: space-between; align-items: center; padding: 14px 48px; background: var(--ground); }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 18px; font-weight: 700; }
 .logo { width: 32px; height: 32px; border-radius: 10px; background: var(--primary); display: grid; place-items: center; }
 .logo svg { width: 16px; height: 16px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; }
 .top nav { display: flex; gap: 6px; }
-.top nav a { color: var(--sub); font-weight: 500; padding: 7px 16px; border-radius: 999px; }
+.top nav a { display: inline-flex; align-items: center; gap: 8px; color: var(--sub); font-weight: 500; padding: 7px 16px; border-radius: 999px; }
 .top nav a:hover { background: rgba(26, 26, 36, .05); }
 .top nav a[aria-current] { color: var(--primary-ink); background: var(--primary-bg); font-weight: 700; }
+.badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--orange); color: #fff; font-size: 12px; font-weight: 700; line-height: 1; }
 .banner { margin: 0 48px 8px; padding: 10px 16px; border-radius: var(--r-ctl); background: var(--bad-bg); color: var(--bad-ink); font-weight: 600; }
 main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .narrow { max-width: 1120px; margin: 0 auto; }
@@ -56,6 +57,9 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .chip .n { font-weight: 600; color: var(--sub); }
 .chip.on .n { color: var(--primary-ink); }
 .chips { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pick { display: inline-flex; align-items: center; gap: 6px; margin-right: 6px; }
+.soft { font-size: 12px; }   /* a small link beside a chip */
+.soft:hover { text-decoration: underline; }
 .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; white-space: nowrap; background: var(--primary-bg); color: var(--primary-ink); }
 .pill.ok { background: var(--ok-bg); color: var(--ok-ink); }
 .pill.warn { background: var(--warn-bg); color: var(--warn-ink); }
@@ -85,11 +89,15 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .note { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--r-ctl); font-size: 13px; background: var(--warn-bg); color: var(--warn-ink); }
 .note.bad { background: var(--bad-bg); color: var(--bad-ink); }
 .note.none { background: var(--ground); color: var(--sub); }
+#notice .note.none { background: var(--card); }   /* on the page itself, not on a card: a white strip, not text on nothing */
 .note span { flex: 1; min-width: 0; }
 .note .btn { background: var(--card); }
 .notice { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; padding: 12px 16px; border-radius: var(--r-item); background: var(--primary-bg); color: var(--primary-ink); font-weight: 600; }
+.notice > span { flex: 1; min-width: 0; }
 .toast { position: fixed; left: 50%; bottom: 28px; z-index: 60; max-width: min(560px, 90vw); transform: translate(-50%, 16px); opacity: 0; pointer-events: none; padding: 12px 22px; border-radius: 999px; background: var(--ink); color: #fff; font-size: 14px; font-weight: 600; transition: opacity .2s, transform .2s; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.show.act { display: flex; align-items: center; gap: 14px; padding-right: 12px; pointer-events: auto; }
+.toast .btn { color: var(--ink); }
 .toast.ok { background: var(--ok-ink); }
 .toast.bad { background: var(--bad-ink); }
 .empty { text-align: center; padding: 48px 32px; display: grid; gap: 14px; justify-items: center; }
@@ -130,6 +138,8 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .dot.bad .ic { color: var(--bad); }
 .dot.run .spin { color: var(--primary); }
 .dot .none { color: var(--sub); }
+#newest:not(:empty), #login-hint:not(:empty) { margin-top: 16px; }
+#login-hint .notice { margin-bottom: 0; }
 
 /* ---- 我的结果 ---- */
 .strip { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 8px; scrollbar-width: thin; }
@@ -138,6 +148,8 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .tools { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
 .seg { display: flex; align-items: center; gap: 8px; }
 .results .chips { margin-bottom: 18px; }
+.quiet { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 20px; margin: -6px 0 18px; font-size: 14px; }
+.switch-label { display: inline-flex; align-items: center; gap: 10px; color: var(--sub); font-weight: 600; cursor: pointer; }
 .jobs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
 .job { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 20px 22px; transition: transform .15s, box-shadow .15s; }
 .job:hover { transform: translateY(-2px); box-shadow: var(--shadow-up); }
@@ -148,6 +160,7 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .salary { margin: 10px 0 8px; color: var(--primary-ink); font-size: 24px; font-weight: 800; letter-spacing: -.02em; overflow-wrap: anywhere; }
 .salary.big { font-size: 30px; }
 .salary.none { margin: 14px 0 10px; color: var(--sub); font-size: 14px; font-weight: 500; letter-spacing: 0; }
+.miss { align-self: flex-start; max-width: 100%; margin: 0 0 8px; padding: 3px 10px; border-radius: 10px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: auto; }
 .tags .pill { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .job .sub, .drawer-body .sub { overflow-wrap: anywhere; }
@@ -178,7 +191,6 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .modal .actions { margin-top: 20px; }
 .drawer { width: min(520px, 100vw); height: 100%; display: flex; flex-direction: column; border-radius: 24px 0 0 24px; background: var(--card); box-shadow: -12px 0 40px rgba(26, 26, 36, .18); animation: slide-in .2s ease-out; }
 .drawer-head { display: flex; justify-content: flex-end; padding: 16px 16px 0; }
-.icon-btn { width: 36px; height: 36px; border: 0; border-radius: 50%; display: grid; place-items: center; background: var(--ground); }
 .drawer-body { flex: 1; overflow-y: auto; display: grid; align-content: start; gap: 8px; padding: 4px 32px 24px; }
 .drawer-body h2 { font-size: 24px; font-weight: 800; line-height: 1.3; overflow-wrap: anywhere; }
 .drawer-body .tags { margin-top: 4px; }
@@ -188,7 +200,12 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 
 /* ---- 设置 ---- */
 .settings { max-width: 920px; display: grid; gap: 20px; }
-.settings h1 { font-size: 40px; font-weight: 800; }
+.settings h1, .logins h1 { font-size: 40px; font-weight: 800; }
+.logins { display: grid; gap: 18px; align-content: start; }
+.login-card { display: grid; gap: 6px; align-content: start; padding: 22px 24px; }
+.login-card h2 { font-size: 20px; }
+.login-card .unlock { font-weight: 600; }
+.login-card .actions { margin-top: 12px; }
 .settings h2 { font-size: 20px; }
 .settings .card > .sub { margin: 4px 0 16px; font-size: 13px; }
 .settings .card > .items { margin-top: 14px; }

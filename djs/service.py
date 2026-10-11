@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import json
+import threading
 
 import httpx
 
@@ -19,19 +20,37 @@ def _label(prov) -> str:
     return prov.label or prov.name
 
 
-def provider_list(conn) -> list[dict]:
+def _with_login() -> list[tuple[str, object]]:
+    """(name, provider) of every platform that has a login."""
+    found = ((name, providers.get(name)) for name in providers.names())
+    return [(name, p) for name, p in found if p.login is not None]
+
+
+def _login_row(name: str, prov, status: dict) -> dict:
+    return {"provider": name, "label": _label(prov), "auth": prov.auth, **status}
+
+
+def login_overview() -> list[dict]:
+    """Every platform that has a login: its state (logged_in, expired or not_logged_in), when the login was saved and
+    when it ends, how the user logs in, and what logging in improves. One call, no network."""
+    return [_login_row(name, p, auth.status(name)) for name, p in _with_login()]
+
+
+def provider_list(conn, logins: list[dict] | None = None) -> list[dict]:
+    """`logins` = a login_overview() the caller already has."""
     out, browser_ready, cdp = [], browser.ready(), browser.cdp_url() is not None
+    logged_in = {row["provider"]: row["logged_in"] for row in (login_overview() if logins is None else logins)}
     for name in providers.names():
         p = providers.get(name)
         interval, jitter, max_pages = pacer.effective(conn, name)
         d = {"name": name, "label": _label(p), "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
              "interval": interval, "jitter": jitter, "max_pages": max_pages,
              "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note,
-             "transports": list(p.transports), "transport": pacer.transport(conn, name),
-             "browser_ready": browser_ready, "cdp": cdp,
+             "transports": list(p.transports), "transport": engine.transport_for(conn, p, logged_in.get(name, False)),
+             "needs_headed": p.needs_headed, "browser_ready": browser_ready, "cdp": cdp,
              "configured": not p.missing_env(), "missing_env": p.missing_env()}
-        if p.auth != "public":
-            d["logged_in"] = auth.status(name)["logged_in"]
+        if name in logged_in:
+            d["logged_in"] = logged_in[name]
         out.append(d)
     return out
 
@@ -40,11 +59,13 @@ def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=
     """detail: 'auto' requests the detail only for jobs still missing a core element, 'always' for every job without a
     stored detail, 'never' stores the list items only (job_detail loads one on demand). True / False mean always /
     never."""
-    missing = providers.get(provider).missing_env()
+    prov = providers.get(provider)
+    missing = prov.missing_env()
     if missing:
         raise ValueError(f"{provider} needs environment variable(s) {', '.join(missing)}; "
                          "set them in the MCP client config env block (see README)")
-    if pacer.transport(conn, provider) != "http" and not browser.ready():
+    session = bool(prov.login_transport) and auth.logged_in(provider)  # only then does the login change the transport
+    if engine.transport_for(conn, prov, session) != "http" and not browser.ready():
         raise ValueError(browser.INSTALL_HINT)  # the task would only die later with the same message
     payload = {k: v for k, v in (("keyword", keyword), ("city", city), ("tenant", tenant), ("max_pages", max_pages),
                                  ("detail", detail)) if v is not None}
@@ -55,7 +76,8 @@ def task_list(conn, status=None, limit=20) -> list[dict]:
     return taskqueue.list_(conn, status, limit)
 
 
-def _load(row) -> dict:
+def load_job(row) -> dict:
+    """A jobs row as the tools return it: `missing` as a list, `complete` as a bool, `detail` as parsed JSON."""
     job = dict(row)
     job["missing"] = [name for name in (job["missing"] or "").split(",") if name]
     job["complete"] = bool(job["complete"])
@@ -66,7 +88,7 @@ def _load(row) -> dict:
 
 def _login_hides_salary(provider: str, logged_in) -> bool:
     try:
-        return providers.get(provider).auth != "public" and not logged_in(provider)
+        return providers.get(provider).login is not None and not logged_in(provider)
     except KeyError:  # a platform that was removed after the job was stored
         return False
 
@@ -82,17 +104,28 @@ def _why(job: dict, element: str, logged_in) -> str:
     return f"平台未提供{CORE[element]}"
 
 
-def incomplete_reason(job: dict, logged_in=None) -> str | None:
-    """Why a job lacks core elements, in a few Chinese words (None when nothing is missing). `job["missing"]` is the
-    stored comma-joined text or a list; `logged_in(provider)` defaults to the saved login state."""
+def reasons(job: dict, logged_in=None) -> list[str]:
+    """Why each core element a job lacks is absent, in a few Chinese words each (empty when nothing is missing).
+    `job["missing"]` is the stored comma-joined text or a list; `logged_in(provider)` defaults to the saved login
+    state."""
     names = job["missing"].split(",") if isinstance(job["missing"], str) else job["missing"]
-    logged_in = logged_in or (lambda provider: auth.status(provider)["logged_in"])
-    return "；".join(_why(job, name, logged_in) for name in names if name) or None
+    logged_in = logged_in or login_lookup()
+    return [_why(job, name, logged_in) for name in names if name]
 
 
-def _explained(rows: list[dict]) -> list[dict]:
-    """Adds `incomplete_reason` to each job; the login state is asked once per platform, not once per job."""
-    logged_in = functools.cache(lambda provider: auth.status(provider)["logged_in"])
+def incomplete_reason(job: dict, logged_in=None) -> str | None:
+    """The reasons of one job as a single line, or None when nothing is missing."""
+    return "；".join(reasons(job, logged_in)) or None
+
+
+def login_lookup():
+    """logged_in(provider) that asks for the login state once per platform, not once per job."""
+    return functools.cache(lambda provider: auth.status(provider)["logged_in"])
+
+
+def explain(rows: list[dict]) -> list[dict]:
+    """Adds `incomplete_reason` to each job."""
+    logged_in = login_lookup()
     for job in rows:
         job["incomplete_reason"] = incomplete_reason(job, logged_in)
     return rows
@@ -106,14 +139,14 @@ def jobs_get(conn, task_id=None, provider=None, limit=50, with_detail=False, com
         f"SELECT {cols} FROM jobs WHERE (? IS NULL OR id IN (SELECT job_id FROM task_jobs WHERE task_id=?))"
         " AND (? IS NULL OR provider=?) AND (? = 0 OR complete = 1) ORDER BY id DESC LIMIT ?",
         (task_id, task_id, provider, provider, int(bool(complete_only)), limit)).fetchall()
-    return _explained([_load(r) for r in rows])
+    return explain([load_job(r) for r in rows])
 
 
 def _job(conn, job_id: int) -> dict:
     row = conn.execute(f"SELECT {JOB_COLS}, detail FROM jobs WHERE id=?", (job_id,)).fetchone()
     if row is None:
         raise ValueError(f"job {job_id} not found")
-    return _explained([_load(row)])[0]
+    return explain([load_job(row)])[0]
 
 
 def _friendly(prov, exc: Exception) -> str:
@@ -184,15 +217,42 @@ def searches(conn, limit=20) -> list[dict]:
 
 
 def login(conn, provider) -> dict:
-    if providers.get(provider).auth == "public":
-        raise ValueError(f"{provider} does not need login")
     status = auth.login(provider, timeout=180)
     resumed = taskqueue.resume_login(conn, provider) if status.get("logged_in") else 0
     return {**status, "resumed_tasks": resumed}
 
 
-def login_status(conn, provider) -> dict:
-    return auth.status(provider)
+def login_cancel(conn, provider) -> dict:
+    return {"provider": provider, "cancelled": auth.cancel_login(provider)}
+
+
+def login_status(conn, provider=None) -> dict | list[dict]:
+    """One platform's login state, or (no platform) the overview of every platform that has a login."""
+    return auth.status(provider) if provider else login_overview()
+
+
+def check_all_logins() -> list[dict]:
+    """Ask every platform that has a login whether the session we saved still works (one request each, only for
+    sessions we hold). The answers are saved, so a dead session shows as expired from now on. A platform that cannot
+    be reached keeps its state and carries an `error`."""
+    rows = []
+    for name, p in _with_login():
+        try:
+            rows.append(_login_row(name, p, auth.check(name)))
+        except (httpx.HTTPError, browser.BrowserUnavailable) as e:
+            rows.append({**_login_row(name, p, auth.status(name)), "error": f"{type(e).__name__}: {e}"})
+    return rows
+
+
+def login_check(conn, provider=None) -> dict | list[dict]:
+    """Check one platform (a network failure is an error), or all of them."""
+    return auth.check(provider) if provider else check_all_logins()
+
+
+def start_login_check() -> None:
+    """Once at startup, in the background: a dead session shows as expired before the first search, and startup
+    never waits for a network request."""
+    threading.Thread(target=check_all_logins, daemon=True, name="djs-login-check").start()
 
 
 def logout(conn, provider) -> dict:

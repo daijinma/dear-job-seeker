@@ -73,19 +73,30 @@ def search_list(limit: int = 20) -> dict:
 
 @mcp.tool()
 async def login(provider: str) -> dict:
-    """Open a browser for the user to log in (blocks up to 180s); resumes waiting tasks on success."""
+    """Open a browser window on the platform's login page for the user to log in (blocks up to 180s). The window
+    closes by itself once the login is detected; tasks waiting for it resume. Only for platforms that have a login
+    (see login_status)."""
     return await asyncio.to_thread(_run, service.login, provider)
 
 
 @mcp.tool()
-async def login_status(provider: str) -> dict:
-    """Whether a valid login exists for the provider."""
+async def login_status(provider: str | None = None) -> dict:
+    """Login state of one platform, or (no platform) of every platform that has a login: state (logged_in,
+    expired or not_logged_in), when it was saved and when it ends, how the user logs in and what logging in
+    improves. Reads saved files only; login_check asks the platform."""
     return await asyncio.to_thread(_run, service.login_status, provider)
 
 
 @mcp.tool()
+async def login_check(provider: str | None = None) -> dict:
+    """Ask the platform (one request) whether the saved login still works; a dead one is marked expired. Without a
+    platform: all that have a login (one that cannot be reached keeps its state and carries an error)."""
+    return await asyncio.to_thread(_run, service.login_check, provider)
+
+
+@mcp.tool()
 def logout(provider: str) -> dict:
-    """Delete the stored cookies/profile."""
+    """Log out: delete the saved login and the browser profile of the platform."""
     return _run(service.logout, provider)
 
 
@@ -132,6 +143,7 @@ def main() -> None:
         sys.exit(cli.main(argv))
     envfile.load()
     engine.start_worker()
+    service.start_login_check()
     mcp.run(transport="stdio")
 
 

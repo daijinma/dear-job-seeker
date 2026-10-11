@@ -6,12 +6,12 @@ import sys
 import traceback
 from pathlib import Path
 
-from djs import db, engine, envfile, ui_api
+from djs import db, engine, envfile, service, ui_api
 
 UI_DIR = Path(__file__).with_name("ui")
 # One classic script, no modules: the files share a scope and run in this order (a file may only use, at load time,
 # what an earlier one defined).
-SCRIPTS = ("core.js", "components.js", "login.js", "search.js", "results.js", "settings.js", "main.js")
+SCRIPTS = ("core.js", "components.js", "login.js", "search.js", "results.js", "logins.js", "settings.js", "main.js")
 
 
 def page() -> str:
@@ -24,8 +24,6 @@ def page() -> str:
 
 
 class Api:
-    _window = None
-
     def call(self, route: str, payload: dict | None = None) -> dict:
         fn = ui_api.ROUTES.get(route)
         if fn is None:
@@ -41,19 +39,6 @@ class Api:
         finally:
             conn.close()
 
-    def save_csv(self, filename: str, text: str) -> dict:
-        import webview
-        try:
-            path = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=filename)
-            if not path:
-                return {}
-            path = path if isinstance(path, str) else path[0]
-            Path(path).write_text(text, encoding="utf-8")
-            return {"saved": path}
-        except Exception:
-            traceback.print_exc()
-            return {"error": "保存失败，请换个位置或文件名再试"}
-
 
 def main(argv: list[str] | None = None) -> None:
     envfile.load()
@@ -64,6 +49,6 @@ def main(argv: list[str] | None = None) -> None:
         print("pywebview is not installed: pip install 'dear-job-seeker[ui]'")
         sys.exit(1)
     engine.start_worker()
-    api = Api()
-    api._window = webview.create_window("找岗位助手", html=page(), js_api=api, width=1280, height=860, min_size=(960, 640))
+    service.start_login_check()
+    webview.create_window("找岗位助手", html=page(), js_api=Api(), width=1280, height=860, min_size=(960, 640))
     webview.start()

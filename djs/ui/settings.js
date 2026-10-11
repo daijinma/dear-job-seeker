@@ -1,4 +1,4 @@
-/* 设置: speed, accounts, the advanced block (proxy, keys) and a few facts about this installation. */
+/* 设置: speed, the way to the logins, the advanced block (proxy, keys) and a few facts about this installation. */
 
 const PRESETS = [["steady", "稳妥", "推荐 · 慢一点，更安全"], ["standard", "标准", "速度和安全折中"], ["fast", "较快", "可能被网站暂时限制"]];
 
@@ -9,19 +9,9 @@ function speedCard() {
   return `<div class="card"><h2>查找速度</h2><p class="sub">越快，越容易被招聘网站暂时限制访问。不确定就选“稳妥”。</p><div class="opts">${opts.join("")}</div></div>`;
 }
 
-function accountRow(p) {
-  const end = p.logged_in
-    ? pill("已登录", "ok") + btn("退出登录", "logout", { k: p.name })
-    : pill("未登录", "warn") + btn("去登录", "login", { k: p.name }, "primary sm");
-  return itemRow({ name: p.label, hint: LOGIN_HINT[p.auth], end });
-}
-
-function accountsCard() {
-  const sites = S.providers.filter((p) => p.auth !== "public");
-  if (!sites.length) return "";
-  return `<div class="card"><h2>账号</h2><p class="sub">有些网站登录后能看到更多内容，比如薪资。登录只在你自己的电脑上完成，账号信息不会上传到任何地方。</p>
-    <div class="items">${sites.map(accountRow).join("")}</div></div>`;
-}
+/* the accounts live on the 平台登录 page; here is only the way there */
+const loginsCard = () => (S.logins.length
+  ? `<div class="card row"><div><h2>平台登录</h2><p class="sub">登录后，有些网站能看到更多、更完整的岗位。</p></div>${linkBtn("去平台登录", "#/logins", "primary")}</div>` : "");
 
 function proxyBlock(egress) {
   const proxies = egress.filter((e) => e.id !== "direct");
@@ -32,8 +22,7 @@ function proxyBlock(egress) {
       <input id="proxy-url" aria-label="代理服务器地址" placeholder="http://用户名:密码@地址:端口" autocomplete="off">
       <button type="submit" class="btn primary">添加</button></form>`;
   return `<section class="block"><div class="row"><div><h3>使用代理服务器</h3><p class="sub">一般不需要改。只有你自己有代理服务器时才用。</p></div>
-    <button type="button" class="switch${on ? " on" : ""}" role="switch" aria-checked="${on}" aria-label="使用代理服务器"${proxies.length ? " disabled" : ""}
-      ${act("proxy-toggle")}></button></div>${on ? form : ""}</section>`;
+    ${switchBtn(on, "使用代理服务器", act("proxy-toggle"), proxies.length > 0)}</div>${on ? form : ""}</section>`;
 }
 
 function keysBlock() {
@@ -53,7 +42,7 @@ async function viewSettings(params, e) {
   if (e !== epoch) return;
   const keys = params.get("focus") === "keys";
   if (keys) S.open.advanced = true;
-  $("#view").innerHTML = `<section class="narrow settings"><h1>设置</h1>${speedCard()}${accountsCard()}${advancedCard(egress)}${aboutCard(about)}</section>`;
+  $("#view").innerHTML = `<section class="narrow settings"><h1>设置</h1>${speedCard()}${loginsCard()}${advancedCard(egress)}${aboutCard(about)}</section>`;
   if (keys) $("#keys").scrollIntoView({ block: "center" });
 }
 
@@ -61,11 +50,6 @@ Object.assign(ACTIONS, {
   preset: async (el) => {
     await api("POST /api/frequency_preset", { preset: el.dataset.k });
     toast(`已切换为“${PRESETS.find(([k]) => k === el.dataset.k)[1]}”`, "ok");
-    await route();
-  },
-  logout: async (el) => {
-    await api("POST /api/logout", { provider: el.dataset.k });
-    toast("已退出登录");
     await route();
   },
   "proxy-toggle": () => { S.proxyOn = !S.proxyOn; return route(); },

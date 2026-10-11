@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from djs import auth, db, egress, providers, service, taskqueue, ui_api, ui_app
@@ -13,7 +14,6 @@ from djs import auth, db, egress, providers, service, taskqueue, ui_api, ui_app
 @pytest.fixture
 def call(tmp_path, monkeypatch):
     monkeypatch.setenv("DJS_HOME", str(tmp_path))
-    monkeypatch.setattr(auth, "load_cookies", lambda p: None)
     for var in ("DJS_JOB58_LUNA_SALT", "DJS_YUPAO_NONCE_KEY", "DJS_YUPAO_SIGN_SALT", "DJS_JOB51_HMAC_KEY"):
         monkeypatch.delenv(var, raising=False)
     return ui_app.Api().call
@@ -47,20 +47,21 @@ def test_unexpected_failures_reach_the_window_as_plain_chinese(call, monkeypatch
     assert call("GET /api/login_status") == {"error": "出了点问题，请稍后再试"}   # a missing argument is not a user's problem
 
 
-def test_save_csv_writes_the_file_the_dialog_chose(tmp_path, monkeypatch, capsys):
-    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(SAVE_DIALOG=15))
-    chosen = {}
-    api = ui_app.Api()
-    api._window = SimpleNamespace(create_file_dialog=lambda kind, save_filename: chosen.get("path"))
-    assert api.save_csv("岗位.csv", "x") == {}   # the dialog was cancelled: nothing happens, nothing is reported
-    chosen["path"] = str(tmp_path / "a.csv")
-    assert api.save_csv("岗位.csv", "\ufeff岗位,公司") == {"saved": str(tmp_path / "a.csv")}
-    assert (tmp_path / "a.csv").read_bytes() == b"\xef\xbb\xbf" + "岗位,公司".encode()   # the BOM Excel needs for UTF-8
-    chosen["path"] = (str(tmp_path / "b.csv"),)   # some platforms answer with a tuple
-    assert api.save_csv("岗位.csv", "x") == {"saved": str(tmp_path / "b.csv")}
-    chosen["path"] = str(tmp_path / "no-such-folder" / "c.csv")
-    assert api.save_csv("岗位.csv", "x") == {"error": "保存失败，请换个位置或文件名再试"}
-    assert "FileNotFoundError" in capsys.readouterr().err
+def test_the_window_bridge_has_no_save_dialog_any_more():
+    assert [m for m in dir(ui_app.Api) if not m.startswith("_")] == ["call"]   # pywebview exposes every public method
+    assert "SAVE_DIALOG" not in Path(ui_app.__file__).read_text() and "create_file_dialog" not in Path(ui_app.__file__).read_text()
+
+
+def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_window(monkeypatch):
+    order = []
+    window = SimpleNamespace(create_window=lambda *a, **k: order.append(("window", k["js_api"])), start=lambda: order.append("start"))
+    monkeypatch.setitem(sys.modules, "webview", window)
+    monkeypatch.setattr(ui_app.envfile, "load", lambda: order.append("env"))
+    monkeypatch.setattr(ui_app.engine, "start_worker", lambda: order.append("workers"))
+    monkeypatch.setattr(ui_app.service, "start_login_check", lambda: order.append("check"))   # in the background: never held up
+    ui_app.main([])
+    assert order[:3] == ["env", "workers", "check"] and order[4] == "start"
+    assert order[3][0] == "window" and isinstance(order[3][1], ui_app.Api)
 
 
 def test_unknown_route(call):
@@ -69,15 +70,15 @@ def test_unknown_route(call):
 
 
 # ---- searching ----
-def test_crawl_starts_quick_mode_tasks_for_every_site(call):
+def test_crawl_starts_a_completing_task_for_every_site(call):
     assert call("POST /api/crawl", {"keyword": " ", "providers": ["nowcoder"]}) == {"error": "请先填写岗位关键词"}
     assert call("POST /api/crawl", {"keyword": "x", "providers": []}) == {"error": "请至少选择一个网站"}
     body = call("POST /api/crawl", {"keyword": "前端", "city": "杭州", "providers": ["nowcoder", "chinahr"]})
     assert body == {"task_ids": [1, 2]}
     tasks = taskqueue.list_(db.connect())
-    assert {t["provider"]: (t["status"], t["payload"]) for t in tasks} == {
-        "nowcoder": ("pending", {"keyword": "前端", "city": "杭州", "detail": False}),
-        "chinahr": ("pending", {"keyword": "前端", "city": "杭州", "detail": False})}
+    assert {t["provider"]: (t["status"], t["payload"]) for t in tasks} == {   # detail 'auto': what is missing is completed
+        "nowcoder": ("pending", {"keyword": "前端", "city": "杭州", "detail": "auto"}),
+        "chinahr": ("pending", {"keyword": "前端", "city": "杭州", "detail": "auto"})}
 
 
 def test_crawl_is_all_or_nothing_and_refuses_in_plain_chinese(call):
@@ -107,26 +108,32 @@ def test_search_jobs_route_pages_filters_and_sorts(call):
     call("POST /api/crawl", {"keyword": "前端", "providers": ["nowcoder", "chinahr"]})
     conn = db.connect()
     for i in range(1, 36):
-        add_job(conn, [1], i, "nowcoder", title=f"N{i}", first_seen_at=1000 + i)
-    add_job(conn, [2], 100, "chinahr", title="C", first_seen_at=5000)
+        add_job(conn, [1], i, "nowcoder", title=f"N{i}", first_seen_at=1000 + i, complete=1)
+    add_job(conn, [2], 100, "chinahr", title="C", first_seen_at=5000, complete=1)
     first = call("GET /api/search_jobs", {"keyword": "前端", "city": ""})
-    assert (len(first["jobs"]), first["total"], first["jobs"][0]["title"]) == (30, 36, "C")
+    assert (len(first["jobs"]), first["total"]) == (30, 36)
+    assert [j["title"] for j in first["jobs"][:3]] == ["N35", "C", "N34"]   # the default order: the sites in turn
     rest = call("GET /api/search_jobs", {"keyword": "前端", "city": None, "offset": 30})
     assert [j["title"] for j in rest["jobs"]] == ["N6", "N5", "N4", "N3", "N2", "N1"]
     only = call("GET /api/search_jobs", {"keyword": "前端", "provider": "chinahr", "sort": "company"})
     assert [j["title"] for j in only["jobs"]] == ["C"] and only["total"] == 1 and len(only["per_site"]) == 2
+    assert call("GET /api/search_jobs", {"keyword": "前端", "sort": "new"}) == {"error": "未知的排序方式"}   # newest-first is gone
     assert call("GET /api/search_jobs", {"keyword": "前端", "sort": "bogus"}) == {"error": "未知的排序方式"}
+    assert [j["title"] for j in call("GET /api/search_jobs", {"keyword": "前端", "sort": "salary", "limit": 1})["jobs"]] == ["N35"]
 
 
-def test_search_jobs_route_passes_complete_only_through(call):
+def test_search_jobs_route_lists_only_complete_jobs_unless_asked_and_counts_the_rest(call):
     call("POST /api/crawl", {"keyword": "前端", "providers": ["nowcoder"]})
     conn = db.connect()
-    add_job(conn, [1], 1, title="完整", company="C", city="杭州", salary_text="20-30K", description="D")
-    add_job(conn, [1], 2, title="缺薪资", company="C", city="杭州", description="D")
-    assert call("GET /api/search_jobs", {"keyword": "前端"})["total"] == 2   # off unless asked for
-    assert call("GET /api/search_jobs", {"keyword": "前端", "complete_only": False})["total"] == 2
-    page = call("GET /api/search_jobs", {"keyword": "前端", "complete_only": True})
-    assert [j["title"] for j in page["jobs"]] == ["完整"] and page["total"] == 1 and page["per_site"][0]["count"] == 1
+    add_job(conn, [1], 1, title="完整", complete=1)
+    add_job(conn, [1], 2, title="缺薪资", complete=0, missing="salary", salary_text="面议")
+    for args in ({}, {"complete_only": True}):
+        page = call("GET /api/search_jobs", {"keyword": "前端", **args})
+        assert [j["title"] for j in page["jobs"]] == ["完整"] and page["total"] == 1 and page["per_site"][0]["count"] == 1
+        assert page["incomplete"] == {"count": 1, "reasons": [{"text": "面议", "count": 1}]}   # what is held back, and why
+    everything = call("GET /api/search_jobs", {"keyword": "前端", "complete_only": False})
+    assert everything["total"] == 2 and everything["incomplete"]["count"] == 1
+    assert {j["title"]: j["incomplete_reason"] for j in everything["jobs"]} == {"完整": None, "缺薪资": "面议"}
 
 
 def test_retry_only_touches_dead_and_login_blocked_tasks(call):
@@ -179,6 +186,17 @@ def test_providers_route_names_the_keys_but_never_their_values(call, monkeypatch
     assert "sekret-value-123" not in json.dumps(body)
 
 
+def test_providers_route_carries_the_login_overview_once_for_the_whole_page(call):
+    body = call("GET /api/providers")
+    logins = {x["provider"]: x for x in body["logins"]}
+    assert set(logins) == {p["name"] for p in body["providers"] if "logged_in" in p} == {"boss", "zhaopin", "job51", "liepin", "kq36"}
+    assert (logins["boss"]["state"], logins["boss"]["logged_in"], logins["boss"]["method"]) == ("not_logged_in", False, "qr")
+    assert logins["boss"]["unlocks"] and logins["boss"]["label"] == "BOSS 直聘" and logins["kq36"]["auth"] == "login"
+    assert [p["transport"] for p in body["providers"] if p["name"] == "zhaopin"] == ["http"]   # logged out: its first transport
+    headed = {p["name"]: p["needs_headed"] for p in body["providers"]}   # the page lists the sites that open a window apart
+    assert headed["boss"] is True and headed["zhaopin"] is False and all(isinstance(v, bool) for v in headed.values())
+
+
 def test_about_and_open_home(call, tmp_path, monkeypatch):
     about = call("GET /api/about")
     assert about["home"] == str(tmp_path) and isinstance(about["version"], str) and about["version"]
@@ -215,6 +233,59 @@ def test_egress_masks_password(call):
     assert call("POST /api/egress", {"url": "direct"}) == {"error": "代理地址要以 http:// 或 https:// 开头"}
 
 
+# ---- exporting a table ----
+@pytest.fixture
+def downloads(tmp_path, monkeypatch):
+    folder = tmp_path / "home" / "Downloads"   # does not exist yet: the route makes it
+    monkeypatch.setattr(ui_api, "downloads", lambda: folder)
+    monkeypatch.setattr(ui_api, "stamp", lambda: "20261011-0930")
+    return folder
+
+
+def test_export_writes_the_table_into_the_downloads_folder_under_a_fresh_name(call, downloads):
+    text = '\ufeff岗位,公司\r\n"前端","甲"'
+    got = call("POST /api/export_csv", {"keyword": "前端工程师", "city": "杭州", "text": text})
+    assert got == {"path": str(downloads / "找岗位-前端工程师-杭州-20261011-0930.csv"), "reveal": ui_api.REVEAL_LABEL}
+    assert Path(got["path"]).read_bytes() == b"\xef\xbb\xbf" + '岗位,公司\r\n"前端","甲"'.encode()   # the BOM Excel needs, the CSV's own \r\n
+    again = call("POST /api/export_csv", {"keyword": "前端工程师", "city": "杭州", "text": "x"})
+    assert Path(again["path"]).name == "找岗位-前端工程师-杭州-20261011-0930-2.csv"   # never over an older file
+    assert Path(got["path"]).read_text(encoding="utf-8").startswith("\ufeff岗位")   # which is untouched
+    nationwide = call("POST /api/export_csv", {"keyword": "a/b:c*?" + "长" * 60, "city": "", "text": "x"})
+    assert Path(nationwide["path"]).name == "找岗位-a_b_c_" + "长" * 34 + "-全国-20261011-0930.csv"   # nothing a file system refuses, not too long
+
+
+def test_export_refuses_nothing_to_write_and_says_so_when_the_folder_cannot_be_written(call, downloads):
+    assert call("POST /api/export_csv", {"keyword": "x", "text": ""}) == {"error": "没有可以导出的内容"}
+    assert call("POST /api/export_csv", {"keyword": "x"}) == {"error": "没有可以导出的内容"}
+    downloads.parent.mkdir(parents=True)
+    downloads.write_text("a file where the folder should be")
+    assert call("POST /api/export_csv", {"keyword": "x", "text": "x"}) == {"error": "没能保存到「下载」文件夹，请检查它的权限"}
+
+
+@pytest.mark.parametrize("platform, command", [
+    ("darwin", lambda p: ["open", "-R", str(p)]),
+    ("win32", lambda p: ["explorer", f"/select,{p}"]),
+    ("linux", lambda p: ["xdg-open", str(p.parent)])])
+def test_reveal_shows_the_exported_file_in_the_systems_file_manager(call, downloads, monkeypatch, platform, command):
+    path = Path(call("POST /api/export_csv", {"keyword": "x", "text": "x"})["path"])
+    launched = []
+    monkeypatch.setattr(ui_api, "subprocess", SimpleNamespace(Popen=launched.append))
+    monkeypatch.setattr(ui_api.sys, "platform", platform)
+    assert call("POST /api/reveal", {"path": str(path)}) == {"ok": True}
+    assert launched == [command(path)]
+
+
+def test_reveal_refuses_anything_that_was_not_exported(call, downloads, tmp_path, monkeypatch):
+    launched = []
+    monkeypatch.setattr(ui_api, "subprocess", SimpleNamespace(Popen=launched.append))
+    elsewhere = tmp_path / "secret.txt"
+    elsewhere.write_text("x")
+    downloads.mkdir(parents=True)
+    for bad in (str(elsewhere), str(downloads / "no-such.csv"), str(downloads), str(downloads / ".." / "secret.txt"), "", None):
+        assert call("POST /api/reveal", {"path": bad}) == {"error": "找不到这个文件"}, bad
+    assert launched == []
+
+
 # ---- login ----
 def wait_login(call, provider="boss"):
     for _ in range(200):
@@ -234,7 +305,9 @@ def test_login_runs_in_background(call, monkeypatch):
 @pytest.mark.parametrize("error, kind, shown", [
     (RuntimeError("Playwright/Chromium missing. Run: pip install playwright && playwright install chromium"),
      "browser", "需要先安装浏览器组件"),
-    (TimeoutError("login not completed within 180s"), "timeout", "等了三分钟还没有登录成功，请再试一次"),
+    (TimeoutError("180 秒内没有登录成功，请再试一次"), "timeout", "等了三分钟还没有登录成功，请再试一次"),
+    (RuntimeError("登录窗口被关闭了，请重新登录"), "closed", "登录窗口被关掉了，请再试一次"),
+    (RuntimeError("正在使用浏览器，请稍后再试"), "busy", "浏览器正忙"),
     (RuntimeError("something odd"), "other", "没成功，可以稍后重试")])
 def test_login_failures_come_back_as_plain_chinese(call, monkeypatch, error, kind, shown):
     def failing(p, timeout=180):
@@ -243,6 +316,66 @@ def test_login_failures_come_back_as_plain_chinese(call, monkeypatch, error, kin
     call("POST /api/login", {"provider": "boss"})
     assert wait_login(call) == {"state": "failed", "kind": kind, "error": shown}
     ui_api.login_state.clear()
+
+
+def test_cancel_closes_the_waiting_login_and_forgets_the_dialogs_state(call, monkeypatch):
+    started, stop = threading.Event(), threading.Event()
+
+    def waiting(provider, timeout=180):
+        started.set()
+        stop.wait(5)
+        raise auth.LoginCancelled("已取消登录")
+
+    monkeypatch.setattr(auth, "login", waiting)
+    monkeypatch.setattr(auth, "cancel_login", lambda p: stop.set() or True)   # what really closes the window
+    assert call("POST /api/login", {"provider": "boss"}) == {"state": "running"}
+    assert started.wait(5)
+    assert call("POST /api/login_cancel", {"provider": "boss"}) == {"state": "cancelled"}
+    assert stop.is_set()
+    threading.Event().wait(0.3)   # the login thread has ended with its cancellation by now
+    assert call("GET /api/login_status", {"provider": "boss"})["login"] == {}   # nothing left to show: no failure either
+    ui_api.login_state.clear()
+
+
+def test_a_cancelled_login_never_overwrites_the_state_of_the_next_one(call, monkeypatch):
+    release, runs = threading.Event(), []
+
+    def login(provider, timeout=180):
+        runs.append(provider)
+        if len(runs) == 1:   # the first one is still winding down when the user starts again
+            release.wait(5)
+            raise auth.LoginCancelled("已取消登录")
+        return {"logged_in": True}
+
+    monkeypatch.setattr(auth, "login", login)
+    monkeypatch.setattr(auth, "cancel_login", lambda p: True)
+    call("POST /api/login", {"provider": "boss"})
+    call("POST /api/login_cancel", {"provider": "boss"})
+    call("POST /api/login", {"provider": "boss"})
+    assert wait_login(call) == {"state": "ok"}
+    release.set()
+    threading.Event().wait(0.3)
+    assert call("GET /api/login_status", {"provider": "boss"})["login"] == {"state": "ok"}
+    ui_api.login_state.clear()
+
+
+def test_login_check_asks_the_platform_and_reads_a_failure_to_ask_as_bad_network(call, monkeypatch):
+    wall = providers.get("kq36").login.probe_fail_text
+    cookies = {"usercookies": "x"}
+    auth.save_cookies("kq36", cookies)
+    answer = lambda text: httpx.Response(200, text=text, request=httpx.Request("GET", "https://www.kq36.com/"))
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: answer("职位列表"))
+    assert call("POST /api/login_check", {"provider": "kq36"})["state"] == "logged_in"
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: answer(wall))
+    got = call("POST /api/login_check", {"provider": "kq36"})
+    assert (got["logged_in"], got["state"]) == (False, "expired")
+
+    def down(*a, **k):
+        raise httpx.ConnectError("refused")
+    auth.save_cookies("kq36", cookies)
+    monkeypatch.setattr(httpx, "get", down)
+    assert call("POST /api/login_check", {"provider": "kq36"}) == {"error": "网络不通，稍后再试"}
+    assert auth.status("kq36")["state"] == "logged_in"   # not being able to ask changes nothing
 
 
 def test_open_url_only_http(call, monkeypatch):
