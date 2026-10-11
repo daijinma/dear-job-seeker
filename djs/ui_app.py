@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from djs import db, engine, ui_api
+from djs import db, engine, envfile, ui_api
 
 UI_DIR = Path(__file__).with_name("ui")
 
@@ -50,6 +50,7 @@ class Api:
 
 
 def main(argv: list[str] | None = None) -> None:
+    envfile.load()
     argparse.ArgumentParser(prog="djs ui", description="Open the desktop app.").parse_args(argv)
     try:
         import webview

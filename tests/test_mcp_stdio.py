@@ -6,13 +6,14 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-EXPECTED = {"provider_list", "crawl_start", "task_list", "jobs_get", "login", "login_status", "logout",
-            "set_frequency", "egress_add", "egress_remove", "egress_list"}
+EXPECTED = {"provider_list", "crawl_start", "task_list", "jobs_get", "job_detail", "search_list", "login",
+            "login_status", "logout", "set_frequency", "egress_add", "egress_remove", "egress_list"}
 
 
 def test_djs_entrypoint_lists_tools(tmp_path):
     djs_bin = Path(sys.executable).with_name("djs")
-    params = StdioServerParameters(command=str(djs_bin), env={**os.environ, "DJS_HOME": str(tmp_path)})
+    # cwd=tmp_path: the server autoloads ./.env, which must not be the developer's real one
+    params = StdioServerParameters(command=str(djs_bin), env={**os.environ, "DJS_HOME": str(tmp_path)}, cwd=tmp_path)
 
     async def go():
         async with stdio_client(params) as (r, w):

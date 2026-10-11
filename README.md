@@ -63,14 +63,14 @@ Each platform declares its own type and pacing; nothing is global.
 Yupao, 51job and 58.com sign their requests with material extracted from their own mini-programs. **No key is shipped in this repository.** Supply them yourself as environment variables; a platform without its variables shows as "not configured" and is skipped.
 
 ```bash
-# cp .env.example .env  (.env is git-ignored; never commit it)
+# $DJS_HOME/.env  (default ~/.dear-job-seeker/.env; see .env.example; never commit it)
 DJS_YUPAO_NONCE_KEY=...
 DJS_YUPAO_SIGN_SALT=...
 DJS_JOB51_HMAC_KEY=...
 DJS_JOB58_LUNA_SALT=...
 ```
 
-Pass them through your MCP client's `env` block, or load them before the desktop app: `set -a; . ./.env; set +a; .venv/bin/djs ui`. Obtaining and using such keys is your own responsibility and may violate the platforms' terms.
+**`.env` autoload.** The MCP server, `djs ui` and the CLI read `$DJS_HOME/.env` and then `./.env` at start (`KEY=VALUE` lines, `#` comments, optional quotes, empty values skipped). A variable that is already set (shell, your MCP client's `env` block, or the first file) is never overridden, and values are never logged. This is what gives a desktop app started from Finder, which has no shell environment, its keys. Obtaining and using such keys is your own responsibility and may violate the platforms' terms.
 
 ### Boss (experimental)
 
@@ -81,9 +81,11 @@ QR login, cookie storage (0600, local only) and the list/detail calls are implem
 | Tool | Purpose |
 |---|---|
 | `provider_list` | every platform: label, auth, city rule, effective interval/jitter/max pages, floor, page cap, login/config state |
-| `crawl_start(provider, keyword, city?, max_pages?)` | queue a crawl task (validates city rule and missing keys) |
-| `task_list(status?, limit)` | task status and stats |
-| `jobs_get(task_id?, provider?, limit, with_detail)` | stored jobs |
+| `crawl_start(provider, keyword, city?, max_pages?, detail=true)` | queue a crawl task (validates city rule and missing keys). `detail=false` is **quick mode**: list items only, one request per page instead of one per job on platforms with a detail hop |
+| `task_list(status?, limit)` | task status and stats; stats update after every page while the task runs |
+| `search_list(limit=20)` | recent searches (same keyword + city = one search): aggregate status, distinct job count, per-platform status / job count / last error |
+| `jobs_get(task_id?, provider?, limit, with_detail)` | stored jobs; `task_id` returns every job that task saw, including ones an earlier task found first |
+| `job_detail(job_id)` | full text of one stored job: fetched once with the platform's own pacing and exit, then served from the database |
 | `login(provider)` / `login_status` / `logout` | QR login for `auth=login` platforms; waiting tasks resume on success |
 | `set_frequency(provider, interval?, jitter?, max_pages?, force?)` | per-platform override; below the floor needs `force=true` |
 | `egress_add(url, provider="*")` / `egress_remove(url)` / `egress_list` | proxy pool (`direct` or `http(s)://…`; passwords are masked in output) |
@@ -94,11 +96,30 @@ Errors come back as `{"error": "..."}`; tools never raise.
 
 ![core logic](docs/design/logic-a-core.png)
 
-- **Queue** — SQLite tasks, claimed atomically; `pending → running → done | retry (backoff) | dead after 8 | waiting_login`. A worker thread runs inside the process; unfinished tasks continue on the next start.
+- **Queue** — SQLite tasks, claimed atomically; `pending → running → done | retry (backoff) | dead after 8 | waiting_login`. One worker thread **per platform** runs inside the process, so platforms never queue behind each other; unfinished tasks continue on the next start.
 - **Frequency** — effective value = your override, else the platform default, never below its floor unless forced. Spacing is enforced per *(platform, exit)* across threads and processes before every request.
 - **Egress** — a platform-specific proxy beats the shared pool; the exit is sticky per task; blocked exits cool down 30 min (3 consecutive failures: 5 min). An empty pool means direct. Login platforms use direct unless you add a dedicated proxy for them (a foreign IP with your personal cookie is more likely to be flagged).
-- **Dedupe** — `UNIQUE(provider, source_job_id)`; re-crawls update `last_seen_at`.
+- **Dedupe** — `UNIQUE(provider, source_job_id)`; re-crawls update `last_seen_at`. The `task_jobs` table links every task to every job it saw, so repeating a search shows its results even though the jobs were found earlier.
 - Design docs: [`docs/plan/v1.1.0/prd.md`](docs/plan/v1.1.0/prd.md), [`docs/architecture.drawio`](docs/architecture.drawio), UI/logic mockups in [`docs/design/`](docs/design/).
+
+## CLI
+
+For scripts, cron and agents that do not speak MCP. Both commands load `.env` like the server does.
+
+| Command | What it does |
+|---|---|
+| `djs call <tool> ['<json args>']` | run any MCP tool by name, print its JSON result on stdout; errors are `{"error": "..."}` with exit code 1 (an unknown tool lists the available ones) |
+| `djs work [--until-idle] [--timeout SEC]` | run the per-platform workers in the foreground and print one line per finished task (`task 3 nowcoder done pages=1 new=20 seen=0`). `--until-idle` exits once nothing is queued or running (tasks waiting for a login do not count; a failing task is retried with growing back-off, so pair it with `--timeout`); `--timeout` stops after SEC seconds (exit 2 if `--until-idle` was not reached) |
+
+```bash
+djs call crawl_start '{"provider":"nowcoder","keyword":"python","max_pages":1,"detail":false}' \
+  && djs work --until-idle --timeout 120 \
+  && djs call jobs_get '{"task_id":1,"limit":3}'
+djs call job_detail '{"job_id":7}'      # full text on demand
+djs call search_list
+```
+
+`djs` with no arguments is still the stdio MCP server and `djs ui` the desktop app; both run the workers themselves. `djs call` only reads and writes the database, so queued tasks wait until some process runs the workers: the MCP server, the desktop app or `djs work`.
 
 ## Desktop app
 
@@ -106,7 +127,7 @@ Errors come back as `{"error": "..."}`; tools never raise.
 
 ## Data and privacy
 
-Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite), `profiles/<platform>/` (cookies 0600, browser profile), `pace/` (rate-limit locks), `ui_prefs.json`. Cookie values are never written to the database, logs, tool results or error messages.
+Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite), `.env` (optional keys, see above), `profiles/<platform>/` (cookies 0600, browser profile), `pace/` (rate-limit locks), `ui_prefs.json`. Cookie values are never written to the database, logs, tool results or error messages.
 
 ## Development
 
@@ -115,7 +136,7 @@ Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite
 .venv/bin/python -m pytest -q          # no network, no browser, no window
 ```
 
-Layout: `djs/{db,taskqueue,pacer,egress,engine,service}.py` (core), `djs/server.py` (MCP tools, thin wrappers over `service`), `djs/providers/` (one file per platform; contract in `base.py`), `djs/ui_app.py` + `djs/ui_api.py` + `djs/ui/` (desktop app).
+Layout: `djs/{db,taskqueue,pacer,egress,engine,service}.py` (core), `djs/server.py` (MCP tools, thin wrappers over `service`), `djs/cli.py` (`call` / `work`), `djs/envfile.py` (`.env` autoload), `djs/providers/` (one file per platform; contract in `base.py`), `djs/ui_app.py` + `djs/ui_api.py` + `djs/ui/` (desktop app).
 
 ## Compliance
 

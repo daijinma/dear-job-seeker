@@ -29,6 +29,22 @@ def test_crawl_validation_and_tasks(call):
     assert call("GET /api/jobs", {"limit": 5}) == {"jobs": []}
 
 
+def test_searches_and_job_routes(call):
+    call("POST /api/crawl", {"keyword": "前端", "city": "杭州", "providers": ["nowcoder", "chinahr"]})
+    searches = call("GET /api/searches")["searches"]
+    assert [(s["keyword"], s["city"], s["status"], [x["provider"] for x in s["per_site"]]) for s in searches] == [
+        ("前端", "杭州", "running", ["nowcoder", "chinahr"])]
+    assert "error" in call("POST /api/job_detail", {"job_id": 1})  # no such job yet
+    conn = db.connect()  # a job whose detail is already stored is served without any network
+    conn.execute("INSERT INTO jobs(id, provider, source_job_id, title, description, detail) "
+                 "VALUES (1, 'nowcoder', 'a', 'T', 'D', '{\"jd\": 1}')")
+    conn.execute("INSERT INTO task_jobs VALUES (2, 1)")  # task 2 saw it although task 1 found it first
+    job = call("POST /api/job_detail", {"job_id": 1})["job"]
+    assert (job["title"], job["description"], job["detail"]) == ("T", "D", {"jd": 1})
+    assert [j["id"] for j in call("GET /api/jobs", {"task_id": 2})["jobs"]] == [1]
+    assert call("GET /api/jobs", {"task_id": 1})["jobs"] == []
+
+
 def test_boss_task_waits_for_login(call):
     from djs import engine
     call("POST /api/crawl", {"keyword": "x", "providers": ["boss"]})

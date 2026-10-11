@@ -6,7 +6,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from djs import db, engine, service
+from djs import db, engine, envfile, service
 
 mcp = FastMCP("dear-job-seeker")
 
@@ -32,9 +32,9 @@ def provider_list() -> dict:
 
 @mcp.tool()
 def crawl_start(provider: str, keyword: str | None = None, city: str | None = None,
-                tenant: str | None = None, max_pages: int | None = None) -> dict:
-    """Queue a crawl task."""
-    return _run(service.crawl_start, provider, keyword, city, tenant, max_pages)
+                tenant: str | None = None, max_pages: int | None = None, detail: bool = True) -> dict:
+    """Queue a crawl task. detail=False is quick mode (list items only); load one job's full text with job_detail."""
+    return _run(service.crawl_start, provider, keyword, city, tenant, max_pages, detail)
 
 
 @mcp.tool()
@@ -47,6 +47,18 @@ def task_list(status: str | None = None, limit: int = 20) -> dict:
 def jobs_get(task_id: int | None = None, provider: str | None = None, limit: int = 50, with_detail: bool = False) -> dict:
     """Read stored jobs."""
     return _run(service.jobs_get, task_id, provider, limit, with_detail)
+
+
+@mcp.tool()
+async def job_detail(job_id: int) -> dict:
+    """Full description of one stored job: fetched from the platform once, then served from the database."""
+    return await asyncio.to_thread(_run, service.job_detail, job_id)  # paced network call: keep the event loop free
+
+
+@mcp.tool()
+def search_list(limit: int = 20) -> dict:
+    """Recent searches (same keyword + city) with status, job counts and per-platform progress."""
+    return _run(service.searches, limit)
 
 
 @mcp.tool()
@@ -93,9 +105,15 @@ def egress_list() -> dict:
 
 
 def main() -> None:
-    if sys.argv[1:2] == ["ui"]:
+    """`djs` = stdio MCP server; `djs ui` = desktop app; `djs call|work` = scripting CLI."""
+    argv = sys.argv[1:]
+    if argv[:1] == ["ui"]:
         from djs import ui_app
-        return ui_app.main(sys.argv[2:])
+        return ui_app.main(argv[1:])
+    if argv[:1] in (["call"], ["work"]):
+        from djs import cli
+        sys.exit(cli.main(argv))
+    envfile.load()
     engine.start_worker()
     mcp.run(transport="stdio")
 

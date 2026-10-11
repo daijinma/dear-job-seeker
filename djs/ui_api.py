@@ -75,6 +75,8 @@ ROUTES = {
     "GET /api/providers": lambda c, a: {"providers": service.provider_list(c), **_prefs()},
     "GET /api/tasks": lambda c, a: {"tasks": service.task_list(c, limit=60)},
     "GET /api/jobs": lambda c, a: {"jobs": service.jobs_get(c, a.get("task_id"), a.get("provider"), a.get("limit") or 500)},
+    "POST /api/job_detail": lambda c, a: {"job": service.job_detail(c, a.get("job_id"))},
+    "GET /api/searches": lambda c, a: {"searches": service.searches(c, a.get("limit") or 20)},
     "POST /api/crawl": crawl,
     "POST /api/open_url": open_url,
     "POST /api/login": lambda c, a: start_login(c, a.get("provider", "")),

@@ -1,8 +1,10 @@
-"""Runs one task end to end and hosts the background worker thread."""
+"""Runs one task end to end and hosts the per-platform worker threads."""
 from __future__ import annotations
 
 import json
 import threading
+import time
+from contextlib import contextmanager
 
 import httpx
 
@@ -10,89 +12,131 @@ from djs import auth, db, egress, pacer, providers, taskqueue
 from djs.providers.base import Blocked, Delisted, FetchError, LoginRequired
 
 NO_EGRESS_DELAY = 60
-POLL_SECONDS = 2
+POLL_SECONDS = 1
+# jobs columns a provider derives from a list item (row) and its metadata (meta)
+FIELDS = ("title", "company", "city", "salary_text", "description", "source_url", "published_at", "published_at_kind")
 
 
-def _detail(client, prov, job, stats):
-    """Returns (detail, error). Delisted is a normal end state; Blocked propagates so the job is retried."""
+def _job_fields(prov, job, detail) -> dict:
+    """The derived jobs columns for a list item, plus its detail once that has been fetched."""
+    derived = {**prov.row(job, detail), **prov.meta(job, detail)}
+    return {k: derived.get(k) for k in FIELDS}
+
+
+def _dump(detail) -> str | None:
+    return json.dumps(detail, ensure_ascii=False) if detail else None
+
+
+def _login_expired(prov, exc) -> bool:
+    """A login provider answering "log in": the cookie is dead (for a public provider that answer is a block)."""
+    return isinstance(exc, LoginRequired) and prov.auth == "login"
+
+
+@contextmanager
+def leased_client(conn, prov, key: str):
+    """Paced httpx client on a leased exit; login providers get their cookie attached. Reports the exit's health
+    afterwards. A dead login cookie is the cookie's fault, not the exit's, so it only invalidates the cookie."""
+    cookies = auth.load_cookies(prov.name) if prov.auth == "login" else None
+    if prov.auth == "login" and cookies is None:
+        raise LoginRequired(f"no login for {prov.name}")
+    exit_id = egress.lease(conn, prov.name, key)
+    interval, jitter, _ = pacer.effective(conn, prov.name)
     try:
-        detail = prov.detail(client, job)
+        with egress.make_client(exit_id, prov, interval, jitter, cookies) as client:
+            yield client
+    except (FetchError, httpx.HTTPError) as e:
+        if _login_expired(prov, e):
+            auth.invalidate(prov.name)
+        else:
+            egress.report(conn, exit_id, prov.name, ok=False, blocked=isinstance(e, Blocked),
+                          retry_after=getattr(e, "retry_after", None))
+        raise
+    egress.report(conn, exit_id, prov.name, ok=True)
+
+
+def fetch_detail(client, prov, job):
+    """Returns (detail, error). Delisted is a normal end state; Blocked propagates so the caller can back off."""
+    try:
+        return prov.detail(client, job), None
     except Delisted:
-        detail = None
+        return None, None
     except Blocked:
         raise
     except FetchError as e:
-        stats["details_failed"] += 1
-        return None, str(e)
-    stats["details_ok"] += 1
-    return detail, None
+        return None, e
 
 
-def _store(conn, task_id, prov, client, job, stats):
+def _insert(conn, task_id, prov, jid, job, detail, err) -> int:
+    fields = _job_fields(prov, job, detail)
+    cur = conn.execute(
+        f"INSERT INTO jobs(provider, source_job_id, task_id, payload, detail, detail_error, {', '.join(FIELDS)}) "
+        f"VALUES (?,?,?,?,?,?,{', '.join('?' * len(FIELDS))})",
+        (prov.name, jid, task_id, json.dumps(job, ensure_ascii=False), _dump(detail), err and str(err),
+         *fields.values()))
+    return cur.lastrowid
+
+
+def update_job(conn, job_id, prov, job, detail) -> None:
+    """Store a detail fetched after the fact. A column only changes when the provider now knows a value."""
+    sets = ", ".join(f"{k}=COALESCE(?, {k})" for k in FIELDS)
+    conn.execute(f"UPDATE jobs SET detail=?, detail_error=NULL, {sets} WHERE id=?",
+                 (_dump(detail), *_job_fields(prov, job, detail).values(), job_id))
+
+
+def _store(conn, task_id, prov, client, job, stats, with_detail) -> None:
     jid = prov.job_id(job)
-    seen = conn.execute("UPDATE jobs SET last_seen_at=strftime('%s','now') WHERE provider=? AND source_job_id=?",
-                        (prov.name, jid)).rowcount
-    if seen:
+    known = conn.execute(
+        "UPDATE jobs SET last_seen_at=strftime('%s','now') WHERE provider=? AND source_job_id=? RETURNING id",
+        (prov.name, jid)).fetchone()
+    if known:
         stats["jobs_seen"] += 1
-        return
-    detail, err = _detail(client, prov, job, stats)
-    row, meta = prov.row(job, detail), prov.meta(job, detail)
-    conn.execute(
-        """INSERT INTO jobs(provider, source_job_id, task_id, title, company, city, salary_text, description,
-             source_url, published_at, published_at_kind, payload, detail, detail_error)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (prov.name, jid, task_id, row.get("title"), row.get("company"), row.get("city"), row.get("salary_text"),
-         row.get("description"), meta.get("source_url"), meta.get("published_at"), meta.get("published_at_kind"),
-         json.dumps(job, ensure_ascii=False), json.dumps(detail, ensure_ascii=False) if detail else None, err))
-    stats["jobs_new"] += 1
+        job_pk = known["id"]
+    else:
+        detail = err = None
+        if with_detail:
+            detail, err = fetch_detail(client, prov, job)
+            stats["details_failed" if err else "details_ok"] += 1
+        job_pk = _insert(conn, task_id, prov, jid, job, detail, err)
+        stats["jobs_new"] += 1
+    conn.execute("INSERT OR IGNORE INTO task_jobs(task_id, job_id) VALUES (?,?)", (task_id, job_pk))
 
 
 def _crawl(conn, task_id, prov, client, payload, max_pages) -> dict:
     stats = {"pages": 0, "jobs_new": 0, "jobs_seen": 0, "details_ok": 0, "details_failed": 0}
+    with_detail = payload.get("detail", True)
     limit = max_pages if prov.page_cap is None else min(max_pages, prov.page_cap)
     for page in range(prov.first_page, prov.first_page + limit):
         items = prov.fetch(client, payload, page)
         stats["pages"] += 1
         for job in items:
-            _store(conn, task_id, prov, client, job, stats)
+            _store(conn, task_id, prov, client, job, stats, with_detail)
+        taskqueue.progress(conn, task_id, stats)
         if len(items) < prov.page_size:  # empty or short page = last page
             break
     return stats
-
-
-def _fail(conn, task_id, prov, exit_id, exc):
-    if isinstance(exc, LoginRequired) and prov.auth == "login":
-        auth.invalidate(prov.name)
-        return taskqueue.waiting_login(conn, task_id)
-    blocked = isinstance(exc, Blocked)
-    egress.report(conn, exit_id, prov.name, ok=False, blocked=blocked, retry_after=getattr(exc, "retry_after", None))
-    taskqueue.retry(conn, task_id, f"{type(exc).__name__}: {exc}", getattr(exc, "retry_after", None))
 
 
 def run_task(conn, task) -> None:
     prov = providers.get(task["provider"])
     if prov.missing_env():
         return taskqueue.dead(conn, task["id"], f"missing environment variable(s): {', '.join(prov.missing_env())}")
-    cookies = auth.load_cookies(prov.name) if prov.auth == "login" else None
-    if prov.auth == "login" and cookies is None:
-        return taskqueue.waiting_login(conn, task["id"])
+    payload = json.loads(task["payload"])
+    max_pages = payload.get("max_pages") or pacer.effective(conn, prov.name)[2]
     try:
-        exit_id = egress.lease(conn, prov.name, str(task["id"]))
+        with leased_client(conn, prov, str(task["id"])) as client:
+            stats = _crawl(conn, task["id"], prov, client, payload, max_pages)
     except egress.NoEgressAvailable as e:
         return taskqueue.release(conn, task["id"], str(e), NO_EGRESS_DELAY)
-    payload = json.loads(task["payload"])
-    interval, jitter, max_pages = pacer.effective(conn, prov.name)
-    try:
-        with egress.make_client(exit_id, prov, interval, jitter, cookies) as client:
-            stats = _crawl(conn, task["id"], prov, client, payload, payload.get("max_pages") or max_pages)
     except (FetchError, httpx.HTTPError) as e:
-        return _fail(conn, task["id"], prov, exit_id, e)
-    egress.report(conn, exit_id, prov.name, ok=True)
+        if _login_expired(prov, e):
+            return taskqueue.waiting_login(conn, task["id"])
+        return taskqueue.retry(conn, task["id"], f"{type(e).__name__}: {e}", getattr(e, "retry_after", None))
     taskqueue.done(conn, task["id"], stats)
 
 
-def tick(conn) -> bool:
-    task = taskqueue.claim(conn)
+def tick(conn, provider: str | None = None) -> bool:
+    """Claim and run one task (of `provider`, or of any). False when there was nothing to run."""
+    task = taskqueue.claim(conn, provider)
     if task is None:
         return False
     try:
@@ -102,20 +146,34 @@ def tick(conn) -> bool:
     return True
 
 
-def _loop(stop: threading.Event):
-    conn = db.connect()
-    while not stop.is_set():
-        if not tick(conn):
-            stop.wait(POLL_SECONDS)
-
-
 _lock = threading.Lock()
-_thread: threading.Thread | None = None
+_stop = threading.Event()
+_threads: dict[str, threading.Thread] = {}
+
+
+def _loop(provider: str) -> None:
+    conn = db.connect()
+    while not _stop.is_set():
+        if not tick(conn, provider):
+            _stop.wait(POLL_SECONDS)
+    conn.close()
 
 
 def start_worker() -> None:
-    global _thread
+    """One daemon thread per platform: pacing is per platform, so a slow site must not hold up the others.
+    Idempotent: only missing or dead threads are started."""
     with _lock:
-        if _thread is None or not _thread.is_alive():
-            _thread = threading.Thread(target=_loop, args=(threading.Event(),), daemon=True, name="djs-worker")
-            _thread.start()
+        _stop.clear()
+        for name in providers.names():
+            if name not in _threads or not _threads[name].is_alive():
+                _threads[name] = threading.Thread(target=_loop, args=(name,), daemon=True, name=f"djs-worker-{name}")
+                _threads[name].start()
+
+
+def stop_worker(wait: float = 5.0) -> None:
+    """Ask the workers to stop after their current task; give them `wait` seconds in total."""
+    with _lock:
+        _stop.set()
+        deadline = time.monotonic() + wait
+        for t in _threads.values():
+            t.join(max(0.0, deadline - time.monotonic()))
