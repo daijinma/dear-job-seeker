@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from djs import cities
 
-from .base import Blocked, Provider, StructureError, district_of, get_json, need
+from .base import Blocked, Provider, StructureError, district_of, get_json, need, tag_names
 
 APPID = "wx8a53973ba8aa631e"
 APP_VER = "191"
@@ -86,8 +86,8 @@ class Ganji(Provider):
         city = cities.name_of("city58", str(job.get("dispLocalFullPath") or "").split(",")[0])
         return {"title": job.get("title"), "company": job.get("enterpriseName"), "city": city,
                 "district": district_of(job.get("area"), city), "education": job.get("education"),
-                "experience": job.get("experience"), "salary_text": job.get("salary"),
-                "description": jd_text(detail) if detail else None}
+                "experience": job.get("experience"), "benefits": tag_names(job.get("signs"), "tagName"),
+                "salary_text": job.get("salary"), "description": jd_text(detail) if detail else None}
 
     def probe_payload(self) -> dict:
         return {"keyword": "服务员", "city": "北京"}

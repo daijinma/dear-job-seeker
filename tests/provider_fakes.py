@@ -8,8 +8,8 @@ from djs import normalize, service, taskqueue
 
 
 def stored_jobs(conn, task_id=None, provider=None, with_detail=False) -> list[dict]:
-    """Every stored job, newest first, as whole rows the way service.job_detail shows one (`missing` a list, `complete` a
-    bool, `incomplete_reason`): what the engine tests read back. The jobs_get tool shortens and merges; this does not."""
+    """Every stored job, newest first, as whole rows (every column; `missing` a list, `complete` a bool, `detail`
+    parsed, `incomplete_reason`): what the engine tests read back. The jobs_get tool shortens and merges; this does not."""
     rows = conn.execute(
         f"SELECT {service.JOB_COLS}{', detail' if with_detail else ''} FROM jobs j "
         "WHERE (? IS NULL OR j.id IN (SELECT job_id FROM task_jobs WHERE task_id=?)) AND (? IS NULL OR j.provider=?) "

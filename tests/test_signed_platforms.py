@@ -76,7 +76,7 @@ def test_yupao_happy_headers_and_mapping():
     p = Yupao()
     assert p.job_id(YP) == "77"
     assert p.row(YP, None) == {"title": "普工", "company": "甲", "city": "北京", "district": "丰台区",
-                               "education": "大专", "experience": "经验不限", "salary_text": "4000元/月",
+                               "education": "大专", "experience": "经验不限", "benefits": [], "salary_text": "4000元/月",
                                "description": "招普工"}
     bare = p.row({"title": "x", "address": "上海", "areaInfo": {"cityName": "上海", "countyName": ""}}, None)
     assert (bare["city"], bare["district"], bare["education"], bare["experience"]) == ("上海", None, None, None)
@@ -120,7 +120,7 @@ def test_job51_happy_url_signed_and_mapping():
     p = Job51()
     assert p.job_id(J51) == "9"
     assert p.row(J51, J51_DETAIL) == {"title": "会计", "company": "乙公司", "city": "上海", "district": "浦东新区",
-                                      "education": "本科", "experience": "3-5年", "salary_text": "1-2万",
+                                      "education": "本科", "experience": "3-5年", "benefits": [], "salary_text": "1-2万",
                                       "description": "做账"}
     assert p.meta(J51, None)["source_url"] == "https://jobs.51job.com/shanghai-ypq/9.html"
     assert p.meta({}, None)["published_at_kind"] == "unknown"
@@ -228,8 +228,8 @@ def test_job58_happy_cursor_and_mapping():
     assert seen[0].url.params["cityId"] == "1" and seen[0].headers["thirdkey"] == payload["_cursor"]["thirdKey"]
     assert payload["_cursor"]["done"] and p.fetch(client(body), payload, 2) == []  # hasMore=False ends the session
     assert p.row(J58, J58_DETAIL) == {"title": "服务员", "company": "丙", "city": "北京", "district": "朝阳",
-                                      "education": "学历不限", "experience": "经验不限", "salary_text": "5000元/月",
-                                      "description": "端盘子"}
+                                      "education": "学历不限", "experience": "经验不限", "benefits": [],
+                                      "salary_text": "5000元/月", "description": "端盘子"}
     listed = p.row(J58, None)   # before the detail: the list's own price wording, no education, no JD
     assert (listed["salary_text"], listed["education"], listed["description"]) == ("5000-8000元", None, None)
     assert p.row({**J58, "price": "面议", "priceUnit": "", "location": "北京·朝阳"}, None)["salary_text"] == "面议"
@@ -280,8 +280,8 @@ def test_ganji_happy_and_mapping():
     assert seen[0].headers["cid"] == "1"
     assert p.detail(client({"status": "0", "result": GJ_RESULT}), GJ) == GJ_RESULT
     assert p.row(GJ, GJ_RESULT) == {"title": "销售", "company": "丁", "city": "北京", "district": "房山区",
-                                    "education": "学历不限", "experience": "1-3年", "salary_text": "8000元",
-                                    "description": "卖货"}
+                                    "education": "学历不限", "experience": "1-3年", "benefits": [],
+                                    "salary_text": "8000元", "description": "卖货"}
     assert p.row({**GJ, "dispLocalFullPath": None}, None)["city"] is None   # no city id: not guessed from the district
     # the detail path is a JSON API; the page a person can open is the share URL the detail response carries
     assert p.meta(GJ, GJ_RESULT) == {"source_url": GJ_SHARE, "apply_url": GJ_SHARE,
@@ -308,6 +308,60 @@ def test_ganji_failures():
         p.detail(client({"status": "0", "result": {"info": []}}), GJ)
     with pytest.raises(StructureError):
         p.detail(client({"status": "0", "result": GJ_RESULT}), {"infoId": 8})
+
+
+# ---- welfare tags (benefits): the shapes of real items of each platform
+JOB51_WELFARE = ["五险一金", "定期体检", "员工旅游", "免费班车", "专业培训", "免费食宿", "企业年金"]   # the list item names the first five
+
+
+def test_job51_benefits_are_the_fuller_of_the_items_and_the_details_tags():
+    p = Job51()
+    item = {**J51, "jobWelfareCodeDataList": [{"chineseTitle": t} for t in JOB51_WELFARE[:5]]}
+    detail = {"detailJobInfo": {"jobDescribe": "做账", "welfare": ",".join(JOB51_WELFARE)}}
+    assert p.row(item, None)["benefits"] == JOB51_WELFARE[:5]                  # the list names some ...
+    assert p.row(item, detail)["benefits"] == JOB51_WELFARE                    # ... the detail's comma-joined text all of them
+    as_list = {"detailJobInfo": {"jobWelfareAllDataList": [{"wordText": t} for t in JOB51_WELFARE]}}
+    assert p.row(item, as_list)["benefits"] == JOB51_WELFARE                   # or its tag list, when the text is absent
+    assert p.row(item, J51_DETAIL)["benefits"] == JOB51_WELFARE[:5]            # a detail that names none erases nothing
+    assert p.row(J51, detail)["benefits"] == JOB51_WELFARE                     # the list may name none at all
+    assert p.row(J51, J51_DETAIL)["benefits"] == p.row(J51, None)["benefits"] == []
+    assert derive(p, item, detail)["benefits"] == "、".join(JOB51_WELFARE)
+    assert derive(p, J51, None)["benefits"] is None
+
+
+def test_job58_benefits_are_the_text_tags_of_the_list_item():
+    p = Job58()
+    tags = ["五险一金", "周末双休", "话补", "国家节假日全放", "15天春节假日", "5天以上年假"]
+    item = {**J58, "textTags": tags}
+    detail = {"extParamMap": {**J58_DETAIL["extParamMap"], "fulibaozhang": "五险一金,周末双休,话补"}}   # the detail lists fewer
+    assert p.row(item, None)["benefits"] == p.row(item, detail)["benefits"] == tags
+    assert derive(p, item, detail)["benefits"] == "五险一金、周末双休、话补、国家节假日全放、15天春节假日、5天以上年假"
+    assert p.row(J58, J58_DETAIL)["benefits"] == [] and derive(p, J58, J58_DETAIL)["benefits"] is None
+    assert p.row({**J58, "textTags": []}, None)["benefits"] == p.row({**J58, "textTags": None}, None)["benefits"] == []
+
+
+def test_ganji_benefits_are_the_names_of_the_signs():
+    p = Ganji()
+    signs = [{"tagId": "0", "tagType": "fill_in", "tagName": "饭补"},
+             {"tagId": "0", "tagType": "fuli_fill_in", "tagName": "交通补助"},
+             {"tagId": "0", "tagType": "fuli_fill_in", "tagName": "周末双休"}]
+    assert p.row({**GJ, "signs": signs}, None)["benefits"] == ["饭补", "交通补助", "周末双休"]
+    assert derive(p, {**GJ, "signs": signs}, GJ_RESULT)["benefits"] == "饭补、交通补助、周末双休"
+    assert p.row({**GJ, "signs": [{"tagName": ""}, {"tagId": "1"}, "x", None]}, None)["benefits"] == []
+    assert p.row(GJ, GJ_RESULT)["benefits"] == [] and derive(p, GJ, GJ_RESULT)["benefits"] is None
+
+
+def test_yupao_benefits_are_the_tags_of_type_4_and_no_other_tag():
+    p = Yupao()
+    shown = [{"name": "企业认证", "type": 11}, {"name": "6000-8000元/月", "type": 1}, {"name": "保安", "type": 2},
+             {"name": "3-5年", "type": 15}, {"name": "大专", "type": 17}, {"name": "包吃", "type": 4},
+             {"name": "包住", "type": 4}, {"name": "月结", "type": 6}, {"name": "总账", "type": 998},
+             {"name": "Python", "type": 31}, "x", None]
+    got = p.row({**YP, "showTags": shown}, None)
+    assert got["benefits"] == ["包吃", "包住"]                                  # every tag of the type, not the last one
+    assert (got["education"], got["experience"]) == ("大专", "3-5年")           # the other tag types still read as before
+    assert derive(p, {**YP, "showTags": shown}, None)["benefits"] == "包吃、包住"
+    assert p.row(YP, None)["benefits"] == [] and p.row({**YP, "showTags": None}, None)["benefits"] == []
 
 
 # ---- missing env ----

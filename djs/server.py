@@ -21,11 +21,14 @@ Recommended flow:
    found, no_results (the site had nothing: not an error), failed, waiting_login (needs the user: login tool) or
    running. If it timed out, call it again, or read what is there and check `searching`.
 3. jobs_get(keyword, city, ...): reads the results, complete jobs only and each job once (`also_on` names the other
-   sites that carry it). Narrow it with title (every word must be in the job title: use it for the role, e.g.
-   title="Python 后端"), text (every word in the title or description: use it for skills that may sit anywhere, e.g.
-   text="Django"), min_month_salary / max_month_salary (yuan per month, all units converted) and city; page with
-   limit and next_offset.
-4. job_detail(job_id): the full description of the few jobs you shortlist. jobs_get returns only short summaries.
+   sites that carry it). Put the role in title (every word must be in the job title, e.g. title="会计": without it,
+   jobs of companies merely named "…会计服务…" come back too), conditions and skills in text (every word in the title,
+   the description or the welfare tags `benefits`, e.g. text="双休" or text="Django"), and a hard pay floor in
+   floor_month_salary (yuan per month, all units converted: floor_month_salary=8000 keeps the jobs whose LOWEST pay is
+   8000 or more, "8000 以上"; min_month_salary=8000 keeps every job whose range reaches 8000, 6k-9k too;
+   max_month_salary caps where the range starts). Narrow by city as well; page with limit and next_offset.
+4. job_detail(job_id): the full description and welfare tags (`benefits`, null when the site lists none) of the few
+   jobs you shortlist. jobs_get returns only short summaries.
 Compare pay only through salary_month_min / salary_month_max: salary_text is the site's own wording (per day, per
 hour, per year) and the figures behind it are in salary_unit.
 If results look wrong or a search does not move, call status first: workers, queue, browser, logins and each
@@ -135,26 +138,34 @@ def task_list(status: str | None = None, limit: int = 20) -> dict:
 @mcp.tool()
 def jobs_get(keyword: str | None = None, city: str | None = None, task_id: int | None = None,
              provider: str | None = None, min_month_salary: int | None = None, max_month_salary: int | None = None,
-             title: str | None = None, text: str | None = None, complete_only: bool = True, dedupe: bool = True,
-             fields: str = "summary", limit: int = 20, offset: int = 0) -> dict:
+             floor_month_salary: int | None = None, title: str | None = None, text: str | None = None,
+             complete_only: bool = True, dedupe: bool = True, fields: str = "summary", limit: int = 20,
+             offset: int = 0) -> dict:
     """Read stored jobs as {jobs, total, returned, next_offset}. Where from: a search (the keyword and city given to
-    search), a task_id and/or a provider; none = everything stored. Filters: city (the job's city), min_month_salary /
-    max_month_salary (yuan per month: the job's pay range must overlap), title (every word in the job TITLE, any case:
-    the role, e.g. "Python 后端"), text (every word in the title or description, any case: skills that may sit anywhere,
-    e.g. "Django"). By default only complete jobs and each job once; incomplete ones come with complete_only=false and
-    say what is `missing`; dedupe=false lists every record. fields='summary' returns short rows
-    (salary_month_min/max are comparable across sites, description_snippet is 120 characters), 'full' the whole
-    description. A search also says whether it is still `searching`. Example: jobs_get(keyword="Python 后端",
-    city="杭州", title="Python 后端", min_month_salary=15000, text="Django", limit=10)."""
-    return _run(service.jobs_get, keyword, city, task_id, provider, min_month_salary, max_month_salary, title, text,
-                complete_only, dedupe, fields, limit, offset)
+    search), a task_id and/or a provider; none = everything stored. Filters: city (the job's city); title (every word in
+    the job TITLE, any case: the role, e.g. title="会计"); text (every word in the title, the description or the
+    welfare tags `benefits`, any case: conditions and skills that may sit anywhere, e.g. text="双休"); pay in yuan per
+    month, all units converted: floor_month_salary (the job's LOWEST pay is at least this: floor_month_salary=8000 keeps
+    8k-12k and drops 6k-9k, use it for "8000 以上"), min_month_salary (the job's pay range REACHES this:
+    min_month_salary=8000 keeps 6k-9k as well as 8k-12k), max_month_salary (the range starts at or below this). By
+    default only complete jobs and each job once; incomplete ones come with complete_only=false and say what is
+    `missing`; dedupe=false lists every record. fields='summary' returns short rows (salary_month_min/max are comparable
+    across sites, benefits are the platform's welfare tags, description_snippet is 120 characters), 'full' the whole
+    description. A search also says whether it is still `searching`. Example: jobs_get(keyword="会计", city="宁波",
+    title="会计", text="双休", floor_month_salary=8000, limit=10)."""
+    return _run(service.jobs_get, keyword=keyword, city=city, task_id=task_id, provider=provider,
+                min_month_salary=min_month_salary, max_month_salary=max_month_salary,
+                floor_month_salary=floor_month_salary, title=title, text=text, complete_only=complete_only,
+                dedupe=dedupe, fields=fields, limit=limit, offset=offset)
 
 
 @mcp.tool()
-async def job_detail(job_id: int) -> dict:
-    """Full detail of one stored job (an id from jobs_get): fetched from the platform once, its fields (salary range,
-    education, ...) derived again from it, then served from the database. Example: job_detail(job_id=42)."""
-    return await asyncio.to_thread(_run, service.job_detail, job_id)  # paced network call: keep the event loop free
+async def job_detail(job_id: int, raw: bool = False) -> dict:
+    """One stored job (an id from jobs_get) with its whole description: fetched from the platform once, its fields
+    (salary range, education, welfare tags ...) derived again from it, then served from the database. Returns what
+    jobs_get returns with fields='full' (clean fields, description, benefits, missing and incomplete_reason, also_on),
+    not the platform's own JSON; raw=true adds that as `detail`. Example: job_detail(job_id=42)."""
+    return await asyncio.to_thread(_run, service.job_detail, job_id, raw)  # a paced network call: keep the loop free
 
 
 @mcp.tool()

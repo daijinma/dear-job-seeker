@@ -5,20 +5,22 @@ from __future__ import annotations
 
 import json
 
-from djs.normalize import fingerprint, missing, monthly, parse_salary, plain_text
+from djs.normalize import benefits, fingerprint, missing, monthly, parse_salary, plain_text
 
 SALARY = ("salary_min", "salary_max", "salary_unit", "salary_months")
 # What a provider derives from a list item (row) and its metadata (meta).
-FIELDS = ("title", "company", "city", "district", "education", "experience", "salary_text", *SALARY, "description",
-          "source_url", "published_at", "published_at_kind")
+FIELDS = ("title", "company", "city", "district", "education", "experience", "benefits", "salary_text", *SALARY,
+          "description", "source_url", "published_at", "published_at_kind")
 
 
 def derive(prov, job: dict, detail: dict | None) -> dict:
     """Every derived column for a list item and, once fetched, its detail. Salary figures the provider read from
-    structured fields win, else the salary text is parsed; the JD is stored as plain text."""
+    structured fields win, else the salary text is parsed; the JD is stored as plain text; the welfare tags (a list of
+    names, the fuller of the item's and the detail's: the provider picks) as one text."""
     got = {**prov.row(job, detail), **prov.meta(job, detail)}
     fields = {k: got.get(k) for k in FIELDS}
     fields["description"] = plain_text(fields["description"]) or None
+    fields["benefits"] = benefits(fields["benefits"])
     if None in (fields["salary_min"], fields["salary_max"]):
         fields.update(parse_salary(fields["salary_text"]) or dict.fromkeys(SALARY))
     return fields

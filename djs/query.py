@@ -15,9 +15,9 @@ DUE = (f"(j.detail IS NULL AND j.detail_error IS NULL AND j.id IN (SELECT job_id
        f"(SELECT t.id FROM tasks t WHERE t.status IN {taskqueue.ACTIVE_SQL} "
        "AND IFNULL(json_extract(t.payload, '$.detail'), 'auto') NOT IN ('never', 0)))) AS detail_due")
 WHY = f"j.provider, j.missing, j.salary_text, j.detail_error, {DUE}"   # what service.reasons needs to explain a job
-COLS = ("id provider title company city district education experience salary_text salary_min salary_max salary_unit "
-        "salary_months salary_month_min salary_month_max source_url published_at first_seen_at missing complete "
-        "detail_error fingerprint").split()
+COLS = ("id provider title company city district education experience benefits salary_text salary_min salary_max "
+        "salary_unit salary_months salary_month_min salary_month_max source_url published_at first_seen_at missing "
+        "complete detail_error fingerprint").split()
 _ROW = (", ".join(f"j.{c}" for c in COLS)
         + f", {DUE}, (j.description IS NOT NULL AND j.description <> '') AS has_description")
 # How many of the search's words (:words, a JSON list) a job's title holds, in any case
@@ -54,12 +54,13 @@ def _words(text, name: str) -> list[str]:
 
 
 def where(*, search=None, task_id=None, provider=None, city=None, min_month_salary=None, max_month_salary=None,
-          title=None, text=None, complete_only=True) -> tuple[str, dict]:
+          floor_month_salary=None, title=None, text=None, complete_only=True) -> tuple[str, dict]:
     """(WHERE clause for `jobs j`, named parameters). The jobs of a search (keyword, city: what its tasks saw), of a
     task and/or of a platform; located in `city`; whose pay per month can reach `min_month_salary` and start at or
-    below `max_month_salary` (the job's range overlaps the asked one); whose title holds every word of `title` (the
-    role), and whose title or description holds every word of `text` (skills that may sit anywhere), in any case. By
-    default only complete jobs."""
+    below `max_month_salary` (the job's range overlaps the asked one); whose lowest pay per month is at least
+    `floor_month_salary` (the whole range is at or above it); whose title holds every word of `title` (the role), and
+    whose title, description or welfare tags hold every word of `text` (skills and conditions that may sit anywhere),
+    in any case. By default only complete jobs."""
     conds, args = [], {}
 
     def add(cond: str, **params) -> None:
@@ -79,7 +80,9 @@ def where(*, search=None, task_id=None, provider=None, city=None, min_month_sala
         add("j.salary_month_max >= :min_month", min_month=min_month_salary)
     if max_month_salary is not None:
         add("j.salary_month_min <= :max_month", max_month=max_month_salary)
-    for name, words, columns in (("title", title, ("title",)), ("text", text, ("title", "description"))):
+    if floor_month_salary is not None:
+        add("j.salary_month_min >= :floor_month", floor_month=floor_month_salary)
+    for name, words, columns in (("title", title, ("title",)), ("text", text, ("title", "description", "benefits"))):
         for i, word in enumerate(_words(words, name)):
             hit = " OR ".join(f"instr(lower(j.{column}), lower(:{name}{i})) > 0" for column in columns)
             add(f"({hit})", **{f"{name}{i}": word})
@@ -106,6 +109,21 @@ def count_by_provider(conn, wh: tuple[str, dict]) -> dict[str, int]:
     where_sql, args = wh
     rows = conn.execute(f"WITH {_hit(where_sql)} SELECT provider, COUNT(*) AS n FROM hit GROUP BY provider", args)
     return {r["provider"]: r["n"] for r in rows}
+
+
+def also_on(conn, job_pk: int) -> list[dict]:
+    """The same job on the other platforms (the same fingerprint): each platform once, as its best record ({provider,
+    label, id, source_url}), the best first. [] for a job without a fingerprint: it is never matched on a guess."""
+    rows = conn.execute(
+        "SELECT j.provider, j.id, j.source_url FROM jobs j "
+        "WHERE j.fingerprint = (SELECT fingerprint FROM jobs WHERE id = :id) "
+        "AND j.provider <> (SELECT provider FROM jobs WHERE id = :id) "
+        f"ORDER BY j.complete DESC, {_FILLED} DESC, j.first_seen_at DESC, j.id DESC", {"id": job_pk})
+    best = {}
+    for r in rows:
+        best.setdefault(r["provider"], {"provider": r["provider"], "label": providers.label(r["provider"]),
+                                        "id": r["id"], "source_url": r["source_url"]})
+    return list(best.values())
 
 
 def _folded(conn, wh: tuple[str, dict], jobs: list[dict]) -> dict[tuple, list[dict]]:

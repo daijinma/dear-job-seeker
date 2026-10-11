@@ -27,6 +27,7 @@ class Shop(Provider):
 
     def __init__(self):
         self.asked, self.fail, self.blocked, self.gone = [], set(), set(), set()
+        self.more = {}   # job id -> the welfare tags its detail lists
 
     def fetch(self, client, payload, page):
         return need(get_json(client.get("https://shop.test/list", params={"page": page})), "items")
@@ -42,10 +43,11 @@ class Shop(Provider):
             raise StructureError("shape")
         if job["id"] in self.gone:
             raise Delisted()
-        return {"jd": f"<p>jd{job['id']}</p><p>要求</p>"}
+        return {"jd": f"<p>jd{job['id']}</p><p>要求</p>", "tags": self.more.get(job["id"], [])}
 
     def row(self, job, detail):
         return {"title": job["title"], "company": "公司", "city": "杭州", "salary_text": job.get("salary"),
+                "benefits": max(job.get("tags") or [], (detail or {}).get("tags") or [], key=len),
                 "description": job.get("jd") or (detail or {}).get("jd")}
 
 
@@ -378,13 +380,39 @@ def test_a_new_salary_replaces_the_stored_one_as_a_whole(env):
     assert env.conn.execute("SELECT salary_min FROM jobs WHERE id=?", (pk,)).fetchone()[0] == 10000
 
 
+def test_the_welfare_tags_are_stored_and_the_details_fuller_list_wins(env):
+    env.mp.setitem(PAGES, 1, [{"id": 1, "title": "t1", "salary": "15-25K", "jd": LIST_JD, "tags": ["五险一金", "双休", "双休"]},
+                              {"id": 2, "title": "t2", "salary": "1-1.5万", "tags": ["五险一金"]},   # its JD, so its tags, come with the detail
+                              {"id": 3, "title": "t3", "salary": "1-1.5万"}])                          # no tag anywhere
+    env.mp.setitem(PAGES, 2, [])
+    env.shop.more = {2: ["五险一金", "周末双休", "年终奖"], 3: []}
+    run(env)
+    got = stored(env)
+    assert got["1"]["benefits"] == "五险一金、双休"                  # whole from the list: no detail was asked, each tag once
+    assert got["2"]["benefits"] == "五险一金、周末双休、年终奖"      # the detail names more than the list did
+    assert got["3"]["benefits"] is None and got["3"]["complete"] is True   # a site that states none: NULL, and not incomplete
+    assert env.shop.asked == [2, 3]
+
+
+def test_a_search_that_lists_no_tags_leaves_the_stored_ones_alone(env):
+    env.mp.setitem(PAGES, 1, [{"id": 1, "title": "t1", "salary": "15-25K", "jd": LIST_JD, "tags": ["五险一金"]}])
+    run(env)
+    pk = env.conn.execute("SELECT id FROM jobs").fetchone()[0]
+    jobs.rederive(env.conn, pk, env.shop, {"id": 1, "title": "t1", "salary": "15-25K", "jd": LIST_JD}, None)   # the site dropped them
+    assert stored(env)["1"]["benefits"] == "五险一金"
+    jobs.rederive(env.conn, pk, env.shop, {"id": 1, "title": "t1", "salary": "15-25K", "jd": LIST_JD, "tags": ["双休"]}, None)
+    assert stored(env)["1"]["benefits"] == "双休"                   # new tags replace the old ones as a whole
+
+
 def test_job_detail_derives_the_new_fields_and_the_verdict(env):
     run(env, detail="never")
     job_id = stored(env)["2"]["id"]
     assert stored(env)["2"]["missing"] == ["description"]
     got = service.job_detail(env.conn, job_id)
-    assert got["description"] == "jd2\n要求" and got["missing"] == [] and got["complete"] is True
-    assert (got["salary_min"], got["salary_max"], got["incomplete_reason"]) == (10000, 15000, None)
+    assert got["description"] == "jd2\n要求" and got["missing"] == [] and "incomplete_reason" not in got   # nothing to explain
+    assert (got["salary_month_min"], got["salary_month_max"]) == (10000, 15000)
+    row = stored(env)["2"]   # the stored columns follow the detail
+    assert (row["complete"], row["salary_min"], row["salary_max"]) == (True, 10000, 15000)
     assert env.shop.asked == [2]
     env.mp.setitem(PAGES, 1, [{"id": 1, "title": "t", "jd": "说明"}])
     run(env, "flat")
@@ -509,7 +537,7 @@ def test_v2_database_is_upgraded_and_every_stored_job_is_derived(tmp_path, monke
     monkeypatch.setenv("DJS_HOME", str(tmp_path))
     write_v2(tmp_path)
     conn = db.connect()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     got = {r["source_job_id"]: r for r in conn.execute("SELECT * FROM jobs")}
     nc = got["7"]
     assert (nc["salary_min"], nc["salary_max"], nc["salary_unit"], nc["salary_months"]) == (20000, 30000, "元/月", 14)
@@ -537,7 +565,7 @@ def test_the_upgrade_is_repeatable_and_matches_a_fresh_database(tmp_path, monkey
     upgraded.execute("PRAGMA user_version = 2")   # as if another process were upgrading right now
     db.connect().close()
     assert [tuple(r) for r in upgraded.execute("SELECT * FROM jobs ORDER BY id")] == before
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 5
     monkeypatch.setenv("DJS_HOME", str(tmp_path / "new"))
     fresh = db.connect()
     assert sorted(columns(fresh)) == sorted(columns(upgraded))   # same names, types, NOT NULL and defaults
@@ -553,3 +581,87 @@ def test_a_failed_upgrade_changes_nothing(tmp_path, monkeypatch):
     raw = sqlite3.connect(tmp_path / "djs.db")
     assert raw.execute("PRAGMA user_version").fetchone()[0] == 2   # still version 2, so the next start tries again
     assert "salary_min" not in [r[1] for r in raw.execute("PRAGMA table_info(jobs)")]
+
+
+# ---- schema v5 (welfare tags) on a version 4 database that holds jobs
+ITEMS_V5 = [   # (stored job, list item, detail): the shapes of real items of each platform that lists welfare tags
+    ("51", "job51", {"jobId": "51", "jobName": "会计", "fullCompanyName": "宁波甲公司", "provideSalaryString": "8千-1.2万",
+                     "jobAreaLevelDetail": {"cityString": "宁波", "districtString": "鄞州区"},
+                     "jobWelfareCodeDataList": [{"chineseTitle": "五险一金"}, {"chineseTitle": "员工旅游"}]},
+     {"detailJobInfo": {"jobDescribe": "做账", "welfare": "五险一金,员工旅游,双休,餐饮补贴"}}),   # the detail has more
+    ("52", "job51", {"jobId": "52", "jobName": "出纳", "fullCompanyName": "宁波甲公司", "provideSalaryString": "6千-8千",
+                     "jobAreaLevelDetail": {"cityString": "宁波"}}, {"detailJobInfo": {"jobDescribe": "收银"}}),   # none at all
+    ("58", "job58", {"infoId": 58, "title": "会计助理", "companyName": "宁波乙公司", "cityId": 135, "price": "5000_8000",
+                     "priceUnit": "元", "textTags": ["五险", "周末双休"]}, None),
+    ("91", "ganji", {"infoId": 91, "title": "会计", "enterpriseName": "宁波丙公司", "salary": "8000元", "dispLocalFullPath": "135",
+                     "signs": [{"tagType": "fill_in", "tagName": "饭补"}, {"tagType": "fuli_fill_in", "tagName": "周末双休"}]}, None),
+    ("77", "yupao", {"jobBizId": 77, "jobId": 4242, "title": "会计", "detail": "做账", "showPerfect": {"salary": "6000-8000元/月"},
+                     "companyInfo": {"enterpriseName": "宁波丁公司"}, "areaInfo": {"cityName": "宁波", "countyName": "海曙区"},
+                     "showTags": [{"name": "包吃", "type": 4}, {"name": "总账", "type": 998}]}, None),
+    ("bossA", "boss", {"encryptJobId": "bossA", "securityId": "s", "jobName": "会计", "brandName": "宁波戊公司",
+                       "cityName": "宁波", "welfareList": ["五险一金", "带薪年假"]}, None),
+    ("Z1", "zhaopin", {"number": "Z1", "name": "会计", "companyName": "宁波己公司", "workCity": "宁波", "salary60": "8K-12K",
+                       "jobKeyword": {"keywords": [{"itemValue": ""}, {"itemValue": "社保公积金"}, {"itemValue": "周末双休"}]}}, None),
+]
+BENEFITS_V5 = {"51": "五险一金、员工旅游、双休、餐饮补贴", "52": None, "58": "五险、周末双休", "91": "饭补、周末双休", "77": "包吃",
+               "bossA": "五险一金、带薪年假", "Z1": "社保公积金、周末双休", "gone": None, "bare": None}
+
+
+def write_v4(home) -> dict:
+    """A version 4 database: jobs as the crawl stored them (every derived column, the raw list item and detail) in a
+    table that has no `benefits` column yet. Returns every column of every job but the new one, by source id."""
+    conn = db.connect()
+    t = taskqueue.create(conn, "job51", {"keyword": "会计", "city": "宁波"})
+    for sid, name, item, detail in ITEMS_V5:
+        prov = providers.get(name)
+        pk = jobs.insert(conn, t, prov, sid, item)
+        if detail:
+            jobs.update(conn, pk, prov, item, detail)
+    for sid, provider, payload in (("gone", "gone", '{"a": 1}'), ("bare", "job51", None)):   # a removed platform; no payload
+        pk = conn.execute("INSERT INTO jobs(provider, source_job_id, task_id, title, payload) VALUES (?,?,?,?,?)",
+                          (provider, sid, t, sid, payload)).lastrowid
+        jobs.refresh(conn, pk)   # the derived columns, judged by what is stored
+    conn.execute("INSERT INTO task_jobs(task_id, job_id) SELECT task_id, id FROM jobs")
+    conn.execute("ALTER TABLE jobs DROP COLUMN benefits")
+    conn.execute("PRAGMA user_version = 4")
+    rows = {r["source_job_id"]: dict(r) for r in conn.execute("SELECT * FROM jobs")}
+    conn.close()
+    return rows
+
+
+def test_v4_database_gets_the_welfare_tags_of_every_stored_job_from_its_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("DJS_HOME", str(tmp_path))
+    before = write_v4(tmp_path)
+    assert "benefits" not in next(iter(before.values()))
+    monkeypatch.setattr(db, "_initialized", set())   # the next start of the program
+    conn = db.connect()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    after = {r["source_job_id"]: dict(r) for r in conn.execute("SELECT * FROM jobs")}
+    assert {sid: row["benefits"] for sid, row in after.items()} == BENEFITS_V5   # none stated, gone platform, no payload: NULL
+    assert {sid: {k: v for k, v in row.items() if k != "benefits"} for sid, row in after.items()} == before   # nothing else moved
+    assert "benefits" in {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+
+
+def test_a_job_whose_double_rest_day_is_only_in_its_welfare_tags_is_found_after_the_upgrade(tmp_path, monkeypatch):
+    monkeypatch.setenv("DJS_HOME", str(tmp_path))
+    write_v4(tmp_path)
+    monkeypatch.setattr(db, "_initialized", set())
+    conn = db.connect()
+    found = service.jobs_get(conn, keyword="会计", city="宁波", text="双休", complete_only=False, dedupe=False, limit=100)["jobs"]
+    assert sorted(j["provider"] for j in found) == ["ganji", "job51", "job58", "zhaopin"]   # not boss, yupao, nor the job51 without tags
+    assert all("双休" not in (j["description_snippet"] or "") and "双休" not in j["title"] for j in found)
+
+
+def test_the_v5_upgrade_is_repeatable_and_the_fresh_schema_has_the_column_too(tmp_path, monkeypatch):
+    monkeypatch.setenv("DJS_HOME", str(tmp_path / "old"))
+    (tmp_path / "old").mkdir()
+    write_v4(tmp_path / "old")
+    monkeypatch.setattr(db, "_initialized", set())
+    upgraded = db.connect()
+    before = [tuple(r) for r in upgraded.execute("SELECT * FROM jobs ORDER BY id")]
+    upgraded.execute("PRAGMA user_version = 4")   # as if another process were upgrading right now
+    db.connect().close()
+    assert [tuple(r) for r in upgraded.execute("SELECT * FROM jobs ORDER BY id")] == before
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 5
+    monkeypatch.setenv("DJS_HOME", str(tmp_path / "new"))
+    assert sorted(columns(db.connect())) == sorted(columns(upgraded))   # same names, types, NOT NULL and defaults

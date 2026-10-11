@@ -70,7 +70,7 @@ class FakeSite(Provider):
     def row(self, job, detail):
         return {"title": job["title"], "company": job["company"], "city": job.get("city"),
                 "salary_text": job.get("salary"), "description": job.get("jd") or (detail or {}).get("jd"),
-                **{k: job[k] for k in ("district", "education", "experience") if k in job}}
+                **{k: job[k] for k in ("district", "education", "experience", "benefits") if k in job}}
 
     def detail(self, client, job):
         if self.detail_hop:
@@ -646,15 +646,15 @@ def test_results_filter_sort_load_more_and_export(page, app):
     csv_file, lines = exported(page, app)
     assert csv_file.name == f"找岗位-前端工程师-杭州-{STAMP}.csv"
     assert lines[0].startswith("\ufeff")   # the BOM a spreadsheet needs to read Chinese
-    assert lines[0] == ('\ufeff"岗位","公司","薪资","城市","网站","链接","区","学历","经验","最低薪资","最高薪资","薪资单位","发薪月数","缺少的信息"')
+    assert lines[0] == ('\ufeff"岗位","公司","薪资","城市","网站","链接","区","学历","经验","福利","最低薪资","最高薪资","薪资单位","发薪月数","缺少的信息"')
     assert len(lines) == 1 + 60 and all(line.startswith('"国聘前端开发工程师 ') and ',"国聘",' in line for line in lines[1:])
     assert {line.split(",")[5] for line in lines[1:]} == {f'"https://fake.test/gp/job/{i}"' for i in range(100, 160)}
     by_title = {line.split(",")[0]: line for line in lines[1:]}   # the salary as words, then the figures behind it
     assert by_title['"国聘前端开发工程师 100"'] == ('"国聘前端开发工程师 100","示例科技有限公司 A","1.5-2.5万/月","杭州","国聘",'
-                                             '"https://fake.test/gp/job/100","","","","15000","25000","元/月","",""')
+                                             '"https://fake.test/gp/job/100","","","","","15000","25000","元/月","",""')
     assert by_title['"国聘前端开发工程师 105"'] == ('"国聘前端开发工程师 105","示例科技有限公司 F","1.8-3万/月 · 14薪","杭州","国聘",'
-                                             '"https://fake.test/gp/job/105","","","","18000","30000","元/月","14",""')
-    assert by_title['"国聘前端开发工程师 104"'].split(",")[2] == '"200元/天"' and by_title['"国聘前端开发工程师 104"'].split(",")[11] == '"元/天"'
+                                             '"https://fake.test/gp/job/105","","","","","18000","30000","元/月","14",""')
+    assert by_title['"国聘前端开发工程师 104"'].split(",")[2] == '"200元/天"' and by_title['"国聘前端开发工程师 104"'].split(",")[12] == '"元/天"'
 
     page.get_by_role("button", name="加载更多").click()
     expect(page.locator(JOBS)).to_have_count(60)
@@ -1065,8 +1065,8 @@ def test_the_export_follows_the_view_and_says_what_each_incomplete_job_lacks(pag
     assert len(lines) == 1 + 14
     cells = lambda title: next(line for line in lines if title in line).split(",")
     mianyi, never = cells("智联缺薪资 0"), cells("新华缺薪资 1")
-    assert (mianyi[2], mianyi[9:12], mianyi[13]) == ('"面议"', ['""'] * 3, '"面议"')   # the site's words, no figures, and why
-    assert (never[2], never[13]) == ('""', '"平台未提供薪资"')
+    assert (mianyi[2], mianyi[10:13], mianyi[14]) == ('"面议"', ['""'] * 3, '"面议"')   # the site's words, no figures, and why
+    assert (never[2], never[14]) == ('""', '"平台未提供薪资"')
 
 
 def test_a_search_with_nothing_whole_says_so_instead_of_looking_broken(page, app):
@@ -1198,6 +1198,32 @@ def test_drawer_stored_and_lazy_description(page, app, monkeypatch):
     expect(page.locator("#drawer-status")).to_be_empty()
 
 
+WITH_TAGS = {"id": 700, "title": "牛客福利岗", "company": "示例科技有限公司 A", "city": "杭州", "salary": "15-25K", "jd": "负责记账",
+             "benefits": ["五险一金", "周末双休", "五险一金", "餐补"]}
+WITHOUT_TAGS = {"id": 701, "title": "牛客无福利岗", "company": "示例科技有限公司 B", "city": "杭州", "salary": "12-18K", "jd": "负责出纳"}
+
+
+def test_the_drawer_and_the_export_carry_the_welfare_tags_a_site_lists(page, app):
+    app.data["nc"]["福利"] = [WITH_TAGS, WITHOUT_TAGS]
+    open_results(page, keyword="福利")
+    expect(page.locator(JOBS)).to_have_count(2)
+    expect(page.locator(".job .benefits")).to_have_count(0)           # the cards stay as they were: the tags are for the drawer
+    page.locator(JOBS, has_text="牛客福利岗").get_by_role("button").click()
+    expect(page.locator("#drawer .benefits")).to_have_text("福利：五险一金、周末双休、餐补")   # each once, in the site's order
+    assert page.evaluate(NAMELESS) == []
+    page.keyboard.press("Escape")
+    page.locator(JOBS, has_text="牛客无福利岗").get_by_role("button").click()
+    expect(page.locator("#drawer-title")).to_have_text("牛客无福利岗")
+    expect(page.locator("#drawer .benefits")).to_have_count(0)        # a job that lists none has no empty line
+    page.keyboard.press("Escape")
+    page.get_by_role("button", name="导出表格").click()
+    lines = exported(page, app)[1]
+    head = lines[0].lstrip("\ufeff").split(",")
+    assert head[head.index('"经验"') + 1] == '"福利"'
+    cell = lambda title: next(line for line in lines[1:] if f'"{title}"' in line).split(",")[head.index('"福利"')]   # noqa: E731
+    assert (cell("牛客福利岗"), cell("牛客无福利岗")) == ('"五险一金、周末双休、餐补"', '""')
+
+
 def test_the_drawers_close_button_is_labelled_reachable_and_takes_the_focus(page, app):
     open_results(page)
     first = page.locator(JOBS).first.get_by_role("button")
@@ -1251,8 +1277,9 @@ def test_a_job_without_any_text_says_so(page, app):
 EVIL = {"id": 900, "title": '<img src=x onerror="window.__pwned=1">', "company": '"><script>window.__pwned=2</script>',
         "city": "<svg onload=window.__pwned=3>", "salary": "<b onmouseover=window.__pwned=4>1</b>",
         "jd": '<img src=x onerror="window.__pwned=5"><script>window.__pwned=6</script>危险<br>第二行',
-        "url": "javascript:window.__pwned=7"}
-FORMULA = {"id": 901, "title": '=HYPERLINK("http://evil.test","x")', "company": "+cmd", "city": "@x", "salary": "-1"}
+        "url": "javascript:window.__pwned=7", "benefits": ['<img src=x onerror="window.__pwned=10">', "<b onmouseover=window.__pwned=11>双休</b>"]}
+FORMULA = {"id": 901, "title": '=HYPERLINK("http://evil.test","x")', "company": "+cmd", "city": "@x", "salary": "-1",
+           "benefits": ["+SUM(1+1)"]}
 
 
 def test_job_text_never_becomes_markup_or_script(page, app, monkeypatch):
@@ -1273,7 +1300,9 @@ def test_job_text_never_becomes_markup_or_script(page, app, monkeypatch):
     evil.get_by_role("button").click()
     expect(page.locator("#drawer-text")).to_be_visible()
     assert page.locator("#drawer-text").inner_text() == "危险\n第二行"   # the tags are gone, the lines are kept
+    expect(page.locator("#drawer .benefits")).to_have_text('福利：<img src=x onerror="window.__pwned=10">、<b onmouseover=window.__pwned=11>双休</b>')
     page.locator("#drawer-text").hover()
+    page.locator("#drawer .benefits").hover()
     page.get_by_role("button", name="打开原页面").click()   # a javascript: link is refused by the bridge
     expect(page.locator("#toast")).to_have_text("只能打开网页链接")
     assert opened == []
@@ -1286,6 +1315,7 @@ def test_job_text_never_becomes_markup_or_script(page, app, monkeypatch):
     page.get_by_role("button", name="导出表格").click()
     csv = "\r\n".join(exported(page, app)[1])
     assert '"\'=HYPERLINK(""http://evil.test"",""x"")"' in csv and '"\'+cmd"' in csv and '"\'@x"' in csv
+    assert '"\'+SUM(1+1)"' in csv   # the welfare tags are a cell like any other
 
 
 def test_typed_keywords_are_text_too(page, app):

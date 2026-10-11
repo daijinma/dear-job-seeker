@@ -100,7 +100,7 @@ def test_zhaopin_job_id_detail_meta_row():
     assert m["published_at_kind"] == "refresh"
     assert z.meta({"number": "A"}, None)["published_at_kind"] == "unknown"
     assert z.row(JOB, d) == {"title": "算法工程师", "company": "甲公司", "city": "北京", "district": "海淀",
-                             "education": "本科", "experience": "3-5年", "salary_text": "20K-40K",
+                             "education": "本科", "experience": "3-5年", "benefits": [], "salary_text": "20K-40K",
                              "description": "写算法"}
     assert z.row(JOB, None)["description"] is None
 
@@ -111,6 +111,31 @@ def test_zhaopin_list_item_already_carries_the_jd():
     assert z.row({**JOB, "jobDetailData": EMBEDDED}, DETAIL)["description"] == "列表里就有的职位描述"   # list copy first
     empty = {"position": {"desc": {"description": ""}}}
     assert z.row({**JOB, "jobDetailData": empty}, DETAIL)["description"] == "写算法"   # the detail is the fallback
+
+
+def keywords(*values):
+    """`jobKeyword` as the list item carries it: the poster's welfare tags among empty placeholders."""
+    return {"keywords": [{"itemValue": v} for v in values]}
+
+
+def test_zhaopin_benefits_are_the_job_keywords_the_poster_picked():
+    z = Zhaopin()
+    item = {**JOB, "jobKeyword": keywords("", "", "五险一金", "", "周末双休", "节日慰问", "五险一金")}   # a real item's shape
+    assert z.row(item, None)["benefits"] == ["五险一金", "周末双休", "节日慰问", "五险一金"]
+    assert derive(z, item, None)["benefits"] == "五险一金、周末双休、节日慰问"        # each once, in the site's order
+    assert derive(z, {**JOB, "jobKeyword": keywords("", "")}, None)["benefits"] is None
+    for odd in (None, {}, {"keywords": None}, {"keywords": "五险一金"}, {"keywords": [None, 3, {"x": 1}]}, "x"):
+        assert z.row({**JOB, "jobKeyword": odd}, None)["benefits"] == []   # whatever else a site sends is no tag
+
+
+def test_zhaopin_benefits_take_the_fuller_of_the_items_and_the_details_keywords():
+    z = Zhaopin()
+    in_detail = lambda *values: {"position": {"other": {"jobKeyword": keywords(*values)}}}   # noqa: E731
+    item = {**JOB, "jobKeyword": keywords("五险一金", "")}
+    assert z.row(item, in_detail("", "五险一金", "周末双休"))["benefits"] == ["五险一金", "周末双休"]   # the detail names more
+    assert z.row(item, in_detail("社保"))["benefits"] == ["五险一金"]                                  # the item names more
+    assert z.row(JOB, in_detail("社保公积金"))["benefits"] == ["社保公积金"]                             # only the detail names any
+    assert z.row(item, DETAIL)["benefits"] == ["五险一金"]                                             # a detail without the field
 
 
 def test_zhaopin_rows_from_cgate_are_complete():

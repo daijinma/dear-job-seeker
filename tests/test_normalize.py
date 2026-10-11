@@ -1,7 +1,8 @@
-"""djs.normalize: salary text and figures, plain-text JD, the list of missing core elements. Pure functions, no I/O."""
+"""djs.normalize: salary text and figures, plain-text JD, welfare tags, the list of missing core elements. Pure functions,
+no I/O."""
 import pytest
 
-from djs.normalize import CORE, UNITS, fingerprint, missing, monthly, parse_salary, plain_text, salary_range
+from djs.normalize import CORE, UNITS, benefits, fingerprint, missing, monthly, parse_salary, plain_text, salary_range
 
 M, D, H, Y = UNITS   # 元/月 元/天 元/时 元/年
 
@@ -212,3 +213,23 @@ def test_no_fingerprint_unless_company_title_and_city_are_all_known(company, tit
 
 def test_the_fingerprint_reads_like_its_parts():
     assert fp("杭州某某科技有限公司", "【14-16薪】Python 后端开发工程师", "杭州市") == "杭州某某|python后端开发工程师|杭州"
+
+
+# ---- the welfare tags
+@pytest.mark.parametrize("tags, want", [
+    (["五险一金", "周末双休"], "五险一金、周末双休"),                   # the site's order
+    (["五险一金", "双休", "五险一金", "双休", "餐补"], "五险一金、双休、餐补"),   # each once
+    ([" 五险一金 ", "\u3000双休\n", "", "  ", None, 3, ["x"], {"a": 1}], "五险一金、双休"),   # blanks and what is no tag
+    (("包吃", "包住"), "包吃、包住"),
+    (["六险一金"], "六险一金"),
+    ("五险一金", "五险一金"),                                           # one name given as a text
+    ([], None), (None, None), ("", None), ("  ", None), ([None, ""], None),
+    (3, None), ({"五险一金": 1}, None), (b"x", None),                   # nothing readable: none, never an error
+])
+def test_benefits_joins_the_tags_each_once_in_the_sites_order(tags, want):
+    assert benefits(tags) == want
+
+
+def test_benefits_is_no_core_element():
+    assert "benefits" not in CORE
+    assert missing({"title": "t", "company": "c", "city": "x", "salary_min": 1, "salary_max": 2, "description": "d"}) == []

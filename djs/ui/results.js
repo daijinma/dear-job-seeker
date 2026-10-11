@@ -7,7 +7,7 @@ const PAGE = 30;
 const REASONS_SHOWN = 3;
 const SORT_OPTIONS = [["mixed", "综合"], ["salary", "薪资从高到低"], ["company", "公司"]];
 const SALARY_OPTIONS = [[0, "不限"], [5000, "5千+"], [10000, "1万+"], [15000, "1.5万+"], [20000, "2万+"], [30000, "3万+"]];   // yuan per month, at least
-const CSV_HEAD = ["岗位", "公司", "薪资", "城市", "网站", "链接", "区", "学历", "经验", "最低薪资", "最高薪资", "薪资单位", "发薪月数", "缺少的信息"];
+const CSV_HEAD = ["岗位", "公司", "薪资", "城市", "网站", "链接", "区", "学历", "经验", "福利", "最低薪资", "最高薪资", "薪资单位", "发薪月数", "缺少的信息"];
 let R = null;   // the open results page: { search, searches, provider, sort, minSalary, showIncomplete, jobs, total, all, merged, perSite, incomplete, searching, state, error, desc, open }
 
 const sameSearch = (a, b) => a.keyword === b.keyword && (a.city || "") === (b.city || "");
@@ -34,6 +34,7 @@ function salaryLabel(j) {
 
 const jobPay = (j, cls = "") => (salaryLabel(j) ? `<div class="salary ${cls}">${esc(salaryLabel(j))}</div>` : '<div class="salary none">薪资未公开</div>');
 const jobMissing = (j) => (j.complete ? "" : `<p class="miss">信息不全：${esc(j.incomplete_reason)}</p>`);
+const jobBenefits = (j) => (j.benefits ? `<p class="sub benefits">福利：${esc(j.benefits)}</p>` : "");   // the site's welfare tags, "、"-joined
 const alsoBadge = (j) => (j.also_on.length ? pill(`也在 ${j.also_on.map((o) => o.label).join("、")}`, "gray") : "");
 const jobTags = (j) => `<div class="tags">${j.city ? pill(j.city, "gray") : ""}${pill(j.label)}${alsoBadge(j)}<span class="when">${since(j.first_seen_at)}发现</span></div>`;
 
@@ -229,7 +230,7 @@ function drawerHtml(j) {
   return `<aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
     <div class="drawer-head"><button type="button" class="btn line sm" data-close data-autofocus ${act("close-drawer")}>${icon("x", 14)}关闭</button></div>
     <div class="drawer-body"><h2 id="drawer-title">${jobTitle(j)}</h2><p class="sub">${jobCompany(j)}</p>
-      ${jobPay(j, "big")}${jobMissing(j)}${jobTags(j)}${alsoList(j)}<h3 class="label">岗位介绍</h3>
+      ${jobPay(j, "big")}${jobMissing(j)}${jobBenefits(j)}${jobTags(j)}${alsoList(j)}<h3 class="label">岗位介绍</h3>
       <div id="drawer-status"></div><div id="drawer-text" class="prose" hidden></div></div>
     <div class="drawer-foot">${open}</div></aside>`;
 }
@@ -266,7 +267,7 @@ async function allJobs() {
 
 const csvCell = (v) => `"${String(v ?? "").replace(/^[=+\-@\t\r]/, "'$&").replace(/"/g, '""')}"`;   // a leading = + - @ would run as a formula in a spreadsheet
 const csvRow = (j) => [j.title, j.company, salaryLabel(j), j.city, j.label, j.source_url, j.district, j.education, j.experience,
-  j.salary_min, j.salary_max, j.salary_unit, j.salary_months, j.incomplete_reason];
+  j.benefits, j.salary_min, j.salary_max, j.salary_unit, j.salary_months, j.incomplete_reason];
 const csvText = (rows) => "\ufeff" + [CSV_HEAD, ...rows.map(csvRow)].map((r) => r.map(csvCell).join(",")).join("\r\n");
 
 /* Python writes the file into the Downloads folder (no save dialog) and says where; the toast offers to show it there */

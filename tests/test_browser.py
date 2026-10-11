@@ -303,7 +303,7 @@ def test_old_provider_settings_table_gains_the_transport_column(home):
     assert pacer.effective(conn, "nowcoder") == (1.5, 0.2, 4)  # the user's old override survived
     assert pacer.transport(conn, "nowcoder") == "http"
     assert [r["name"] for r in conn.execute("PRAGMA table_info(provider_settings)")][-1] == "transport"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_adding_a_column_survives_a_concurrent_migrator(home):
@@ -718,6 +718,14 @@ def users_chrome(exe: str, tmp_path):
         proc.wait(10)
 
 
+def tabs_soon(base, want, seconds=3.0):
+    """The tabs once they are `want`, or as they are after `seconds`: a closed tab leaves the list a moment later."""
+    deadline = time.monotonic() + seconds
+    while (now := tabs(base)) != want and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return now
+
+
 def test_cdp_opens_one_tab_of_the_users_browser_and_leaves_everything_else_alone(home, chromium, monkeypatch):
     from playwright.sync_api import sync_playwright
     if not os.path.exists(chromium):
@@ -734,7 +742,7 @@ def test_cdp_opens_one_tab_of_the_users_browser_and_leaves_everything_else_alone
             assert len(during) == 3 and set(before) < set(during)  # exactly one new tab, the user's two untouched
             with browser.profile_lock("probe", wait=0):  # an attached browser has no profile of ours to lock
                 pass
-        assert tabs(base) == before and proc.poll() is None  # our tab is gone, the browser still runs
+        assert tabs_soon(base, before) == before and proc.poll() is None  # our tab is gone, the browser still runs
 
         with sync_playwright() as pw:  # the user logs in to Boss in their own browser
             attached = pw.chromium.connect_over_cdp(base)

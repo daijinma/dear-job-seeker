@@ -16,7 +16,7 @@ equivalent, lower bound +1) is not used: `salary60` is the advertised figure and
 from __future__ import annotations
 
 from ._browser import XHR_ACCEPT, is_browser
-from .base import Blocked, Login, LoginRequired, Provider, StructureError, get_json, need
+from .base import Blocked, Login, LoginRequired, Provider, StructureError, get_json, need, tag_names
 
 HOME = "https://www.zhaopin.com/"
 PC_URL = "https://fe-api.zhaopin.com/c/i/search/positions"
@@ -116,11 +116,23 @@ class Zhaopin(Provider):
         return {"title": job.get("name"), "company": job.get("companyName"),
                 "city": job.get("workCity"), "district": job.get("cityDistrict"),
                 "education": job.get("education"), "experience": job.get("workingExp"),
-                "salary_text": job.get("salary60"),
+                "benefits": _welfare(job, detail), "salary_text": job.get("salary60"),
                 "description": _jd(job.get("jobDetailData")) or _jd(detail)}
 
     def probe_payload(self) -> dict:
         return {"keyword": "算法工程师"}
+
+
+def _keywords(job_keyword) -> list[str]:
+    return tag_names(job_keyword.get("keywords") if isinstance(job_keyword, dict) else None, "itemValue")
+
+
+def _welfare(job: dict, detail: dict | None) -> list[str]:
+    """The welfare tags the poster picked: `jobKeyword.keywords[].itemValue` of the list item, or of the detail when
+    that names more (empty placeholders are skipped). `welfareLabel` and `welfareTags` exist too but were empty in
+    every real item seen."""
+    in_detail = (((detail or {}).get("position") or {}).get("other") or {}).get("jobKeyword")
+    return max(_keywords(job.get("jobKeyword")), _keywords(in_detail), key=len)
 
 
 def _jd(module: dict | None) -> str | None:

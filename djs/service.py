@@ -13,15 +13,15 @@ from djs import auth, browser, db, egress, engine, jobs, pacer, providers, query
 from djs.normalize import CORE
 from djs.providers.base import Blocked, FetchError, LoginRequired
 
-JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, district, education, experience, "
+JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, district, education, experience, benefits, "
             "salary_text, salary_min, salary_max, salary_unit, salary_months, salary_month_min, salary_month_max, "
             "description, source_url, published_at, published_at_kind, missing, complete, detail_error, "
             "first_seen_at, last_seen_at")
 # What jobs_get returns per job (fields 'summary'): short enough that a few dozen fit in a client's context. 'full'
-# swaps the description_snippet for the whole description.
+# swaps the description_snippet for the whole description. job_detail returns the 'full' shape.
 SUMMARY = ("id", "provider", "label", "title", "company", "city", "district", "salary_text", "salary_month_min",
-           "salary_month_max", "salary_unit", "salary_months", "education", "experience", "source_url", "missing",
-           "also_on")
+           "salary_month_max", "salary_unit", "salary_months", "education", "experience", "benefits", "source_url",
+           "missing", "also_on")
 SNIPPET = 120
 MAX_LIMIT = 100
 
@@ -246,21 +246,24 @@ def _tasks_of(conn, keyword: str, city: str) -> list[dict]:
 
 
 def jobs_get(conn, keyword=None, city=None, task_id=None, provider=None, min_month_salary=None, max_month_salary=None,
-             title=None, text=None, complete_only=True, dedupe=True, fields="summary", limit=20, offset=0) -> dict:
+             floor_month_salary=None, title=None, text=None, complete_only=True, dedupe=True, fields="summary",
+             limit=20, offset=0) -> dict:
     """One page of stored jobs, as {jobs, total, returned, next_offset} (next_offset None on the last page). Where from:
     the search (keyword and city as given to `search`), a task and/or a platform; none = every stored job. Filters: the
-    job's city, the pay per month overlapping min_month_salary..max_month_salary, `title` (every word in the job title:
-    the role, e.g. "Python 后端"), `text` (every word in the title or the description: skills that may sit anywhere,
-    e.g. "Django"). By default only complete jobs, each job once (`also_on` lists the other platforms that carry it).
-    With a search, `searching` says whether its tasks still run."""
+    job's city; the pay per month (yuan): `floor_month_salary` = the job's LOWEST pay is at least this (8000 keeps
+    8k-12k, drops 6k-9k), `min_month_salary` = its range REACHES this (8000 keeps 6k-9k too), `max_month_salary` = its
+    range starts at or below this; `title` (every word in the job title: the role, e.g. "会计"), `text` (every word in
+    the title, the description or the welfare tags: conditions and skills that may sit anywhere, e.g. "双休",
+    "Django"). By default only complete jobs, each job once (`also_on` lists the other platforms that carry it). With a
+    search, `searching` says whether its tasks still run."""
     if fields not in ("summary", "full"):
         raise ValueError(f"fields must be 'summary' or 'full', not {fields!r}")
     keyword, city = search_key(keyword, city)
     tasks = _tasks_of(conn, keyword, city) if keyword else None
     limit, offset = max(1, min(int(limit), MAX_LIMIT)), max(0, int(offset))
     wh = query.where(search=(keyword, city) if keyword else None, task_id=task_id, provider=provider, city=city,
-                     min_month_salary=min_month_salary, max_month_salary=max_month_salary, title=title, text=text,
-                     complete_only=complete_only)
+                     min_month_salary=min_month_salary, max_month_salary=max_month_salary,
+                     floor_month_salary=floor_month_salary, title=title, text=text, complete_only=complete_only)
     rows, total = query.find(conn, wh, sort="newest", limit=limit, offset=offset, dedupe=dedupe, description=True)
     for job in rows:
         job["missing"], job["label"] = jobs.gaps(job["missing"]), providers.label(job["provider"])
@@ -288,9 +291,9 @@ def _friendly(prov, exc: Exception) -> str:
     return f"{label}: could not load the detail ({type(exc).__name__}: {exc})"
 
 
-def job_detail(conn, job_id: int) -> dict:
-    """The stored job with its full detail. Fetched from the platform once (same egress and pacing as a crawl), the
-    columns derived from it again, then served from the database."""
+def _with_detail(conn, job_id: int) -> dict:
+    """The stored job (every column, `detail` parsed) once its detail is fetched from the platform (same egress and
+    pacing as a crawl; the columns are derived from it again, then it is served from the database)."""
     job = _job(conn, job_id)
     if job["detail"] is not None:
         return job
@@ -309,6 +312,16 @@ def job_detail(conn, job_id: int) -> dict:
         raise ValueError(_friendly(prov, e)) from e
     jobs.update(conn, job_id, prov, item, detail)
     return _job(conn, job_id)
+
+
+def job_detail(conn, job_id: int, raw: bool = False) -> dict:
+    """One stored job as jobs_get returns it with fields='full': the clean fields, the whole description, the welfare
+    tags, what is `missing` and why, and `also_on`. Not the platform's own JSON, which `raw` adds as `detail`. The
+    platform is asked for the detail once; after that the job is served from the database."""
+    job = _with_detail(conn, job_id)
+    job["label"], job["also_on"] = providers.label(job["provider"]), query.also_on(conn, job_id)
+    out = _shaped(job, "full")
+    return {**out, "detail": job["detail"]} if raw else out
 
 
 def _search_status(statuses: set[str]) -> str:

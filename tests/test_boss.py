@@ -237,8 +237,19 @@ def test_meta_and_row():
     assert m["published_at"] is None and m["published_at_kind"] == "unknown"
     assert b.row(job, fixture("boss_detail.json")["zpData"]) == {
         "title": "Python Engineer", "company": "Example Co", "city": "北京", "district": "海淀区",
-        "education": "本科", "experience": "3-5年", "salary_text": "20-30K", "description": "Synthetic JD text."}
+        "education": "本科", "experience": "3-5年", "benefits": [], "salary_text": "20-30K",
+        "description": "Synthetic JD text."}
     assert b.row(job, None)["description"] is None
+
+
+def test_benefits_are_the_welfare_list_of_the_item():
+    job = fixture("boss_list.json")["zpData"]["jobList"][0]
+    welfare = ["五险一金", "节日福利", "带薪年假", "五险一金", "", "年终奖"]   # a real item's list; blanks and repeats are the site's
+    assert Boss().row({**job, "welfareList": welfare}, None)["benefits"] == ["五险一金", "节日福利", "带薪年假", "五险一金", "年终奖"]
+    assert derive(Boss(), {**job, "welfareList": welfare}, None)["benefits"] == "五险一金、节日福利、带薪年假、年终奖"
+    for none in ([], None, "", 3, {"x": 1}):   # Boss sends [] for a job that lists none
+        assert Boss().row({**job, "welfareList": none}, None)["benefits"] == []
+        assert derive(Boss(), {**job, "welfareList": none}, None)["benefits"] is None
 
 
 def test_salary_is_empty_until_logged_in_and_the_detail_may_fill_it():

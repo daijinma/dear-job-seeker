@@ -245,7 +245,8 @@ def test_sort_company_groups_by_company_and_puts_unknown_last(conn, seeded):
 def test_job_rows_carry_the_figures_the_page_shows_but_not_the_description_text(conn):
     t = task(conn, "nowcoder", "py")
     job(conn, "nowcoder", "x", [t], description="很长的岗位介绍", salary_text="20-30K", city="杭州", district="西湖区",
-        education="本科", experience="3-5年", salary_min=20000, salary_max=30000, salary_unit="元/月", salary_months=14)
+        education="本科", experience="3-5年", benefits="五险一金、双休", salary_min=20000, salary_max=30000, salary_unit="元/月",
+        salary_months=14)
     job(conn, "nowcoder", "y", [t], description="", seen=2000)
     job(conn, "gone", "z", [t], seen=3000)   # a platform that no longer exists
     rows = results.search_jobs(conn, "py", None)["jobs"]
@@ -254,10 +255,12 @@ def test_job_rows_carry_the_figures_the_page_shows_but_not_the_description_text(
     assert all("description" not in j for j in rows)
     assert (by_title["x"]["label"], by_title["z"]["label"]) == ("牛客网", "gone")
     assert set(by_title["x"]) == {"id", "provider", "label", "title", "company", "city", "district", "education", "experience",
-                                  "salary_text", "salary_min", "salary_max", "salary_unit", "salary_months", "salary_month_min",
+                                  "benefits", "salary_text", "salary_min", "salary_max", "salary_unit", "salary_months",
+                                  "salary_month_min",
                                   "salary_month_max", "source_url", "published_at", "first_seen_at", "has_description", "missing",
                                   "complete", "incomplete_reason", "also_on"}
     assert (by_title["x"]["salary_min"], by_title["x"]["salary_unit"], by_title["x"]["salary_months"]) == (20000, "元/月", 14)
+    assert (by_title["x"]["benefits"], by_title["y"]["benefits"]) == ("五险一金、双休", None)   # the drawer and the table read them here
 
 
 def test_searching_follows_the_status_of_any_task_of_the_search(conn):

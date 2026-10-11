@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 from ._browser import XHR_ACCEPT, api_get, fresh_visit, is_browser
-from .base import Blocked, Login, LoginRequired, Provider, get_json, need
+from .base import Blocked, Login, LoginRequired, Provider, get_json, need, tag_names
 
 BASE = "https://www.zhipin.com"
 SEARCH_URL = BASE + "/wapi/zpgeek/search/joblist.json"
@@ -129,6 +129,7 @@ class Boss(Provider):
                 "city": job.get("cityName") or info.get("locationName"), "district": job.get("areaDistrict"),
                 "education": job.get("jobDegree") or info.get("degreeName"),
                 "experience": job.get("jobExperience") or info.get("experienceName"),
+                "benefits": tag_names(job.get("welfareList")),
                 "salary_text": _salary(info.get("salaryDesc"), job.get("salaryDesc")),
                 "description": info.get("postDescription")}
 

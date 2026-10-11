@@ -387,9 +387,11 @@ def test_job_detail_on_demand_then_cached(env):
     env.conn.execute("UPDATE jobs SET city='Hangzhou' WHERE id=?", (job_id,))  # the detail knows no city: keep ours
     got = service.job_detail(env.conn, job_id)
     assert got["description"] == "jd1" and got["salary_text"] == "20-30K" and got["city"] == "Hangzhou"
-    assert got["detail"] == {"jd": "jd1"} and got["detail_error"] is None and asked == [1]
+    assert "detail" not in got and asked == [1]   # the platform's own JSON is not part of the answer ...
     env.mp.setattr(egress, "lease", boom(AssertionError("a stored detail must not touch the network")))
     assert service.job_detail(env.conn, job_id) == got and asked == [1]
+    assert service.job_detail(env.conn, job_id, raw=True) == {**got, "detail": {"jd": "jd1"}}   # ... unless asked for
+    assert stored_jobs(env.conn, with_detail=True)[0]["detail"] == {"jd": "jd1"}
 
 
 def test_job_detail_failures_are_friendly_and_store_nothing(env):

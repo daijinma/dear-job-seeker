@@ -56,6 +56,32 @@ def test_both_bounds_ask_for_a_range_that_overlaps_the_jobs_range(conn, paid):
     assert titles(where(min_month_salary=9000, max_month_salary=9500), conn) == ["month8_12"]
 
 
+def pay_range(conn):
+    """The 'at least 8000 a month' case: three jobs that differ only in how their pay range sits around 8000."""
+    t = task(conn, "nowcoder", "会计", "宁波")
+    for sid, (lo, hi) in {"6k-9k": (6000, 9000), "8k-12k": (8000, 12000), "9k-15k": (9000, 15000), "3k-5k": (3000, 5000)}.items():
+        job(conn, "nowcoder", sid, [t], title=sid, salary_min=lo, salary_max=hi, salary_unit="元/月")
+    job(conn, "nowcoder", "none", [t], title="none", complete=0, missing="salary")
+
+
+def test_a_floor_keeps_the_jobs_whose_lowest_pay_is_at_least_it_and_a_minimum_the_jobs_whose_range_reaches_it(conn):
+    pay_range(conn)
+    ask = lambda **kw: sorted(titles(where(**kw), conn))   # noqa: E731
+    assert ask(floor_month_salary=8000) == ["8k-12k", "9k-15k"]                    # "8000 以上": 6k-9k starts below it
+    assert ask(min_month_salary=8000) == ["6k-9k", "8k-12k", "9k-15k"]             # 6k-9k reaches 8000: it is in
+    assert ask(floor_month_salary=8001) == ["9k-15k"] and ask(floor_month_salary=9000) == ["9k-15k"]   # at least: 9000 itself counts
+    assert ask(floor_month_salary=9001) == [] and ask(floor_month_salary=0) == ["3k-5k", "6k-9k", "8k-12k", "9k-15k"]
+    assert ask(floor_month_salary=3000, max_month_salary=8000) == ["3k-5k", "6k-9k", "8k-12k"]   # a floor and a ceiling on the start
+    assert ask(floor_month_salary=6000, min_month_salary=12500) == ["9k-15k"]                   # the two stack
+    assert "none" not in titles(where(floor_month_salary=0, complete_only=False), conn)         # a salary filter needs a salary
+
+
+def test_a_floor_works_on_the_pay_per_month_whatever_the_unit(conn, paid):
+    assert sorted(titles(where(floor_month_salary=13050), conn)) == ["day600_800", "hour80_100", "month15_25", "year240_360"]
+    assert sorted(titles(where(floor_month_salary=13051), conn)) == ["hour80_100", "month15_25", "year240_360"]   # a day is 21.75 days
+    assert sorted(titles(where(floor_month_salary=15000), conn)) == ["month15_25", "year240_360"]
+
+
 def test_a_job_without_a_salary_matches_no_salary_filter_but_is_listed_without_one(conn, paid):
     assert "none" not in titles(where(min_month_salary=0, complete_only=False), conn)
     assert "none" in titles(where(complete_only=False), conn)
@@ -78,6 +104,22 @@ def test_text_needs_every_word_in_the_title_or_the_description_in_any_case(conn)
     assert got("") == got(None) == ["Java 后端", "Python 后端工程师", "Python 数据", "产品经理"]
     with pytest.raises(ValueError, match="at most"):
         where(text=" ".join("w" * 11))
+
+
+def test_text_also_reads_the_welfare_tags_and_title_does_not(conn):
+    t = task(conn, "job51", "会计", "宁波")
+    job(conn, "job51", "a", [t], title="会计", description="负责做账", benefits="五险一金、双休、餐饮补贴")        # 双休 only in its tags
+    job(conn, "job51", "b", [t], title="会计助理", description="每周双休，做账", benefits=None)                  # in the text only
+    job(conn, "job51", "c", [t], title="会计主管", description="管理团队", benefits="五险一金、Python培训")
+    job(conn, "job51", "d", [t], title="出纳", description=None, benefits=None)
+    got = lambda **kw: sorted(titles(where(**kw), conn))   # noqa: E731
+    assert got(text="双休") == ["会计", "会计助理"]                       # the tags are searched next to title and description
+    assert got(text="五险一金 双休") == ["会计"]                           # every word, each in whichever of the three it sits
+    assert got(text="做账 餐饮补贴") == ["会计"]                           # a word in the description and one in the tags
+    assert got(text="PYTHON培训") == ["会计主管"] and got(text="python") == ["会计主管"]   # any case
+    assert got(title="双休") == [] and got(title="会计", text="双休") == ["会计", "会计助理"]   # the role is searched in the title alone
+    assert got(text="%") == [] and got(text="_") == []                    # wildcards are only themselves
+    assert got(text="") == got(text=None) == sorted(["出纳", "会计", "会计助理", "会计主管"])
 
 
 def test_title_needs_every_word_in_the_title_alone_in_any_case(conn):
@@ -130,6 +172,22 @@ def test_complete_only_is_the_default_and_the_filters_stack(conn):
     assert titles(where(), conn) == ["ok"]
     assert sorted(titles(where(complete_only=False), conn)) == ["bad", "ok"]
     assert titles(where(city="杭州", min_month_salary=1, text="django", provider="nowcoder", task_id=t), conn) == ["ok"]
+
+
+# ---- the same job on the other platforms, for one job
+def test_also_on_names_the_best_record_of_each_other_platform_and_nothing_without_a_fingerprint(conn):
+    t = task(conn, "nowcoder", "py", "杭州")
+    mine = posting(conn, t, "nowcoder", "n1", 100)
+    thin = posting(conn, t, "chinahr", "c1", 300)
+    rich = posting(conn, t, "chinahr", "c2", 100, district="西湖区", education="本科")      # chinahr's better record of the job
+    unfinished = posting(conn, t, "iguopin", "g1", 900, complete=0, missing="salary", district="x", education="y")
+    elsewhere = posting(conn, t, "zhaopin", "z1", 100, title="Other job")
+    nameless = job(conn, "nowcoder", "n2", [t], title="same", company=None, city="杭州")
+    job(conn, "chinahr", "c3", [t], title="same", company=None, city="杭州")
+    assert [(o["provider"], o["label"], o["id"], o["source_url"]) for o in query.also_on(conn, mine)] == [
+        ("chinahr", "新华英才", rich, "https://x.test/c2"), ("iguopin", "国聘", unfinished, "https://x.test/g1")]
+    assert thin and elsewhere and [o["provider"] for o in query.also_on(conn, rich)] == ["nowcoder", "iguopin"]
+    assert query.also_on(conn, nameless) == [] and query.also_on(conn, 999) == []     # no fingerprint: never matched on a guess
 
 
 # ---- each job once

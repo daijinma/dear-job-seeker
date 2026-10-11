@@ -18,7 +18,8 @@ from provider_fakes import job, task
 ITEMS = {  # what each fake platform lists for the keyword "py"
     "a": [{"id": 1, "title": "Python 后端", "company": "甲科技有限公司", "pay": "15-25K·14薪", "jd": "使用 Django 开发"},
           {"id": 2, "title": "Java 开发", "company": "乙公司", "pay": "8-12K", "jd": "使用 Spring"}],
-    "opt": [{"id": 51, "title": "【急聘】python后端", "company": "甲科技（杭州）有限公司", "pay": "15-25K", "jd": "Django 和 Redis"}],
+    "opt": [{"id": 51, "title": "【急聘】python后端", "company": "甲科技（杭州）有限公司", "pay": "15-25K", "jd": "Django 和 Redis",
+             "tags": ["五险一金", "双休"]}],   # the double rest day is in the welfare tags only
     "city": [{"id": 71, "title": "Go 开发", "company": "丙公司", "pay": "20-30K", "jd": "微服务"}],
 }
 
@@ -35,7 +36,7 @@ class Site(Provider):
 
     def row(self, job, detail):
         return {"title": job["title"], "company": job["company"], "city": "杭州", "salary_text": job["pay"],
-                "description": job["jd"]}
+                "benefits": job.get("tags"), "description": job["jd"]}
 
     def meta(self, job, detail):
         return {"source_url": f"https://{self.name}.test/job/{job['id']}", "apply_url": None, "published_at": None,
@@ -321,6 +322,24 @@ def test_search_wait_and_read_end_to_end(env):
     assert detail["description"] and detail["salary_month_min"] == 15000
 
 
+def test_a_condition_that_only_the_welfare_tags_state_is_found_by_text_and_shown_in_every_view(env):
+    engine.start_worker()
+    call("search", keyword="py", city="杭州")
+    assert call("wait_for_search", keyword="py", city="杭州", timeout=30)["status"] == "done"
+    got = call("jobs_get", keyword="py", city="杭州", text="双休")
+    [one] = got["jobs"]
+    assert (got["total"], one["provider"], one["benefits"]) == (1, "opt", "五险一金、双休")
+    assert "双休" not in one["title"] + one["description_snippet"]                  # it is in the tags and nowhere else
+    assert call("jobs_get", keyword="py", city="杭州", text="双休", fields="full")["jobs"][0]["benefits"] == "五险一金、双休"
+    assert call("jobs_get", keyword="py", city="杭州", title="双休")["jobs"] == []   # a title is not searched in the tags
+    assert call("jobs_get", keyword="py", city="杭州", text="django 双休")["total"] == 1   # tags and description together
+    assert call("jobs_get", keyword="py", city="杭州", text="五险")["total"] == 1
+    others = call("jobs_get", keyword="py", city="杭州", complete_only=False, limit=100)["jobs"]
+    assert [j["benefits"] for j in others if j["title"] in ("Java 开发", "Go 开发")] == [None, None]   # none stated: NULL
+    detail = call("job_detail", job_id=one["id"])
+    assert detail["benefits"] == "五险一金、双休" and [o["provider"] for o in detail["also_on"]] == ["a"]
+
+
 # ---- jobs_get
 @pytest.fixture
 def stocked(env):
@@ -344,8 +363,8 @@ def test_jobs_get_returns_short_summaries_and_one_row_per_job(stocked):
     assert (got["total"], got["returned"], got["next_offset"], got["searching"]) == (9, 9, None, False)   # 10 complete records, one pair merged
     row = next(j for j in got["jobs"] if j["title"] == "python工程师")   # the record with more columns filled stands for the pair
     assert set(row) == {"id", "provider", "label", "title", "company", "city", "district", "salary_text", "salary_month_min",
-                        "salary_month_max", "salary_unit", "salary_months", "education", "experience", "source_url",
-                        "missing", "also_on", "description_snippet"}
+                        "salary_month_max", "salary_unit", "salary_months", "education", "experience", "benefits",
+                        "source_url", "missing", "also_on", "description_snippet"}
     assert (row["label"], row["district"], row["salary_unit"]) == ("甲站", "西湖区", "元/天")
     assert (row["salary_month_min"], row["salary_month_max"]) == (6525, 8700)   # a day is 21.75 working days
     assert [(o["provider"], o["label"]) for o in row["also_on"]] == [("b", "乙站")] and row["also_on"][0]["source_url"]
@@ -370,6 +389,35 @@ def test_the_default_summary_is_much_smaller_than_the_full_text(stocked):
     assert summary * 3 < full   # the point of the summary: a few dozen jobs fit in a client's context
 
 
+PLATFORM_JSON = {"jobInfo": {"share": {"url": "https://share.test/x?t=abc"}, "hr": {"name": "招聘者", "avatar": "https://img.test/a.png"},
+                             "trace": ["x" * 200] * 20}}   # what a platform's detail response carries besides the job
+
+
+def test_job_detail_is_the_jobs_get_full_row_and_the_platforms_json_only_on_request(stocked, env):
+    full = {j["title"]: j for j in call("jobs_get", keyword="py", city="杭州", complete_only=False, fields="full", limit=100)["jobs"]}
+    env.conn.execute("UPDATE jobs SET detail=?", (json.dumps(PLATFORM_JSON, ensure_ascii=False),))
+    for title in ("python工程师", "工程师 3", "缺薪资"):   # a job merged with another site's, a plain one, an incomplete one
+        row = full[title]
+        assert call("job_detail", job_id=row["id"]) == row                  # exactly what jobs_get returns with fields='full'
+        assert {"description", "benefits", "missing", "also_on"} <= set(row)
+    assert full["缺薪资"]["incomplete_reason"] == "面议" and "incomplete_reason" not in full["工程师 3"]
+    job_id = full["python工程师"]["id"]
+    clean, raw = call("job_detail", job_id=job_id), call("job_detail", job_id=job_id, raw=True)
+    assert "detail" not in clean and "https://share.test" not in json.dumps(clean) and "招聘者" not in json.dumps(clean)
+    assert raw == {**clean, "detail": PLATFORM_JSON}                         # raw adds the platform's JSON, as `detail`, and nothing else
+    assert len(json.dumps(raw, ensure_ascii=False)) > 3 * len(json.dumps(clean, ensure_ascii=False))
+    assert [(o["provider"], o["label"]) for o in clean["also_on"]] == [("b", "乙站")] and clean["also_on"][0]["source_url"]
+
+
+def test_job_detail_carries_the_welfare_tags_and_the_whole_description(env):
+    t = task(env.conn, "a", "py")
+    pk = job(env.conn, "a", "x", [t], title="会计", company="甲", city="宁波", description="第一行\n第二行", benefits="五险一金、双休")
+    got = call("job_detail", job_id=pk)
+    assert (got["benefits"], got["description"], got["missing"], got["also_on"]) == ("五险一金、双休", "第一行\n第二行", [], [])
+    none = call("job_detail", job_id=job(env.conn, "a", "y", [t], title="出纳", company="乙", city="宁波"))
+    assert none["benefits"] is None and "detail" not in none
+
+
 def test_jobs_get_pages_with_limit_and_next_offset(stocked):
     seen, offset = [], 0
     while offset is not None:
@@ -387,6 +435,9 @@ def test_jobs_get_pages_with_limit_and_next_offset(stocked):
 def test_jobs_get_filters_by_pay_text_city_platform_and_task(stocked):
     titles = lambda **kw: sorted(j["title"] for j in call("jobs_get", limit=100, **kw)["jobs"])   # noqa: E731
     assert titles(keyword="py", city="杭州", min_month_salary=16000) == [f"工程师 {i}" for i in range(1, 8)]   # 11-16K and up
+    assert titles(keyword="py", city="杭州", floor_month_salary=16000) == ["工程师 6", "工程师 7"]   # the LOWEST pay is 16K or more
+    assert titles(keyword="py", city="杭州", floor_month_salary=7000) == [f"工程师 {i}" for i in range(8)]   # not the 6525-8700 job
+    assert titles(keyword="py", city="杭州", floor_month_salary=6525, max_month_salary=7000) == ["python工程师"]   # 6525 itself counts
     assert titles(keyword="py", city="杭州", max_month_salary=7000) == ["python工程师"]   # 6525 a month
     assert titles(keyword="py", city="杭州", min_month_salary=8000, max_month_salary=10500) == ["python工程师", "工程师 0"]
     assert titles(keyword="py", city="杭州", text="django 后端") == ["工程师 1", "工程师 3", "工程师 5", "工程师 7"]
@@ -443,7 +494,8 @@ def test_the_server_teaches_the_recommended_flow():
     for word in ("no_results", "waiting_login", "salary_month_min", "min_month_salary", "next_offset"):
         assert word in text
     assert "call status first" in text   # and where to look when it does not go as described
-    assert 'title="Python 后端"' in text and 'text="Django"' in text   # the role goes in the title, a skill in the text
+    assert 'title="会计"' in text and 'text="双休"' in text            # the role goes in the title, a condition in the text
+    assert "floor_month_salary=8000" in text and "benefits" in text    # a hard pay floor has its own filter; the tags are searched
 
 
 def test_the_new_and_changed_tools_come_with_an_example_each():
@@ -453,8 +505,21 @@ def test_the_new_and_changed_tools_come_with_an_example_each():
     props = tools["jobs_get"].inputSchema["properties"]
     assert (props["limit"]["default"], props["fields"]["default"], props["dedupe"]["default"],
             props["complete_only"]["default"]) == (20, "summary", True, True)
+    assert {"integer", "null"} == {opt["type"] for opt in props["floor_month_salary"]["anyOf"]} and props["floor_month_salary"]["default"] is None
+    assert tools["job_detail"].inputSchema["properties"]["raw"]["default"] is False
+    assert tools["job_detail"].inputSchema["required"] == ["job_id"]
     assert tools["search"].inputSchema["required"] == ["keyword"] and tools["search"].inputSchema["properties"]["max_pages"]["default"] == 1
     assert tools["wait_for_search"].inputSchema["properties"]["timeout"]["default"] == 120
+
+
+def test_the_two_pay_filters_are_told_apart_plainly_with_an_example_each():
+    text = " ".join({t.name: t for t in asyncio.run(server.mcp.list_tools())}["jobs_get"].description.split())
+    assert "floor_month_salary (the job's LOWEST pay is at least this: floor_month_salary=8000 keeps 8k-12k and drops 6k-9k" in text
+    assert "min_month_salary (the job's pay range REACHES this: min_month_salary=8000 keeps 6k-9k as well as 8k-12k" in text
+    assert "welfare tags `benefits`" in text and 'text="双休"' in text and 'title="会计"' in text   # what text searches, and an example
+    assert 'Example: jobs_get(keyword="会计", city="宁波", title="会计", text="双休", floor_month_salary=8000, limit=10)' in text
+    detail = " ".join({t.name: t for t in asyncio.run(server.mcp.list_tools())}["job_detail"].description.split())
+    assert "not the platform's own JSON; raw=true adds that as `detail`" in detail
 
 
 # ---- djs call

@@ -6,7 +6,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from djs.providers.base import Blocked, LoginRequired, StructureError, district_of, split_places
+from djs.providers.base import Blocked, LoginRequired, StructureError, district_of, split_places, tag_names
 from djs.providers.chinahr import Chinahr
 from djs.providers.iguopin import Iguopin
 from djs.providers.nowcoder import NowCoder
@@ -220,6 +220,17 @@ def test_split_places_keeps_every_city_and_every_district_once():
 def test_district_of_skips_the_city_label():
     assert district_of("西湖区·翠苑", "杭州") == "西湖区" and district_of("杭州·余杭", "杭州") == "余杭"
     assert district_of("余杭", "杭州") == "余杭" and district_of("杭州", "杭州") is None and district_of(None, None) is None
+
+
+def test_tag_names_reads_the_tags_a_site_sends_in_its_order_and_skips_what_is_no_name():
+    assert tag_names(["五险一金", " 双休 ", "", "  ", None, 3, {"a": 1}]) == ["五险一金", "双休"]
+    assert tag_names(("包吃", "包住")) == ["包吃", "包住"]
+    assert tag_names("五险一金, 双休,,餐补 ") == ["五险一金", "双休", "餐补"]               # one text joined with commas
+    objects = [{"name": "五险"}, {"name": " "}, {"name": None}, {"other": "x"}, "裸字符串", None, {"name": "双休"}]
+    assert tag_names(objects, "name") == ["五险", "双休"]                                   # with a key: that field of each object
+    assert tag_names("五险一金,双休", "name") == []                                         # a text has no objects to read a field of
+    for odd in (None, 3, {"五险": 1}, b"x", [], ""):
+        assert tag_names(odd) == [] and tag_names(odd, "name") == []
 
 
 def test_nowcoder_query_has_no_spaces():

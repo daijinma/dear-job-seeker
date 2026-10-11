@@ -84,6 +84,16 @@ def plain_text(raw) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def benefits(tags) -> str | None:
+    """The welfare tags a site lists for a job (names, in its own order) as one text: each once, joined with '、'. None
+    when it lists none. Welfare is no core element: a job is complete without it."""
+    if isinstance(tags, str):
+        tags = [tags]
+    if not isinstance(tags, (list, tuple)):
+        return None
+    return "、".join(dict.fromkeys(t.strip() for t in tags if isinstance(t, str) and t.strip())) or None
+
+
 def missing(fields) -> list[str]:
     """The core elements `fields` lacks, in CORE order. A salary counts only as two whole numbers."""
     def has(name: str) -> bool:

@@ -17,7 +17,7 @@ import httpx
 
 from djs import cities
 
-from .base import Blocked, ParseError, Provider, StructureError, district_of, env, get_json, need
+from .base import Blocked, ParseError, Provider, StructureError, district_of, env, get_json, need, tag_names
 
 APPID = "wxc97b21c63d084d92"
 APP_VER = "681"
@@ -122,6 +122,7 @@ class Job58(Provider):
         return {"title": job.get("title"), "company": job.get("companyName"), "city": city,
                 "district": district_of(job.get("location"), city),
                 "education": ext.get("xueliyaoqiu"), "experience": ext.get("gongzuonianxian"),
+                "benefits": tag_names(job.get("textTags")),   # the detail's `fulibaozhang` has the same tags, or fewer
                 "salary_text": ext.get("salary") or _price(job), "description": ext.get("content") or None}
 
     def probe_payload(self) -> dict:

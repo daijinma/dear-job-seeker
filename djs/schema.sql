@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   salary_month_min INTEGER, salary_month_max INTEGER,   -- the range as 元/月 (day, hour and year rates converted): comparable across sites
   description      TEXT,                                -- plain text
   education        TEXT, experience TEXT,
+  benefits         TEXT,                                -- the site's welfare tags, '、'-joined, each once, in its order; NULL = none stated (no core element)
   source_url       TEXT, published_at TEXT, published_at_kind TEXT,
   missing          TEXT,                                -- core elements still absent, comma-joined; '' when complete
   complete         INTEGER NOT NULL DEFAULT 0,          -- 1 = every core element present

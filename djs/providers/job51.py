@@ -19,7 +19,7 @@ import uuid
 from urllib.parse import quote, urlencode
 
 from ._browser import XHR_ACCEPT, is_browser
-from .base import Login, Provider, StructureError, env, get_json, need
+from .base import Login, Provider, StructureError, env, get_json, need, tag_names
 
 HOST = "https://cupid.51job.com"
 PKG_VERSION = "450"
@@ -58,6 +58,12 @@ def _where(job: dict) -> tuple[str | None, str | None]:
         return place["cityString"], place.get("districtString") or None
     city, _, district = (job.get("jobAreaString") or "").replace("-", "·").partition("·")
     return city or None, district or None
+
+
+def _welfare(job: dict, info: dict) -> list[str]:
+    """The welfare tags: the list item names some, the detail's comma-joined text (or its tag list) all of them."""
+    return max(tag_names(info.get("welfare")), tag_names(info.get("jobWelfareAllDataList"), "wordText"),
+               tag_names(job.get("jobWelfareCodeDataList"), "chineseTitle"), key=len)
 
 
 class Job51(Provider):
@@ -128,7 +134,7 @@ class Job51(Provider):
         return {"title": job.get("jobName"), "company": job.get("fullCompanyName") or job.get("companyName"),
                 "city": city, "district": district,
                 "education": job.get("degreeString"), "experience": job.get("workYearString"),
-                "salary_text": job.get("provideSalaryString"),
+                "benefits": _welfare(job, info), "salary_text": job.get("provideSalaryString"),
                 "description": info.get("jobDescribe") or job.get("jobDescribe") or None}
 
     def probe_payload(self) -> dict:

@@ -103,6 +103,18 @@ def district_of(area: str | None, city: str | None) -> str | None:
     return next((p for p in (area or "").split("·") if p and p != city), None)
 
 
+def tag_names(items, key: str | None = None) -> list[str]:
+    """The non-blank names in the tags a site sends: the strings of a list, with `key` the field of that name in each
+    object of it, or one text the site joined with commas. The site's order is kept; whatever is not a name is skipped,
+    and a value that is none of those gives []."""
+    if isinstance(items, str):
+        items = items.split(",")
+    if not isinstance(items, (list, tuple)):
+        return []
+    got = [i.get(key) if isinstance(i, dict) else None for i in items] if key else items
+    return [n.strip() for n in got if isinstance(n, str) and n.strip()]
+
+
 def months_suffix(months) -> str:
     """'·14薪' for more than 12 monthly payments; 12 or fewer is the default and not worth showing."""
     return f"·{months}薪" if isinstance(months, int) and months > 12 else ""
@@ -202,7 +214,8 @@ class Provider:
         title, company, city, district, education, experience, salary_text, description (HTML is fine, the engine
         makes it plain text) and, only when the site gives the figures as fields with a certain unit,
         salary_min/salary_max/salary_unit/salary_months from djs.normalize.salary_range. With salary text alone,
-        return salary_text: the engine parses it."""
+        return salary_text: the engine parses it. benefits: the site's welfare tags as a list of names (see
+        `tag_names`) in its order, the fuller of the item's and the detail's lists; empty when it states none."""
         raise NotImplementedError
 
     def meta(self, job: dict, detail: dict | None) -> dict:
