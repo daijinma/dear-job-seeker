@@ -14,6 +14,14 @@ MCP client config (Claude Desktop / Cursor / Claude Code `.mcp.json`):
 {"mcpServers": {"dear-job-seeker": {"command": "/abs/path/.venv/bin/djs"}}}
 ```
 
+## Web UI (for non-technical users)
+
+```bash
+.venv/bin/djs ui            # opens http://127.0.0.1:8765 ; --port N, --no-open
+```
+
+Same process model as the MCP server (shared queue worker, same SQLite). Four screens: search, results (CSV export), BOSS login, settings (speed: steady / standard / fast, account, optional proxy list). Binds 127.0.0.1 only and rejects foreign Host/Origin headers. Plain `djs` still starts the stdio MCP server.
+
 ## Tools
 
 | Tool | Purpose |
@@ -47,6 +55,10 @@ Egress: a provider-dedicated egress wins over the shared (`*`) pool; the exit is
 ## Task lifecycle
 
 `pending -> running -> done | pending (retry, exponential backoff) | dead (after 8 attempts) | waiting_login`. The worker thread lives and dies with the MCP process; unfinished tasks continue next start.
+
+## Boss status: experimental
+
+QR login and cookie storage are implemented, but the plain-HTTP list endpoint has been observed to answer `code 37` (risk control) even for valid logins. Such responses are treated as a block (cooldown + retry), never as an expired login. Verify on your own account before relying on it; public sites (nowcoder, iguopin, chinahr) are the verified path.
 
 ## Compliance and ban risk
 

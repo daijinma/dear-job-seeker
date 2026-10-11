@@ -33,6 +33,6 @@
 3. Boss 扫码与真机抓 1 页需用户在场。
 
 ## 实现状态与已知风险（2026-10-11）
-- 已实现：单进程 stdio MCP（11 个工具）、队列 worker、按平台频次（类默认 → `provider_settings` 覆盖 → `min_interval` 下限）、出口池、nowcoder / iguopin / chinahr、Boss provider + 扫码登录。全量测试 77 通过；真实 nowcoder 冒烟：1 页 20 条入库。
-- **Boss 抓取未验证，且有高风险**：内部实测记录——即使 cookie 有效，HTTP 直调 `joblist.json` 仍返回 `code=37 您的环境存在异常`，生产已放弃 XHR 路径，只留 CDP/DOM 人工点击流。当前 Boss provider 走 HTTP，**很可能同样 37**；37 现映射为 `LoginRequired`，会造成"登录→37→再要求登录"的循环。README 须标注 experimental，待真机验证后决定是否改 DOM 流。
-- UI：`untitled.pen` 中为**设计稿，未实现**（本版交付形态是 MCP，无 GUI）。面向非技术用户的 4 屏：查找 / 结果 / 登录 BOSS / 设置；频次对用户收敛为"稳妥 / 标准 / 较快"三档，kind/auth/出口 IP 等术语不外露。逻辑图（Task A/B/C）在同一文件。
+- 已实现：单进程 stdio MCP（11 个工具）、队列 worker、按平台频次（类默认 → `provider_settings` 覆盖 → `min_interval` 下限）、出口池、nowcoder / iguopin / chinahr、Boss provider + 扫码登录。全量测试 86 通过；真实 nowcoder 冒烟：1 页 20 条入库。
+- **Boss 抓取未验证，且有高风险**：内部实测记录——即使 cookie 有效，HTTP 直调 `joblist.json` 仍返回 `code=37 您的环境存在异常`，生产已放弃 XHR 路径，只留 CDP/DOM 人工点击流。当前 Boss provider 走 HTTP，**很可能同样 37**；37 已改映射为 `Blocked`（冷却+重试），不会引发登录循环；README 已标注 experimental，待真机验证后决定是否改 DOM 流。
+- UI：已实现为客户端自带本地网页（`djs ui`，stdlib HTTP + 单页，无构建步骤），设计稿见 `docs/design/ui-*.png`。面向非技术用户的 4 屏：查找 / 结果 / 登录 BOSS / 设置；频次对用户收敛为"稳妥 / 标准 / 较快"三档，kind/auth/出口 IP 等术语不外露。逻辑图（Task A/B/C）在同一文件。
