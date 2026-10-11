@@ -5,20 +5,23 @@ Chromium. Providers keep one parsing path: BrowserClient.get/post return real ht
 """
 from __future__ import annotations
 
-import fcntl
 import importlib.util
 import os
-import time
+import subprocess
+import sys
 from contextlib import ExitStack, closing, contextmanager
 from functools import partialmethod
+from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
 
-from djs import db, pacer
+from djs import db, filelock, pacer
 from djs.egress import NoEgressAvailable
 
 INSTALL_HINT = "Playwright/Chromium missing. Run: pip install playwright && playwright install chromium"
+# Browsers already on the machine first, so most people never download Playwright's own Chromium (None = that one)
+CHANNELS = ("chrome", "msedge", None)
 CDP_HINT = ("Cannot reach a browser at {url}. Start Chrome with --remote-debugging-port=9222 "
             "--user-data-dir=<a new empty folder> and set DJS_CDP_URL=http://127.0.0.1:9222")
 STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"  # the one tell Boss reads
@@ -73,34 +76,54 @@ def proxy_settings(exit_id: str | None) -> dict | None:
     return proxy
 
 
+def no_browser_hint() -> str:
+    """What to do on a machine with neither Chrome, Edge nor Playwright's Chromium."""
+    if getattr(sys, "frozen", False):  # the packaged app has no `playwright` command; its own `djs` runs the installer
+        install = f'"{Path(sys.executable).with_stem("djs")}" install-browser'
+    else:
+        install = "playwright install chromium"
+    return ("No browser found. Install Google Chrome or Microsoft Edge, or download Chromium once "
+            f"(several hundred MB): {install}")
+
+
+def install_chromium() -> int:
+    """Download Playwright's own Chromium with the driver inside the playwright package, which is also present in the
+    packaged app. Returns the installer's exit code."""
+    from playwright._impl._driver import compute_driver_executable, get_driver_env  # what `playwright install` runs
+    node, cli = compute_driver_executable()
+    return subprocess.run([node, cli, "install", "chromium"], env=get_driver_env()).returncode
+
+
+def _not_installed(e: Exception, channel: str | None) -> bool:
+    """Playwright's wording for "that browser is not on this machine" (channel None: its own Chromium download)."""
+    return (f"Chromium distribution '{channel}' is not found" if channel else "Executable doesn't exist") in str(e)
+
+
 def launch_context(pw, provider_name: str, headless: bool, proxy: str | None = None):
     """THE place that starts the persistent profile, so login and crawling share cookies and flags."""
-    try:
-        ctx = pw.chromium.launch_persistent_context(
-            str(db.profile_dir(provider_name) / "browser"), headless=headless, locale="zh-CN",
-            viewport={"width": 1280, "height": 800}, proxy=proxy_settings(proxy),
-            args=["--disable-blink-features=AutomationControlled"])
-    except _pw().Error as e:
-        if "Executable doesn't exist" in str(e):
-            raise BrowserUnavailable(INSTALL_HINT) from e
-        raise
-    ctx.add_init_script(STEALTH_JS)
-    return ctx
+    for channel in CHANNELS:
+        try:
+            ctx = pw.chromium.launch_persistent_context(
+                str(db.profile_dir(provider_name) / "browser"), channel=channel, headless=headless, locale="zh-CN",
+                viewport={"width": 1280, "height": 800}, proxy=proxy_settings(proxy),
+                args=["--disable-blink-features=AutomationControlled"])
+        except _pw().Error as e:
+            if _not_installed(e, channel):
+                continue
+            raise
+        ctx.add_init_script(STEALTH_JS)
+        return ctx
+    raise BrowserUnavailable(no_browser_hint())
 
 
 @contextmanager
 def profile_lock(provider_name: str, wait: float = 3.0):
     """A Chromium profile belongs to one process at a time: login and browser crawls take turns."""
-    deadline = time.monotonic() + wait
-    with open(db.profile_dir(provider_name, create=True) / ".lock", "a+") as f:
-        while True:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise BrowserBusy("正在使用浏览器，请稍后再试") from None
-                time.sleep(0.2)
+    with open(db.profile_dir(provider_name, create=True) / ".lock", "a+") as f, ExitStack() as held:
+        try:
+            held.enter_context(filelock.locked(f, wait))
+        except filelock.LockTimeout:
+            raise BrowserBusy("正在使用浏览器，请稍后再试") from None
         yield
 
 

@@ -1,12 +1,11 @@
 """Request frequency: effective settings (override ?? class default) and the cross-thread/process spacer."""
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import random
 import time
 
-from djs import providers
+from djs import filelock, providers
 from djs.db import home
 
 DEFAULT_MAX_PAGES = 3
@@ -57,8 +56,7 @@ def wait(provider: str, egress_id: str, interval: float, jitter: float) -> None:
     d = home() / "pace"
     d.mkdir(exist_ok=True)
     path = d / hashlib.sha1(f"{provider}:{egress_id}".encode()).hexdigest()
-    with open(path, "a+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    with open(path, "a+") as f, filelock.locked(f):
         f.seek(0)
         last = float(f.read() or 0)
         time.sleep(max(0.0, last + interval + random.uniform(0, jitter) - time.time()))

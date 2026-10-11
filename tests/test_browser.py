@@ -186,6 +186,7 @@ def test_launch_context_is_the_single_place_that_knows_the_profile_flags(home):
 def test_missing_chromium_is_reported_with_the_install_hint(home, monkeypatch):
     pytest.importorskip("playwright.sync_api")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(home / "no-browsers"))
+    monkeypatch.setattr(browser, "CHANNELS", (None,))  # an installed Chrome or Edge would be used instead
     with pytest.raises(browser.BrowserUnavailable, match="playwright install chromium"):
         with browser.open_browser(PROBE, "direct", 0.0, 0.0):
             pass

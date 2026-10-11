@@ -11,6 +11,36 @@ A **local job-search client** that speaks MCP. One process on your own machine c
 |---|---|
 | ![search](docs/design/ui-1-search.png) | ![results](docs/design/ui-2-results.png) |
 
+## Download
+
+Every [release](https://github.com/daijinma/dear-job-seeker/releases/latest) has three ready-to-run builds with Python and all libraries inside, so there is nothing to install:
+
+| Your computer | File |
+|---|---|
+| Mac with Apple silicon (M1 or later) | `dear-job-seeker-<version>-macos-arm64.zip` |
+| Mac with an Intel chip | `dear-job-seeker-<version>-macos-x86_64.zip` |
+| Windows 10 / 11, 64-bit | `dear-job-seeker-<version>-windows-x64.zip` |
+
+Unzip it and double-click **找岗位助手** (`找岗位助手.app` on a Mac, `找岗位助手.exe` in the unzipped folder on Windows). The same download holds the command-line program `djs` for AI clients and scripts; it uses the same data as the window.
+
+**First launch.** The builds are not code-signed, so the system asks once whether to trust them.
+
+- **macOS** — "cannot be opened because Apple cannot check it for malicious software". Right-click the app, choose *Open*, then *Open* again. On macOS 15 and later that shortcut is gone: open System Settings → Privacy & Security, scroll to the message about the app and click *Open Anyway*. Or run `xattr -dr com.apple.quarantine "找岗位助手.app"` once in Terminal.
+- **Windows** — SmartScreen shows "Windows protected your PC": click *More info*, then *Run anyway*. The window needs Microsoft's WebView2 runtime, which comes with Windows 11 and current Windows 10 updates.
+
+**MCP command.** Give your MCP client the `djs` program from the download:
+
+| System | Command |
+|---|---|
+| macOS | `/Applications/找岗位助手.app/Contents/MacOS/djs` (wherever you put the app) |
+| Windows | `C:\path\to\dear-job-seeker\djs.exe` |
+
+```json
+{"mcpServers": {"dear-job-seeker": {"command": "/Applications/找岗位助手.app/Contents/MacOS/djs"}}}
+```
+
+**Browser.** Logging in to a site (Boss) opens Google Chrome or Microsoft Edge when one is installed. With neither, run `djs install-browser` once: it downloads Chromium (several hundred MB).
+
 ## Quick start
 
 ```bash
@@ -92,7 +122,8 @@ QR login, cookie storage (0600, local only) and the list/detail calls are implem
 | `search_list(limit=20)` | recent searches (same keyword + city = one search): aggregate status, distinct job count, per-platform status / job count / complete / incomplete / last error |
 | `jobs_get(task_id?, provider?, limit, with_detail, complete_only=true)` | stored jobs; `task_id` returns every job that task saw, including ones an earlier task found first. Only **complete** jobs by default; `complete_only=false` adds the rest, each with `missing` and `incomplete_reason` |
 | `job_detail(job_id)` | full text of one stored job: fetched once with the platform's own pacing and exit, its fields derived again from it, then served from the database |
-| `login(provider)` / `login_status` / `logout` | QR login for `auth=login` platforms; waiting tasks resume on success |
+| `login(provider)` | open the platform's login page in a browser window (blocks up to 180 s); the window closes by itself once the login is detected, the session is saved locally with its expiry, and tasks waiting for it resume. One flow for every platform that has a login (`optional` or `login`) |
+| `login_status(provider?)` / `login_check(provider?)` / `logout(provider)` | `login_status`: `logged_in` / `expired` / `not_logged_in`, when it was saved and when it ends, how to log in and what it improves, for one platform or all that have a login (saved files only). `login_check` asks the platform once (an HTTP probe) and marks a dead login expired; the same check runs in the background at startup. `logout` deletes the saved login |
 | `set_frequency(provider, interval?, jitter?, max_pages?, force?)` | per-platform override; below the floor needs `force=true` |
 | `egress_add(url, provider="*")` / `egress_remove(url)` / `egress_list` | proxy pool (`direct` or `http(s)://…`; passwords are masked in output) |
 
@@ -147,7 +178,7 @@ djs call search_list
 
 ## Desktop app
 
-`djs ui` opens a native window (pywebview). The page talks to Python through an in-process bridge — there is no HTTP server and nothing listens on a port. Screens: search, results (CSV export), BOSS login, settings (speed: steady / standard / fast, account, optional proxy). Without pywebview, `djs ui` prints the install hint.
+`djs ui` opens a native window (pywebview). The page talks to Python through an in-process bridge — there is no HTTP server and nothing listens on a port. Screens: search (the newest search sits right under the box), results (complete jobs by default with a switch for the rest, sorted across sites or by salary, CSV export into the Downloads folder), platform logins (state of every login with a badge in the top bar), settings (speed: steady / standard / fast, optional proxy). Without pywebview, `djs ui` prints the install hint.
 
 ## Data and privacy
 
@@ -165,3 +196,16 @@ Layout: `djs/{db,taskqueue,pacer,egress,engine,service}.py` (core), `djs/jobs.py
 ## Compliance
 
 Only crawl what you are allowed to, at low rates, from your own network; respect each site's terms and robots rules. Using a personal account for automated access (Boss) can get that account restricted. The authors accept no liability for how this tool is used.
+
+## Build from source
+
+The downloads are built with [PyInstaller](https://pyinstaller.org) from [`packaging/dear-job-seeker.spec`](packaging/dear-job-seeker.spec): one folder with the window program `找岗位助手` and the console program `djs`, sharing one Python runtime (macOS: `找岗位助手.app`, with `djs` in `Contents/MacOS`). Build on the system you build for, with Python 3.12 (what CI uses):
+
+```bash
+python3.12 -m venv .venv-build
+.venv-build/bin/pip install -e '.[ui,packaging]'                         # Windows: .venv-build\Scripts\pip
+.venv-build/bin/pyinstaller --noconfirm packaging/dear-job-seeker.spec   # result in dist/
+PATH="$PWD/.venv-build/bin:$PATH" packaging/smoke.sh dist                # Windows: python packaging/smoke.py dist
+```
+
+`packaging/smoke.sh` is the check CI runs on every build: `--selftest` of both programs, `djs call provider_list`, one real crawl (needs network), an MCP session over stdio and, on macOS, opening the app for 8 seconds (`--no-launch` skips that, e.g. on a locked desktop). A release zips the result as `dear-job-seeker-<version>-macos-arm64.zip`, `…-macos-x86_64.zip` (both with `ditto -c -k --keepParent dist/找岗位助手.app <zip>`) and `…-windows-x64.zip` (the `dist/dear-job-seeker` folder). Pushing a tag `vX.Y.Z` that equals the version in `pyproject.toml` runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds all three and attaches them to that release; a manual run only keeps them as workflow artifacts. On an Intel Mac install `"cryptography<49"` before the project: newer releases ship no Intel wheels.

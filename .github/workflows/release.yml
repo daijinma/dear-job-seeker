@@ -1,0 +1,132 @@
+name: release
+
+# Push of a tag v*: build the three downloads (macOS Apple silicon, macOS Intel, Windows x64), smoke-test each and
+# attach them to that tag's GitHub Release. Manual run: the same builds and tests, kept as workflow artifacts only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      x86_64_on_rosetta:
+        description: "Intel Mac: build on the Apple-silicon runner under Rosetta instead of the Intel runner"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            os: macos-15
+          # Intel Mac. PRIMARY: the native Intel runner, macos-15-intel.
+          # FALLBACK, should that runner label ever go away: set the repository variable X86_64_ROSETTA to "true"
+          # (or tick the box on a manual run) and this entry builds on the Apple-silicon runner instead, under
+          # Rosetta (`arch -x86_64`) with an x86_64 Python from uv.
+          - target: macos-x86_64
+            os: ${{ (inputs.x86_64_on_rosetta || vars.X86_64_ROSETTA == 'true') && 'macos-15' || 'macos-15-intel' }}
+            rosetta: ${{ inputs.x86_64_on_rosetta || vars.X86_64_ROSETTA == 'true' }}
+          - target: windows-x64
+            os: windows-latest
+    defaults:
+      run:
+        # bash everywhere (Git Bash on Windows), so every step below is the same on all three systems
+        shell: ${{ matrix.rosetta && 'arch -x86_64 bash --noprofile --norc -eo pipefail {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: ${{ !matrix.rosetta }}
+        with:
+          python-version: "3.12"
+
+      - name: x86_64 Python (Rosetta fallback only)
+        if: ${{ matrix.rosetta }}
+        shell: bash  # Homebrew refuses to run under Rosetta
+        run: |
+          brew install uv
+          uv venv --seed --python cpython-3.12-macos-x86_64 "$RUNNER_TEMP/x86_64"
+          echo "$RUNNER_TEMP/x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Name the download
+        id: asset
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=dear-job-seeker-$version-${{ matrix.target }}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: The tag must be the version being built
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          [ "${GITHUB_REF_NAME#v}" = "${{ steps.asset.outputs.version }}" ] ||
+            { echo "::error::tag $GITHUB_REF_NAME is not version ${{ steps.asset.outputs.version }} of pyproject.toml"; exit 1; }
+
+      # cryptography (needed by mcp) ships no macOS Intel wheels from 49 on; building it from source is slow and fragile
+      - name: Older cryptography on Intel Macs
+        if: ${{ matrix.target == 'macos-x86_64' }}
+        run: python -m pip install "cryptography<49"
+
+      - name: Install
+        run: python -m pip install ".[ui,packaging]"
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm packaging/dear-job-seeker.spec
+
+      - name: Smoke test
+        run: bash packaging/smoke.sh dist
+
+      - name: Zip (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: ditto -c -k --keepParent "dist/找岗位助手.app" "dist/${{ steps.asset.outputs.name }}"
+
+      - name: Zip (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        run: python -m zipfile -c "dist/${{ steps.asset.outputs.name }}" dist/dear-job-seeker
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.asset.outputs.name }}
+          path: dist/${{ steps.asset.outputs.name }}
+          compression-level: 0  # already a zip
+          if-no-files-found: error
+
+  release:
+    name: publish
+    if: ${{ github.event_name == 'push' }}  # tag pushes only (see `on`); a manual run publishes nothing
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Attach the three downloads to the release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<EOF
+          Unzip the file for your computer and open the app (Windows: 找岗位助手.exe in the unzipped folder).
+
+          - Mac, Apple silicon (M1 or later): dear-job-seeker-$version-macos-arm64.zip
+          - Mac, Intel: dear-job-seeker-$version-macos-x86_64.zip
+          - Windows 10/11, 64-bit: dear-job-seeker-$version-windows-x64.zip
+
+          The apps are not code-signed, so the first launch needs one extra step:
+          https://github.com/$GITHUB_REPOSITORY#download
+          EOF
+          ls -l assets
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          gh release upload "$GITHUB_REF_NAME" assets/*.zip --clobber
