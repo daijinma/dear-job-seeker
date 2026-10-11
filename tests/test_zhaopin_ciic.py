@@ -1,10 +1,16 @@
 """Zhaopin / Ciic tests. All fixtures are SYNTHETIC (built from documented shapes)."""
+import json
+from pathlib import Path
+
 import httpx
 import pytest
 
-from djs.providers.base import Blocked, ParseError, StructureError
+from djs.jobs import derive
+from djs.normalize import missing
+from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
 from djs.providers.ciic import Ciic
-from djs.providers.zhaopin import Zhaopin
+from djs.providers.zhaopin import PC_URL, Zhaopin
+from provider_fakes import FakeBrowser
 
 SEARCH = {"keyword": "算法"}
 JOB = {"_synthetic": True, "number": "CC1", "name": "算法工程师", "companyName": "甲公司",
@@ -38,7 +44,7 @@ def page(rows=""):
 def test_class_attrs():
     z, c = Zhaopin(), Ciic()
     assert (z.name, z.label, z.kind, z.auth, z.interval, z.min_interval, z.page_size, z.first_page,
-            z.page_cap, z.requires_city) == ("zhaopin", "智联招聘", "keyword", "public", 3.0, 1.5, 20, 1, 3, False)
+            z.page_cap, z.requires_city) == ("zhaopin", "智联招聘", "keyword", "optional", 3.0, 1.5, 20, 1, 3, False)
     assert (c.name, c.label, c.kind, c.auth, c.interval, c.min_interval, c.page_size, c.first_page,
             c.page_cap, c.requires_city) == ("ciic", "中智招聘", "keyword", "public", 3.0, 1.5, 20, 1, 20, False)
     assert z.note and c.note
@@ -105,6 +111,103 @@ def test_zhaopin_list_item_already_carries_the_jd():
     assert z.row({**JOB, "jobDetailData": EMBEDDED}, DETAIL)["description"] == "列表里就有的职位描述"   # list copy first
     empty = {"position": {"desc": {"description": ""}}}
     assert z.row({**JOB, "jobDetailData": empty}, DETAIL)["description"] == "写算法"   # the detail is the fallback
+
+
+def test_zhaopin_rows_from_cgate_are_complete():
+    z = Zhaopin()
+    done = derive(z, {**JOB, "jobDetailData": EMBEDDED}, None)
+    assert missing(done) == [] and (done["salary_min"], done["salary_max"]) == (20000, 40000)
+    assert missing(derive(z, JOB, None)) == ["description"]      # the detail hop is what completes it
+
+
+# ---- zhaopin, logged in: the PC search in a browser ----
+LOGIN_COOKIES = {"at": "AT-SECRET", "rt": "RT-SECRET", "smidV2": "fp"}
+PC_BODY = {"S_SOU_FULL_INDEX": "护士", "S_SOU_WORK_CITY": "653", "pageIndex": 2, "pageSize": 20,
+           "eventScenario": "pcSearchedSouSearch", "anonymous": 0, "platform": 13, "version": "0.0.0",
+           "at": "AT-SECRET", "rt": "RT-SECRET"}
+
+
+def pc(name: str) -> dict:
+    return json.loads((Path(__file__).parent / "fixtures" / name).read_text())
+
+
+def test_zhaopin_declares_the_two_transports_and_the_login():
+    z = Zhaopin()
+    assert (z.transports, z.login_transport, z.home) == (("http", "browser"), "browser", "https://www.zhaopin.com/")
+    assert (z.login.method, z.login.domain, z.login.cookies_all) == ("wechat", "zhaopin.com", ("at", "rt"))
+
+
+def test_zhaopin_pc_search_posts_the_page_s_own_json_body():
+    seen = []
+    page = FakeBrowser(pc("zhaopin_pc_list.json"), seen=seen, cookies=LOGIN_COOKIES)
+    items = Zhaopin().fetch(page, {"keyword": "护士", "city": "杭州"}, 2)
+    assert [i["number"] for i in items] == ["CCL0000000001J00000000001", "CCL0000000002J00000000002"]
+    assert (seen[0].method, str(seen[0].url)) == ("POST", PC_URL) and seen[0].headers["content-type"] == "application/json"
+    assert json.loads(seen[0].content) == PC_BODY
+    assert seen[0].headers["accept"] == "application/json, text/plain, */*"
+    assert "x-zp-version" not in seen[0].headers                  # cgate's headers belong to cgate
+
+
+def test_zhaopin_pc_search_without_a_city_uses_the_sites_nationwide_code():
+    seen = []
+    Zhaopin().fetch(FakeBrowser(pc("zhaopin_pc_list.json"), seen=seen, cookies=LOGIN_COOKIES), {"keyword": "x"}, 1)
+    assert json.loads(seen[0].content)["S_SOU_WORK_CITY"] == "489"
+    with pytest.raises(ValueError, match="智联招聘暂不支持城市「火星」"):
+        Zhaopin().fetch(FakeBrowser(pc("zhaopin_pc_list.json"), cookies=LOGIN_COOKIES), {"keyword": "x", "city": "火星"}, 1)
+
+
+def test_zhaopin_pc_search_refused_session_is_login_required():
+    page = FakeBrowser(pc("zhaopin_pc_anonymous.json"), cookies=LOGIN_COOKIES)       # isVerification=1: no rows
+    with pytest.raises(LoginRequired, match="isVerification=1"):
+        Zhaopin().fetch(page, SEARCH, 1)
+
+
+@pytest.mark.parametrize("cookies", [{}, {"at": "a"}, {"rt": "r"}, {"at": "", "rt": "r"}])
+def test_zhaopin_pc_search_without_login_cookies_sends_nothing(cookies):
+    seen = []
+    with pytest.raises(LoginRequired, match="at/rt"):
+        Zhaopin().fetch(FakeBrowser(pc("zhaopin_pc_list.json"), seen=seen, cookies=cookies), SEARCH, 1)
+    assert seen == []
+
+
+def test_zhaopin_pc_search_failures_are_not_empty_lists():
+    ok = {"code": 200, "data": {"count": 0, "isEndPage": 1, "isVerification": 0, "list": []}}
+    assert Zhaopin().fetch(FakeBrowser(ok, cookies=LOGIN_COOKIES), SEARCH, 1) == []
+    for body, error in [({"code": 211}, Blocked), ({"code": 500}, StructureError), ({"code": 200}, StructureError),
+                        ({"code": 200, "data": {"isVerification": 0}}, StructureError),
+                        ({"code": 200, "data": {"list": None}}, StructureError)]:
+        with pytest.raises(error):
+            Zhaopin().fetch(FakeBrowser(body, cookies=LOGIN_COOKIES), SEARCH, 1)
+    with pytest.raises(Blocked):
+        Zhaopin().fetch(FakeBrowser({}, status=429, cookies=LOGIN_COOKIES), SEARCH, 1)
+    with pytest.raises(ParseError):
+        Zhaopin().fetch(FakeBrowser(text="<html>challenge</html>", cookies=LOGIN_COOKIES), SEARCH, 1)
+
+
+def test_zhaopin_pc_rows_are_complete_when_the_list_has_the_jd():
+    z, items = Zhaopin(), pc("zhaopin_pc_list.json")["data"]["list"]
+    first = derive(z, items[0], None)
+    assert missing(first) == [] and (first["salary_min"], first["salary_max"], first["salary_unit"]) == (4000, 8000, "元/月")
+    assert (first["city"], first["district"], first["education"], first["experience"]) == ("柳州", "柳南区", "中专/中技", "1-3年")
+    assert first["description"].startswith("岗位职责\n1.上门护理")
+    second = derive(z, items[1], None)
+    assert (second["salary_min"], second["salary_max"]) == (10000, 15000) and missing(second) == ["description"]
+
+
+def test_zhaopin_warmup_loads_the_home_page_and_waits_for_the_fingerprint_in_a_browser_only():
+    page = FakeBrowser()
+    Zhaopin().warmup(page, SEARCH)
+    assert page.calls == [("goto", "https://www.zhaopin.com/"), ("wait_cookie", "smidV2")]
+    Zhaopin().warmup(client({}), SEARCH)                         # an http client has no page: nothing to do
+    with pytest.raises(httpx.ReadTimeout):                       # no fingerprint: the engine retries the task
+        Zhaopin().warmup(FakeBrowser(cookie_timeout=True), SEARCH)
+
+
+def test_zhaopin_pc_item_needs_no_detail_hop_but_cgate_still_has_one():
+    z = Zhaopin()
+    page = FakeBrowser({"code": 200, "data": DETAIL}, cookies=LOGIN_COOKIES)
+    assert z.detail(page, JOB) is None and page.calls == []      # no request, no navigation
+    assert z.detail(client({"code": 200, "data": DETAIL}), JOB) == DETAIL
 
 
 # ---- ciic ----

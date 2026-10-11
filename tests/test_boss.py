@@ -10,8 +10,11 @@ import httpx
 import pytest
 
 from djs import auth, cities
+from djs.jobs import derive
+from djs.normalize import missing
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
-from djs.providers.boss import Boss
+from djs.providers.boss import EXPIRE_STOKEN, STOKEN, Boss
+from provider_fakes import FakeBrowser
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -102,28 +105,13 @@ def test_login_without_playwright_gives_hint(monkeypatch):
         auth.login("boss")
 
 
-def test_auth_cookies_requires_auth_cookie_on_domain():
-    cfg = auth.LOGIN["boss"]
-    ck = lambda n, d: {"name": n, "value": "v", "domain": d}
-    assert auth._auth_cookies([ck("wt2", ".zhipin.com"), ck("a", ".zhipin.com")], cfg) == {"wt2": "v", "a": "v"}
-    assert auth._auth_cookies([ck("a", ".zhipin.com")], cfg) == {}
-    assert auth._auth_cookies([ck("wt2", ".other.com")], cfg) == {}
-
-
-def test_wait_for_login_times_out():
-    class Ctx:
-        def cookies(self):
-            return []
-    with pytest.raises(TimeoutError):
-        auth._wait_for_login(Ctx(), auth.LOGIN["boss"], timeout=0.05)
-
-
 # ------------------------------------------------------------------ provider
 
 def test_class_attrs_match_contract():
     b = Boss()
-    assert (b.name, b.kind, b.auth, b.requires_city, b.city_filter) == ("boss", "keyword", "login", False, "server")
-    assert (b.interval, b.min_interval, b.page_size, b.first_page, b.page_cap) == (6.0, 4.0, 15, 1, 5)
+    assert (b.name, b.kind, b.auth, b.requires_city, b.city_filter) == ("boss", "keyword", "optional", False, "server")
+    assert (b.interval, b.min_interval, b.page_size, b.first_page, b.page_cap) == (8.0, 6.0, 15, 1, 5)
+    assert (b.transports, b.needs_headed, b.login_transport) == (("browser",), True, None)   # plain http gets code 37
 
 
 def test_fetch_sends_query_city_and_headers():
@@ -135,8 +123,9 @@ def test_fetch_sends_query_city_and_headers():
 
     jobs = Boss().fetch(client_for(handler), {"keyword": "python", "city": "上海"}, 2)
     q = seen["req"].url.params
-    assert (q["query"], q["city"], q["page"], q["pageSize"]) == ("python", "101020100", "2", "15")
-    assert seen["req"].headers["referer"] == "https://www.zhipin.com/"
+    assert (q["query"], q["city"], q["page"], q["pageSize"], q["scene"]) == ("python", "101020100", "2", "15", "1")
+    assert seen["req"].headers["x-requested-with"] == "XMLHttpRequest"
+    assert "referer" not in seen["req"].headers and "origin" not in seen["req"].headers   # the page adds its own
     assert [j["encryptJobId"] for j in jobs] == ["synthJobAAA1", "synthJobBBB2"]
 
 
@@ -223,8 +212,10 @@ def test_detail_uses_security_id():
 
     job = fixture("boss_list.json")["zpData"]["jobList"][0]
     d = Boss().detail(client_for(handler), job)
-    assert seen["q"]["securityId"] == "synthSecAAA1"
+    assert (seen["q"]["securityId"], seen["q"]["lid"]) == ("synthSecAAA1", "synthLid1")
     assert d["jobInfo"]["postDescription"] == "Synthetic JD text."
+    Boss().detail(client_for(handler), {k: v for k, v in job.items() if k != "lid"})
+    assert "lid" not in seen["q"]
 
 
 def test_detail_errors():
@@ -258,3 +249,55 @@ def test_salary_is_empty_until_logged_in_and_the_detail_may_fill_it():
 
 def test_probe_payload_city_is_known():
     assert cities.code("boss", Boss().probe_payload()["city"]) not in (None, "100010000")
+
+
+# ---- the browser side: warmup, anonymous vs logged-in rows
+
+SEARCH_PAGE = "https://www.zhipin.com/web/geek/jobs"
+
+
+def test_warmup_loads_the_search_page_twice_around_deleting_the_stale_token():
+    page = FakeBrowser(href="https://www.zhipin.com/web/geek/jobs?query=python")
+    Boss().warmup(page, {"keyword": "python", "city": "上海"})
+    url = f"{SEARCH_PAGE}?query=python&city=101020100"
+    assert page.calls == [("goto", url), ("eval", EXPIRE_STOKEN), ("goto", url), ("wait_cookie", STOKEN),
+                          ("eval", "() => location.href")]
+    # deleted (expired), never blanked: wait_cookie counts "name=" with an empty value as present
+    assert "1970" in EXPIRE_STOKEN and STOKEN in EXPIRE_STOKEN
+
+
+def test_warmup_without_a_search_has_a_bare_page_and_a_missing_token_is_not_fatal():
+    page = FakeBrowser(cookie_timeout=True)           # the token never came: the first request decides
+    Boss().warmup(page, {})                           # job_detail warms up with no keyword at all
+    assert page.calls[0] == ("goto", SEARCH_PAGE)
+    with pytest.raises(ValueError, match="暂不支持城市「火星」"):
+        Boss().warmup(FakeBrowser(), {"keyword": "x", "city": "火星"})
+
+
+def test_warmup_stops_at_boss_security_check_page():
+    with pytest.raises(Blocked, match="security check"):
+        Boss().warmup(FakeBrowser(href="https://www.zhipin.com/web/common/_security_check.html?x=1"), {"keyword": "x"})
+
+
+@pytest.mark.parametrize("shown", ["", " ", "-", "--", "-K", "-k", "\ue0a1-\ue0a2K", "\ue000", "\uf8ff1K"])
+def test_a_salary_that_is_not_readable_counts_as_missing(shown):
+    job = fixture("boss_list.json")["zpData"]["jobList"][0]
+    assert Boss().row({**job, "salaryDesc": shown}, None)["salary_text"] is None
+    assert Boss().row({**job, "salaryDesc": ""}, {"jobInfo": {"salaryDesc": shown}})["salary_text"] is None
+
+
+def test_the_readable_salary_of_the_two_sources_wins_and_the_detail_goes_first():
+    job = fixture("boss_list.json")["zpData"]["jobList"][0]                        # list: 20-30K
+    assert Boss().row(job, {"jobInfo": {"salaryDesc": "25-35K"}})["salary_text"] == "25-35K"
+    assert Boss().row(job, {"jobInfo": {"salaryDesc": "\ue001K"}})["salary_text"] == "20-30K"   # glyphs: fall back
+
+
+def test_anonymous_jobs_lack_only_the_salary_and_logged_in_ones_are_complete():
+    b = Boss()
+    listed = fixture("boss_list.json")["zpData"]["jobList"]
+    detail = fixture("boss_detail.json")["zpData"]
+    anonymous = derive(b, {**listed[0], "salaryDesc": ""}, {"jobInfo": {**detail["jobInfo"], "salaryDesc": ""}})
+    assert missing(anonymous) == ["salary"] and anonymous["description"] == "Synthetic JD text."
+    full = derive(b, listed[0], detail)
+    assert missing(full) == [] and (full["salary_min"], full["salary_max"], full["salary_unit"]) == (20000, 30000, "元/月")
+    assert (full["city"], full["district"], full["education"], full["experience"]) == ("北京", "海淀区", "本科", "3-5年")

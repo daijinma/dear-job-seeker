@@ -1,0 +1,7 @@
+{"_synthetic": true, "flag": 1, "data": {"data": {"compCard": {}, "jobCardList": [
+ {"job": {"jobId": 1980641687, "jobKind": "1", "title": "Python开发工程师", "salary": "20-40k·15薪", "dq": "杭州-西湖区", "link": "https://www.liepin.com/job/1980641687.shtml", "refreshTime": "20260916120000", "requireWorkYears": "3-5年", "requireEduLevel": "本科", "labels": ["五险一金"]},
+  "comp": {"compId": 1, "compName": "示例科技", "compIndustry": "互联网", "compScale": "100-499人"},
+  "recruiter": {"recruiterName": "王女士", "recruiterTitle": "HR"}},
+ {"job": {"jobId": "1980641688", "title": "后端实习生", "salary": "面议", "dq": "上海", "link": "https://www.liepin.com/job/1980641688.shtml", "refreshTime": "bad", "requireWorkYears": "经验不限", "requireEduLevel": "学历不限"},
+  "comp": {"compName": "示例商贸"}}
+]}}}

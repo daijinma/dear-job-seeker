@@ -6,7 +6,8 @@ import importlib
 
 _MODULES = {"nowcoder": "NowCoder", "iguopin": "Iguopin", "chinahr": "Chinahr", "zhaopin": "Zhaopin",
             "mohrss": "Mohrss", "ciic": "Ciic", "bytedance": "Bytedance", "boss": "Boss",
-            "yupao": "Yupao", "job51": "Job51", "job58": "Job58", "ganji": "Ganji"}
+            "yupao": "Yupao", "job51": "Job51", "job58": "Job58", "ganji": "Ganji", "liepin": "Liepin",
+            "kq36": "Kq36"}
 _cache: dict = {}
 
 

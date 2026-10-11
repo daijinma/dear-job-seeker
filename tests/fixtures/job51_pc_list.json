@@ -1,0 +1,4 @@
+{"_synthetic": true, "status": "1", "message": "success", "resultbody": {"job": {"totalCount": 2, "items": [
+ {"jobId": "188888881", "jobName": "Java 后端工程师", "provideSalaryString": "15-25K·13薪", "jobAreaString": "杭州·西湖区", "degreeString": "本科", "workYearString": "3-5年", "fullCompanyName": "示例科技有限公司", "companyName": "示例科技", "hrefAreaPinYin": "hangzhou-xhq", "jobDescribe": "1. 负责后端服务开发\n2. 优化性能", "updateDateTime": "2026-09-14 10:00:00"},
+ {"jobId": "188888882", "jobName": "会计", "provideSalaryString": "面议", "jobAreaString": "上海", "jobAreaLevelDetail": {"cityString": "上海", "districtString": "浦东新区"}, "degreeString": "大专", "workYearString": "1-3年", "companyName": "示例商贸", "jobDescribe": "", "issueDateString": "2026-09-13 09:00:00"}
+]}}}

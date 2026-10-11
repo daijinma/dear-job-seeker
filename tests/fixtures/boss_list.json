@@ -1,6 +1,6 @@
 {"_synthetic": true, "code": 0, "message": "Success",
- "zpData": {"hasMore": true, "page": 1, "pageSize": 15, "count": 2,
+ "zpData": {"hasMore": true, "lid": "synthLidPage", "resCount": 2,
   "jobList": [
-   {"encryptJobId": "synthJobAAA1", "securityId": "synthSecAAA1", "jobName": "Python Engineer", "brandName": "Example Co", "cityName": "北京", "areaDistrict": "海淀区", "salaryDesc": "20-30K", "jobDegree": "本科", "jobExperience": "3-5年", "bossName": "Zhang", "lastLoginTime": "今日活跃"},
-   {"encryptJobId": "synthJobBBB2", "securityId": "synthSecBBB2", "jobName": "Data Engineer", "brandName": "Sample Ltd", "cityName": "上海", "salaryDesc": ""}
+   {"encryptJobId": "synthJobAAA1", "securityId": "synthSecAAA1", "lid": "synthLid1", "jobName": "Python Engineer", "brandName": "Example Co", "cityName": "北京", "areaDistrict": "海淀区", "salaryDesc": "20-30K", "jobDegree": "本科", "jobExperience": "3-5年", "bossName": "Zhang", "lastLoginTime": "今日活跃"},
+   {"encryptJobId": "synthJobBBB2", "securityId": "synthSecBBB2", "lid": "synthLid2", "jobName": "Data Engineer", "brandName": "Sample Ltd", "cityName": "上海", "areaDistrict": "浦东新区", "salaryDesc": "", "jobDegree": "硕士", "jobExperience": "1-3年"}
   ]}}

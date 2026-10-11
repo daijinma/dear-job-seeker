@@ -1,14 +1,20 @@
 """Yupao / Job51 / Job58 / Ganji tests. Fixtures are SYNTHETIC; keys are dummy values set via monkeypatch."""
+import json
+from pathlib import Path
+
 import httpx
 import pytest
 
 from djs import db, engine, service, taskqueue
+from djs.jobs import derive
+from djs.normalize import missing
 from djs.providers import _yupao_sign, job51 as j51mod
 from djs.providers.base import Blocked, StructureError
 from djs.providers.ganji import Ganji
-from djs.providers.job51 import Job51
+from djs.providers.job51 import PC_URL, Job51
 from djs.providers.job58 import Job58, luna_sign
 from djs.providers.yupao import Yupao
+from provider_fakes import FakeBrowser
 
 KEYS = {"DJS_YUPAO_NONCE_KEY": "test-nonce-key", "DJS_YUPAO_SIGN_SALT": "test-salt",
         "DJS_JOB51_HMAC_KEY": "test-key", "DJS_JOB58_LUNA_SALT": "test-salt"}
@@ -46,7 +52,7 @@ def test_signing_vectors(monkeypatch):
 def test_class_attrs():
     y, j1, j8, g = (c() for c in ALL)
     assert [(p.name, p.label, p.requires_city, p.auth) for p in (y, j1, j8, g)] == [
-        ("yupao", "鱼泡直聘", False, "public"), ("job51", "前程无忧", False, "public"),
+        ("yupao", "鱼泡直聘", False, "public"), ("job51", "前程无忧", False, "optional"),
         ("job58", "58同城", True, "public"), ("ganji", "赶集网", True, "public")]
     assert y.requires_env == ("DJS_YUPAO_NONCE_KEY", "DJS_YUPAO_SIGN_SALT")
     assert j1.requires_env == ("DJS_JOB51_HMAC_KEY",) and j8.requires_env == ("DJS_JOB58_LUNA_SALT",)
@@ -132,6 +138,78 @@ def test_job51_detail_and_failures():
         p.fetch(client({"status": "110011"}), {"keyword": "x"}, 1)
     with pytest.raises(Blocked):
         p.fetch(client(status=403), {"keyword": "x"}, 1)
+
+
+# ---- job51, logged in: the PC search in a browser ----
+def pc_list() -> dict:
+    return json.loads((Path(__file__).parent / "fixtures" / "job51_pc_list.json").read_text())
+
+
+def test_job51_declares_the_two_transports_and_the_login():
+    p = Job51()
+    assert (p.transports, p.login_transport) == (("http", "browser"), "browser")
+    assert (p.login.method, p.login.domain, p.login.url_prefix) == ("password", "51job.com", "https://we.51job.com/pc/my/")
+    assert p.login.cookies_any == p.login.cookies_all == () and p.login.valid_days == 30    # the landing page is the signal
+
+
+def test_job51_pc_search_is_an_unsigned_get_on_the_web_api(monkeypatch):
+    monkeypatch.setattr(j51mod.time, "time", lambda: 1000)
+    seen = []
+    items = Job51().fetch(FakeBrowser(pc_list(), seen=seen), {"keyword": "会计", "city": "杭州"}, 3)
+    assert [i["jobId"] for i in items] == ["188888881", "188888882"]
+    url, q = seen[0].url, dict(seen[0].url.params)
+    assert (seen[0].method, f"{url.scheme}://{url.host}{url.path}") == ("GET", PC_URL)
+    assert q == {"api_key": "51job", "searchType": "2", "sortType": "0", "source": "1", "scene": "7",
+                 "pageCode": "sou|sou|soulb", "timestamp": "1000", "keyword": "会计", "jobArea": "080200",
+                 "pageNum": "3", "pageSize": "50"}
+    assert "sign" not in seen[0].headers and "from-domain" not in seen[0].headers      # cupid's signature is cupid's
+    assert seen[0].headers["accept"] == "application/json, text/plain, */*"
+
+
+def test_job51_pc_search_without_a_city_is_nationwide_and_failures_are_loud():
+    seen = []
+    Job51().fetch(FakeBrowser(pc_list(), seen=seen), {"keyword": "会计"}, 1)
+    assert seen[0].url.params["jobArea"] == "000000"
+    empty = {"status": "1", "resultbody": {"job": {"totalCount": 0, "items": []}}}
+    assert Job51().fetch(FakeBrowser(empty), {"keyword": "x"}, 1) == []
+    for body in ({"status": "0", "message": "denied"}, {"status": "1", "resultbody": {"job": {}}}):
+        with pytest.raises(StructureError):
+            Job51().fetch(FakeBrowser(body), {"keyword": "x"}, 1)
+    with pytest.raises(Blocked):
+        Job51().fetch(FakeBrowser({}, status=403), {"keyword": "x"}, 1)
+    with pytest.raises(ValueError, match="暂不支持城市「火星」"):
+        Job51().fetch(FakeBrowser(pc_list()), {"keyword": "x", "city": "火星"}, 1)
+
+
+def test_job51_pc_rows_carry_the_jd_and_split_the_place_text():
+    p, items = Job51(), pc_list()["resultbody"]["job"]["items"]
+    first = derive(p, items[0], None)
+    assert missing(first) == [] and (first["salary_min"], first["salary_max"], first["salary_months"]) == (15000, 25000, 13)
+    assert (first["city"], first["district"], first["company"]) == ("杭州", "西湖区", "示例科技有限公司")
+    assert first["description"].startswith("1. 负责后端服务开发")
+    assert first["published_at"] == "2026-09-14T10:00:00+08:00" and first["published_at_kind"] == "refresh"
+    second = derive(p, items[1], None)                       # structured place fields win; 面议 has no numbers
+    assert (second["city"], second["district"]) == ("上海", "浦东新区")
+    assert missing(second) == ["salary", "description"] and second["published_at"] == "2026-09-13T09:00:00+08:00"
+    assert p.row({"jobAreaString": "眉山-东坡区"}, None)["district"] == "东坡区"
+    assert (p.row({}, None)["city"], p.row({}, None)["district"]) == (None, None)
+
+
+def test_job51_warmup_opens_the_search_page_and_waits_for_the_waf_cookie_in_a_browser_only():
+    page = FakeBrowser()
+    Job51().warmup(page, {"keyword": "算法", "city": "杭州"})
+    assert page.calls == [("goto", "https://we.51job.com/pc/search?jobArea=080200&keyword=%E7%AE%97%E6%B3%95"
+                                   "&searchType=2&keywordType="), ("wait_cookie", "acw_sc__v2")]
+    Job51().warmup(client({}), {"keyword": "x"})             # cupid needs no page
+    bare = FakeBrowser()
+    Job51().warmup(bare, {})                                 # job_detail warms up without a search
+    assert bare.calls[0] == ("goto", "https://we.51job.com/pc/search?jobArea=000000&keyword=&searchType=2&keywordType=")
+
+
+def test_job51_pc_item_needs_no_detail_hop_and_cupid_keeps_its_signed_one():
+    page = FakeBrowser({"status": "1", "resultbody": J51_DETAIL})
+    assert Job51().detail(page, J51) is None and page.calls == []
+    assert Job51().detail(client({"status": "1", "resultbody": J51_DETAIL}), J51) == J51_DETAIL
 
 
 # ---- job58 ----
