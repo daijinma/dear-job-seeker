@@ -77,7 +77,7 @@ class Job51(Provider):
     note = ("Needs env DJS_JOB51_HMAC_KEY; hard cap 1000 results (20 pages); city optional; "
             "logged in, the PC search runs in a browser instead")
     login = Login(url=LOGIN_URL, method="password", domain="51job.com", url_prefix="https://we.51job.com/pc/my/",
-                  unlocks="登录后改用电脑版搜索，职位描述随列表带出（待实测）", valid_days=30)
+                  unlocks="改用电脑版搜索，结果更多（效果待实测）", valid_days=30)
 
     def warmup(self, client, payload: dict) -> None:
         if is_browser(client):

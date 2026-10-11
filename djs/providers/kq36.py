@@ -95,7 +95,7 @@ class Kq36(Provider):
     first_page = 1
     note = "Needs your own login (account and password or SMS). Medical jobs; job-title keyword, optional city."
     login = Login(url=BASE + "/", method="password", domain="kq36.com", cookies_any=("usercookies",),
-                  probe_url=PROBE_URL, probe_fail_text=WALL, unlocks="不登录无法搜索")
+                  probe_url=PROBE_URL, probe_fail_text=WALL, unlocks="可以搜索岗位（不登录搜不了）")
 
     def _list_url(self, payload: dict, page: int) -> str:
         query = f"S_Type=0&keyword={js_escape(payload['keyword'])}"

@@ -182,7 +182,7 @@ def test_kq36_class_attrs_and_login():
     assert (p.page_size, p.first_page, p.page_cap, p.min_interval) == (15, 1, None, 1.0)
     assert (p.login.method, p.login.domain, p.login.cookies_any, p.login.url) == (
         "password", "kq36.com", ("usercookies",), "https://www.kq36.com/")
-    assert (p.login.probe_url, p.login.probe_fail_text, p.login.unlocks) == (PROBE_URL, WALL, "不登录无法搜索")
+    assert (p.login.probe_url, p.login.probe_fail_text, p.login.unlocks) == (PROBE_URL, WALL, "可以搜索岗位（不登录搜不了）")
 
 
 @pytest.mark.parametrize("text, expected", [
