@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import webbrowser
 from pathlib import Path
 
 from djs import db, providers, service
@@ -51,33 +52,36 @@ def start_login(conn, provider: str) -> dict:
     return {"state": "running"}
 
 
-def crawl(conn, q, body) -> dict:
-    keyword = (body.get("keyword") or "").strip()
-    sites = body.get("providers") or []
+def crawl(conn, a) -> dict:
+    keyword = (a.get("keyword") or "").strip()
+    sites = a.get("providers") or []
     if not keyword:
         raise ValueError("请先填写岗位关键词")
     if not sites:
         raise ValueError("请至少选择一个网站")
-    city = (body.get("city") or "").strip() or None
+    city = (a.get("city") or "").strip() or None
     return {"task_ids": [service.crawl_start(conn, s, keyword=keyword, city=city)["task_id"] for s in sites]}
 
 
-def _qint(q, key):
-    return int(q[key][0]) if key in q else None
+def open_url(conn, a) -> dict:
+    url = a.get("url", "")
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("只能打开网页链接")
+    webbrowser.open(url)
+    return {"ok": True}
 
 
 ROUTES = {
-    ("GET", "/api/providers"): lambda c, q, b: {"providers": service.provider_list(c), **_prefs()},
-    ("GET", "/api/tasks"): lambda c, q, b: {"tasks": service.task_list(c, limit=60)},
-    ("GET", "/api/jobs"): lambda c, q, b: {"jobs": service.jobs_get(
-        c, _qint(q, "task_id"), q.get("provider", [None])[0], _qint(q, "limit") or 500)},
-    ("POST", "/api/crawl"): crawl,
-    ("POST", "/api/login"): lambda c, q, b: start_login(c, b.get("provider", "")),
-    ("GET", "/api/login_status"): lambda c, q, b: {
-        **service.login_status(c, q["provider"][0]), "login": login_state.get(q["provider"][0], {})},
-    ("POST", "/api/logout"): lambda c, q, b: service.logout(c, b.get("provider", "")),
-    ("POST", "/api/frequency_preset"): lambda c, q, b: apply_preset(c, b.get("preset", "")),
-    ("GET", "/api/egress"): lambda c, q, b: {"egress": service.egress_list(c)},
-    ("POST", "/api/egress"): lambda c, q, b: service.egress_add(c, (b.get("url") or "").strip(), "*"),
-    ("DELETE", "/api/egress"): lambda c, q, b: service.egress_remove(c, b.get("url", "")),
+    "GET /api/providers": lambda c, a: {"providers": service.provider_list(c), **_prefs()},
+    "GET /api/tasks": lambda c, a: {"tasks": service.task_list(c, limit=60)},
+    "GET /api/jobs": lambda c, a: {"jobs": service.jobs_get(c, a.get("task_id"), a.get("provider"), a.get("limit") or 500)},
+    "POST /api/crawl": crawl,
+    "POST /api/open_url": open_url,
+    "POST /api/login": lambda c, a: start_login(c, a.get("provider", "")),
+    "GET /api/login_status": lambda c, a: {**service.login_status(c, a["provider"]), "login": login_state.get(a["provider"], {})},
+    "POST /api/logout": lambda c, a: service.logout(c, a.get("provider", "")),
+    "POST /api/frequency_preset": lambda c, a: apply_preset(c, a.get("preset", "")),
+    "GET /api/egress": lambda c, a: {"egress": service.egress_list(c)},
+    "POST /api/egress": lambda c, a: service.egress_add(c, (a.get("url") or "").strip(), "*"),
+    "DELETE /api/egress": lambda c, a: service.egress_remove(c, a.get("url", "")),
 }

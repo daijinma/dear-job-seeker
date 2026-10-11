@@ -14,13 +14,14 @@ MCP client config (Claude Desktop / Cursor / Claude Code `.mcp.json`):
 {"mcpServers": {"dear-job-seeker": {"command": "/abs/path/.venv/bin/djs"}}}
 ```
 
-## Web UI (for non-technical users)
+## Desktop app (for non-technical users)
 
 ```bash
-.venv/bin/djs ui            # opens http://127.0.0.1:8765 ; --port N, --no-open
+.venv/bin/pip install -e '.[ui]'
+.venv/bin/djs ui
 ```
 
-Same process model as the MCP server (shared queue worker, same SQLite). Four screens: search, results (CSV export), BOSS login, settings (speed: steady / standard / fast, account, optional proxy list). Binds 127.0.0.1 only and rejects foreign Host/Origin headers. Plain `djs` still starts the stdio MCP server.
+Opens a native window (pywebview). There is no local web port or HTTP server: the page talks to Python through the window's built-in bridge. It shares the queue worker and SQLite with the MCP server. Four screens: search, results (CSV export), BOSS login, settings (speed: steady / standard / fast, account, optional proxy list). The stdio MCP server (plain `djs`) is the interface for AI clients.
 
 ## Tools
 

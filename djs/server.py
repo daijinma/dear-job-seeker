@@ -94,8 +94,8 @@ def egress_list() -> dict:
 
 def main() -> None:
     if sys.argv[1:2] == ["ui"]:
-        from djs import ui_server
-        return ui_server.main(sys.argv[2:])
+        from djs import ui_app
+        return ui_app.main(sys.argv[2:])
     engine.start_worker()
     mcp.run(transport="stdio")
 

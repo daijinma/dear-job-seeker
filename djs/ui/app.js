@@ -1,24 +1,25 @@
-const SITES = { nowcoder: "牛客网", iguopin: "国聘", chinahr: "新华英才", boss: "BOSS 直聘" };
+const SITES = {};  // name -> display label, filled from GET /api/providers
 const STATUS = { pending: ["排队中", "gray"], running: ["进行中", ""], waiting_login: ["等待登录", "warn"], done: ["完成", "ok"], dead: ["已放弃", "gray"] };
 const PRESETS = [["steady", "稳妥", "推荐 · 慢一点，更安全"], ["standard", "标准", "速度和安全折中"], ["fast", "较快", "可能被网站暂时限制"]];
 const CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="m5 12 5 5 9-10"/></svg>';
-const S = { providers: [], tasks: [], preset: "steady", picked: new Set(["nowcoder", "iguopin", "chinahr"]), site: "all", jobs: [], proxyOn: false };
+const S = { providers: [], tasks: [], preset: "steady", picked: null, site: "all", jobs: [], proxyOn: false };
 let timer = null;
 
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-async function api(path, method = "GET", body) {
-  const r = await fetch("/api/" + path, { method, body: body && JSON.stringify(body), headers: body ? { "Content-Type": "application/json" } : {} });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || "出错了，请稍后再试");
+async function api(route, payload = {}) {
+  const data = await window.pywebview.api.call(route, payload);
+  if (data.error) throw new Error(data.error);
   return data;
 }
 const pill = (text, cls = "") => `<span class="pill ${cls}">${esc(text)}</span>`;
 const loggedIn = () => S.providers.find((p) => p.name === "boss")?.logged_in;
 
 async function refresh() {
-  const [p, t] = await Promise.all([api("providers"), api("tasks")]);
+  const [p, t] = await Promise.all([api("GET /api/providers"), api("GET /api/tasks")]);
   S.providers = p.providers;
+  S.providers.forEach((x) => { SITES[x.name] = x.label; });
+  S.picked ||= new Set(S.providers.filter((x) => x.auth === "public" && !x.requires_city).map((x) => x.name));
   S.preset = p.preset || "steady";
   S.tasks = t.tasks;
 }
@@ -71,7 +72,7 @@ async function pollSearch() {
 async function startSearch() {
   const picked = [...S.picked].filter((k) => k !== "boss" || loggedIn());
   try {
-    await api("crawl", "POST", { keyword: $("#kw").value, city: $("#city").value, providers: picked });
+    await api("POST /api/crawl", { keyword: $("#kw").value, city: $("#city").value, providers: picked });
     $("#msg").textContent = "";
     await pollSearch();
   } catch (e) { $("#msg").textContent = e.message; }
@@ -94,7 +95,7 @@ const salary = (j) => j.salary_text || "面议";
 function jobCard(j) {
   return `<div class="card job"><h3>${esc(j.title)}</h3><div class="sub">${esc(j.company)}</div><div class="salary">${esc(salary(j))}</div>
     <div class="tags">${j.city ? pill(j.city, "gray") : ""}${pill(SITES[j.provider] || j.provider)}</div>
-    ${j.source_url ? `<a href="${esc(j.source_url)}" target="_blank" rel="noopener">查看详情 →</a>` : ""}</div>`;
+    ${j.source_url ? `<a data-act="open" data-url="${esc(j.source_url)}">查看详情 →</a>` : ""}</div>`;
 }
 
 const shown = () => S.jobs.filter((j) => S.site === "all" || j.provider === S.site);
@@ -107,18 +108,19 @@ function renderJobs() {
   $("#jobs").innerHTML = shown().length ? shown().map(jobCard).join("") : '<div class="card empty sub" style="grid-column:1/-1">还没有结果，去“查找”试试吧</div>';
 }
 
-function exportCsv() {
+async function exportCsv() {
   const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = [["岗位", "公司", "薪资", "城市", "网站", "链接"], ...shown().map((j) => [j.title, j.company, salary(j), j.city, SITES[j.provider] || j.provider, j.source_url])];
-  const blob = new Blob(["﻿" + rows.map((r) => r.map(cell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
-  Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "岗位.csv" }).click();
+  const r = await window.pywebview.api.save_csv("岗位.csv", "\ufeff" + rows.map((r) => r.map(cell).join(",")).join("\r\n"));
+  if (r.saved) alert("已保存到：" + r.saved);
+  else if (r.error) alert(r.error);
 }
 
 async function viewResults() {
   S.site = "all";
   $("#view").innerHTML = `<div class="head"><div><h1>找到 <span id="count">0</span> 个岗位</h1><div class="sub">来自你最近的查找</div></div>
     <button class="btn line" data-act="export">导出表格</button></div><div class="chips" id="sites" style="margin-top:20px"></div><div class="jobs" id="jobs"></div>`;
-  S.jobs = (await api("jobs")).jobs;
+  S.jobs = (await api("GET /api/jobs")).jobs;
   renderJobs();
 }
 
@@ -137,11 +139,11 @@ function loginModal(state = "idle", error = "") {
 }
 
 async function openLogin() {
-  try { await api("login", "POST", { provider: "boss" }); } catch (e) { return loginModal("failed", e.message); }
+  try { await api("POST /api/login", { provider: "boss" }); } catch (e) { return loginModal("failed", e.message); }
   loginModal("running");
   for (;;) {
     await new Promise((r) => setTimeout(r, 2000));
-    const { login } = await api("login_status?provider=boss");
+    const { login } = await api("GET /api/login_status", { provider: "boss" });
     if (login.state === "running") continue;
     loginModal(login.state, login.error);
     await route();
@@ -151,7 +153,7 @@ async function openLogin() {
 
 /* ---------- 设置 ---------- */
 async function viewSettings() {
-  const { egress } = await api("egress");
+  const { egress } = await api("GET /api/egress");
   const proxies = egress.filter((e) => e.id !== "direct").map((e) => `<div class="row"><span>${esc(e.id)}</span><a data-act="del-proxy" data-url="${esc(e.id)}">删除</a></div>`).join("");
   $("#view").innerHTML = `<div class="settings narrow"><h1>设置</h1>
     <div class="card"><h2>查找速度</h2><div class="sub">越快，越容易被招聘网站暂时限制访问。不确定就选“稳妥”。</div>
@@ -181,13 +183,14 @@ const ACTIONS = {
   close: closeModal,
   site: (el) => { S.site = el.dataset.k; renderJobs(); },
   export: exportCsv,
-  preset: async (el) => { await api("frequency_preset", "POST", { preset: el.dataset.k }); S.preset = el.dataset.k; viewSettings(); },
-  logout: async () => { await api("logout", "POST", { provider: "boss" }); await route(); },
+  open: (el) => api("POST /api/open_url", { url: el.dataset.url }),
+  preset: async (el) => { await api("POST /api/frequency_preset", { preset: el.dataset.k }); S.preset = el.dataset.k; viewSettings(); },
+  logout: async () => { await api("POST /api/logout", { provider: "boss" }); await route(); },
   "proxy-toggle": () => { S.proxyOn = !S.proxyOn; viewSettings(); },
   "add-proxy": async () => {
-    try { await api("egress", "POST", { url: $("#proxy-url").value }); await viewSettings(); } catch (e) { $("#msg").textContent = e.message; }
+    try { await api("POST /api/egress", { url: $("#proxy-url").value }); await viewSettings(); } catch (e) { $("#msg").textContent = e.message; }
   },
-  "del-proxy": async (el) => { await api("egress", "DELETE", { url: el.dataset.url }); viewSettings(); },
+  "del-proxy": async (el) => { await api("DELETE /api/egress", { url: el.dataset.url }); viewSettings(); },
 };
 
 document.addEventListener("click", (e) => {
@@ -195,4 +198,4 @@ document.addEventListener("click", (e) => {
   if (el) ACTIONS[el.dataset.act](el);
 });
 addEventListener("hashchange", route);
-route();
+addEventListener("pywebviewready", route);
