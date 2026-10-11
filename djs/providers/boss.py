@@ -7,12 +7,9 @@ see every field but the salary, which Boss shows after login only (auth='optiona
 """
 from __future__ import annotations
 
-from contextlib import suppress
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
-import httpx
-
-from ._browser import XHR_ACCEPT
+from ._browser import XHR_ACCEPT, api_get, fresh_visit, is_browser
 from .base import Blocked, Login, LoginRequired, Provider, get_json, need
 
 BASE = "https://www.zhipin.com"
@@ -23,9 +20,6 @@ SEARCH_PAGE = BASE + "/web/geek/jobs"
 HEADERS = {"Accept": XHR_ACCEPT, "X-Requested-With": "XMLHttpRequest"}
 NATIONWIDE = "100010000"                 # Boss's own "全国" city code; the other city codes live in djs.cities
 STOKEN = "__zp_stoken__"                 # anti-bot token the page's scripts write on every load
-# Deleted, not blanked: wait_cookie() takes "name=" with an empty value as present
-EXPIRE_STOKEN = (f"() => ['', ';domain=.zhipin.com'].forEach(d => document.cookie = "
-                 f"'{STOKEN}=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT' + d)")
 HREF = "() => location.href"
 NO_SALARY = ("", "-", "--", "-K", "-k")  # what Boss draws where it hides the salary
 
@@ -71,16 +65,16 @@ class Boss(Provider):
                   cookies_any=("wt2", "zp_at"), unlocks="能看到薪资")
 
     def warmup(self, client, payload: dict) -> None:
-        """Load the search page so its scripts write a fresh __zp_stoken__. A token left in the profile would satisfy
-        wait_cookie at once and Boss then answers 37, so it is deleted and the page loaded again. Without a new token
-        after 15 s the first request still decides: its answer (37 -> Blocked) is the real verdict."""
-        url = self._search_page(payload)
-        client.goto(url)
-        client.eval(EXPIRE_STOKEN)
-        client.goto(url)
-        with suppress(httpx.ReadTimeout):
-            client.wait_cookie(STOKEN, timeout=15)
-        if "_security_check" in client.eval(HREF):  # Boss's human-verification page: no request gets past it
+        """Nothing up front: every API call loads its own fresh page (see _visit)."""
+
+    def _visit(self, client, url: str) -> None:
+        """Boss blanks an automated page a few seconds after it loads (a later in-page request then fails with
+        'Failed to parse URL'), so each API call gets a freshly loaded page with a new __zp_stoken__."""
+        if not is_browser(client):
+            return
+        fresh_visit(client, url, STOKEN)
+        # the human-verification PAGE stops everything; a passed check only leaves ?_security_check=... in the query
+        if "security_check" in urlparse(client.eval(HREF)).path:
             raise Blocked("Boss redirected to its security check page")
 
     def _search_page(self, payload: dict) -> str:
@@ -91,7 +85,8 @@ class Boss(Provider):
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         params = {"query": payload["keyword"], "city": self.city_code(payload.get("city")) or NATIONWIDE,
                   "page": page, "pageSize": self.page_size, "scene": 1}
-        zp = check_body(get_json(client.get(SEARCH_URL, params=params, headers=HEADERS)))
+        self._visit(client, self._search_page(payload))
+        zp = check_body(get_json(api_get(client, SEARCH_URL, params=params, headers=HEADERS)))
         return need(zp, "jobList", typ=list)
 
     def job_id(self, job: dict) -> str:
@@ -101,7 +96,8 @@ class Boss(Provider):
         params = {"securityId": need(job, "securityId", typ=str)}
         if job.get("lid"):
             params["lid"] = job["lid"]
-        zp = check_body(get_json(client.get(DETAIL_URL, params=params, headers=HEADERS)))
+        self._visit(client, SEARCH_PAGE)  # the job's own page drew a security check within two visits; the list page does not
+        zp = check_body(get_json(api_get(client, DETAIL_URL, params=params, headers=HEADERS)))
         need(zp, "jobInfo", typ=dict)
         return zp
 

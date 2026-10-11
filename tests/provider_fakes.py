@@ -25,10 +25,12 @@ class FakeBrowser:
                  cookie_timeout=False):
         self.http = client(body, status, text, seen=seen)
         jar = [{"name": name, "value": value} for name, value in (cookies or {}).items()]
-        self.page = SimpleNamespace(context=SimpleNamespace(cookies=lambda url: jar))
+        rec = lambda name: (lambda *a, **k: self.calls.append((name, a[0] if a else k.get("name"))))  # noqa: E731
+        self.page = SimpleNamespace(goto=rec("page.goto"), wait_for_load_state=rec("page.settle"),
+                                    context=SimpleNamespace(cookies=lambda url: jar, clear_cookies=rec("clear_cookie")))
         self.calls, self.href, self.cookie_timeout = [], href, cookie_timeout
 
-    def get(self, url, **kwargs):
+    def get(self, url, paced=True, **kwargs):
         return self.http.get(url, **kwargs)
 
     def post(self, url, **kwargs):

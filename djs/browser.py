@@ -157,11 +157,14 @@ class BrowserClient:
     def __init__(self, page, prov, exit_id: str, interval: float, jitter: float):
         self.page, self._pace = page, (prov.name, exit_id, interval, jitter)
 
-    def request(self, method, url, *, params=None, headers=None, data=None, json=None, content=None, timeout=20):
+    def request(self, method, url, *, params=None, headers=None, data=None, json=None, content=None, timeout=20,
+                paced=True):
+        """paced=False: the call belongs to a visit whose page load was already paced (see goto)."""
         # an httpx.Request encodes URL, params and body, so both transports send the same bytes
         req = httpx.Request(method, urljoin(self.page.url, url), params=params, headers=headers, data=data,
                             json=json, content=content)
-        pacer.wait(*self._pace)
+        if paced:
+            pacer.wait(*self._pace)
         arg = {"url": str(req.url), "method": method, "headers": dict(req.headers),
                "body": req.content.decode() or None, "timeout": timeout * 1000}
         with _guard():

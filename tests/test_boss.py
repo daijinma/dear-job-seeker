@@ -13,7 +13,7 @@ from djs import auth, cities
 from djs.jobs import derive
 from djs.normalize import missing
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
-from djs.providers.boss import EXPIRE_STOKEN, STOKEN, Boss
+from djs.providers.boss import STOKEN, Boss
 from provider_fakes import FakeBrowser
 
 FIX = Path(__file__).parent / "fixtures"
@@ -256,27 +256,43 @@ def test_probe_payload_city_is_known():
 SEARCH_PAGE = "https://www.zhipin.com/web/geek/jobs"
 
 
-def test_warmup_loads_the_search_page_twice_around_deleting_the_stale_token():
-    page = FakeBrowser(href="https://www.zhipin.com/web/geek/jobs?query=python")
-    Boss().warmup(page, {"keyword": "python", "city": "上海"})
-    url = f"{SEARCH_PAGE}?query=python&city=101020100"
-    assert page.calls == [("goto", url), ("eval", EXPIRE_STOKEN), ("goto", url), ("wait_cookie", STOKEN),
-                          ("eval", "() => location.href")]
-    # deleted (expired), never blanked: wait_cookie counts "name=" with an empty value as present
-    assert "1970" in EXPIRE_STOKEN and STOKEN in EXPIRE_STOKEN
+def visit_calls(url):
+    """What one fresh visit asks of the browser, in order."""
+    return [("clear_cookie", STOKEN), ("goto", url), ("page.settle", "networkidle"), ("wait_cookie", STOKEN),
+            ("eval", "() => location.href")]
 
 
-def test_warmup_without_a_search_has_a_bare_page_and_a_missing_token_is_not_fatal():
-    page = FakeBrowser(cookie_timeout=True)           # the token never came: the first request decides
-    Boss().warmup(page, {})                           # job_detail warms up with no keyword at all
-    assert page.calls[0] == ("goto", SEARCH_PAGE)
+def test_warmup_does_nothing_because_every_call_loads_its_own_page():
+    page = FakeBrowser()
+    Boss().warmup(page, {"keyword": "python"})
+    assert page.calls == []
+
+
+def test_fetch_loads_a_fresh_search_page_with_a_new_token_right_before_the_api_call():
+    """Boss blanks an automated page seconds after load, so each API call gets a freshly loaded page."""
+    page = FakeBrowser(body=fixture("boss_list.json"), href="https://www.zhipin.com/web/geek/jobs?query=python")
+    Boss().fetch(page, {"keyword": "python", "city": "上海"}, 1)
+    assert page.calls == visit_calls(f"{SEARCH_PAGE}?query=python&city=101020100")
+
+
+def test_detail_loads_the_plain_search_page_first():
+    job = fixture("boss_list.json")["zpData"]["jobList"][0]
+    page = FakeBrowser(body=fixture("boss_detail.json"), href="https://www.zhipin.com/job_detail/x.html")
+    Boss().detail(page, job)
+    assert page.calls == visit_calls(SEARCH_PAGE)
+
+
+def test_a_missing_token_is_not_fatal_and_an_unknown_city_is_refused():
+    Boss().fetch(FakeBrowser(body=fixture("boss_list.json"), cookie_timeout=True), {"keyword": "x"}, 1)
     with pytest.raises(ValueError, match="暂不支持城市「火星」"):
-        Boss().warmup(FakeBrowser(), {"keyword": "x", "city": "火星"})
+        Boss().fetch(FakeBrowser(), {"keyword": "x", "city": "火星"}, 1)
 
 
-def test_warmup_stops_at_boss_security_check_page():
+def test_the_security_check_page_blocks_but_the_url_left_after_passing_it_does_not():
     with pytest.raises(Blocked, match="security check"):
-        Boss().warmup(FakeBrowser(href="https://www.zhipin.com/web/common/_security_check.html?x=1"), {"keyword": "x"})
+        Boss().fetch(FakeBrowser(href="https://www.zhipin.com/web/common/_security_check.html?x=1"), {"keyword": "x"}, 1)
+    passed = "https://www.zhipin.com/web/geek/jobs?query=x&city=101210100&_security_check=1_1791707741840"
+    assert Boss().fetch(FakeBrowser(body=fixture("boss_list.json"), href=passed), {"keyword": "x"}, 1)
 
 
 @pytest.mark.parametrize("shown", ["", " ", "-", "--", "-K", "-k", "\ue0a1-\ue0a2K", "\ue000", "\uf8ff1K"])
