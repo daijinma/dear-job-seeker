@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from djs import auth, db, egress, providers, service, taskqueue, ui_api, ui_app
+from provider_fakes import job
 
 
 @pytest.fixture
@@ -134,6 +135,24 @@ def test_search_jobs_route_lists_only_complete_jobs_unless_asked_and_counts_the_
     everything = call("GET /api/search_jobs", {"keyword": "前端", "complete_only": False})
     assert everything["total"] == 2 and everything["incomplete"]["count"] == 1
     assert {j["title"]: j["incomplete_reason"] for j in everything["jobs"]} == {"完整": None, "缺薪资": "面议"}
+
+
+def test_search_jobs_route_takes_the_pay_filter_and_folds_the_same_job_on_two_sites(call):
+    call("POST /api/crawl", {"keyword": "前端", "city": "杭州", "providers": ["nowcoder", "chinahr"]})
+    conn = db.connect()
+    same = {"title": "前端开发", "company": "甲科技有限公司", "city": "杭州"}
+    job(conn, "nowcoder", "n", [1], **same, district="西湖区", salary_min=15000, salary_max=25000, salary_unit="元/月")
+    job(conn, "chinahr", "c", [2], **same, salary_min=700, salary_max=900, salary_unit="元/天")   # 15225-19575 a month
+    ask = lambda **args: call("GET /api/search_jobs", {"keyword": "前端", "city": "杭州", **args})   # noqa: E731
+    page = ask()
+    assert (page["total"], page["all_total"], page["merged"]) == (1, 1, 1)
+    [one] = page["jobs"]
+    assert (one["provider"], [(o["provider"], o["label"]) for o in one["also_on"]]) == ("nowcoder", [("chinahr", "新华英才")])
+    assert [s["count"] for s in page["per_site"]] == [1, 1]   # each site still has its job
+    assert ask(min_month_salary=20000)["total"] == 1          # 15-25K can pay 20000 a month; the day rate (19575) cannot
+    assert ask(min_month_salary=20000, provider="chinahr")["jobs"] == []
+    assert ask(min_month_salary=30000)["jobs"] == [] and ask(min_month_salary=0)["total"] == 1
+    assert ask(min_month_salary=None)["total"] == 1
 
 
 def test_retry_only_touches_dead_and_login_blocked_tasks(call):

@@ -7,17 +7,21 @@ import threading
 
 import httpx
 
-from djs import auth, browser, egress, engine, jobs, pacer, providers, taskqueue
+from djs import auth, browser, egress, engine, jobs, pacer, providers, query, taskqueue
 from djs.normalize import CORE
 from djs.providers.base import Blocked, FetchError, LoginRequired
 
 JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, district, education, experience, "
-            "salary_text, salary_min, salary_max, salary_unit, salary_months, description, source_url, "
-            "published_at, published_at_kind, missing, complete, detail_error, first_seen_at, last_seen_at")
-
-
-def _label(prov) -> str:
-    return prov.label or prov.name
+            "salary_text, salary_min, salary_max, salary_unit, salary_months, salary_month_min, salary_month_max, "
+            "description, source_url, published_at, published_at_kind, missing, complete, detail_error, "
+            "first_seen_at, last_seen_at")
+# What jobs_get returns per job (fields 'summary'): short enough that a few dozen fit in a client's context. 'full'
+# swaps the description_snippet for the whole description.
+SUMMARY = ("id", "provider", "label", "title", "company", "city", "district", "salary_text", "salary_month_min",
+           "salary_month_max", "salary_unit", "salary_months", "education", "experience", "source_url", "missing",
+           "also_on")
+SNIPPET = 120
+MAX_LIMIT = 100
 
 
 def _with_login() -> list[tuple[str, object]]:
@@ -27,7 +31,7 @@ def _with_login() -> list[tuple[str, object]]:
 
 
 def _login_row(name: str, prov, status: dict) -> dict:
-    return {"provider": name, "label": _label(prov), "auth": prov.auth, **status}
+    return {"provider": name, "label": providers.label(name), "auth": prov.auth, **status}
 
 
 def login_overview() -> list[dict]:
@@ -43,7 +47,7 @@ def provider_list(conn, logins: list[dict] | None = None) -> list[dict]:
     for name in providers.names():
         p = providers.get(name)
         interval, jitter, max_pages = pacer.effective(conn, name)
-        d = {"name": name, "label": _label(p), "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
+        d = {"name": name, "label": providers.label(name), "kind": p.kind, "auth": p.auth, "requires_city": p.requires_city,
              "interval": interval, "jitter": jitter, "max_pages": max_pages,
              "min_interval": p.min_interval, "page_cap": p.page_cap, "note": p.note,
              "transports": list(p.transports), "transport": engine.transport_for(conn, p, logged_in.get(name, False)),
@@ -72,6 +76,53 @@ def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=
     return {"task_id": taskqueue.create(conn, provider, payload)}
 
 
+def crawl_many(conn, sites: list[str], keyword: str, city: str | None, max_pages=None) -> list[int]:
+    """One crawl task per site, all or none: a site that cannot start (no key, no such city) cancels the others.
+    IMMEDIATE: a transaction that reads first and writes later fails at once with 'database is locked' whenever a
+    worker commits in between (the busy timeout does not help it), so the write lock is taken up front."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        ids = [crawl_start(conn, site, keyword=keyword, city=city, max_pages=max_pages)["task_id"] for site in sites]
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return ids
+
+
+def _takes_city(name: str, city: str) -> bool:
+    """The platform can search this city (or none: a nationwide search, unless it requires a city)."""
+    try:
+        providers.get(name).city_code(city or None)
+    except ValueError:
+        return False
+    return True
+
+
+def _works_as_is(p: dict, city: str) -> bool:
+    """A provider_list row a search can use without asking the user anything: no login required, no browser window, its
+    keys set, a capture transport that can run now, and a city it can search (or none, where it takes none)."""
+    return (p["auth"] != "login" and not p["needs_headed"] and p["configured"]
+            and (p["transport"] == "http" or p["browser_ready"]) and _takes_city(p["name"], city))
+
+
+def default_sites(conn, city: str) -> list[str]:
+    """The platforms a search uses when none are named: the ones that work as they are, like the app's preselection."""
+    return [p["name"] for p in provider_list(conn) if _works_as_is(p, city)]
+
+
+def search(conn, keyword, city=None, sites=None, max_pages=1) -> dict:
+    """Start a search: one crawl task on each of `sites`, or on every platform usable right now. Returns at once."""
+    keyword, city = search_key(keyword, city)
+    if not keyword:
+        raise ValueError("keyword is required")
+    chosen = list(sites) if sites else default_sites(conn, city)
+    if not chosen:
+        raise ValueError("no platform is usable right now (see provider_list)")
+    return {"keyword": keyword, "city": city or None, "providers": chosen,
+            "task_ids": crawl_many(conn, chosen, keyword, city or None, max_pages)}
+
+
 def task_list(conn, status=None, limit=20) -> list[dict]:
     return taskqueue.list_(conn, status, limit)
 
@@ -79,7 +130,7 @@ def task_list(conn, status=None, limit=20) -> list[dict]:
 def load_job(row) -> dict:
     """A jobs row as the tools return it: `missing` as a list, `complete` as a bool, `detail` as parsed JSON."""
     job = dict(row)
-    job["missing"] = [name for name in (job["missing"] or "").split(",") if name]
+    job["missing"] = jobs.gaps(job["missing"])
     job["complete"] = bool(job["complete"])
     if job.get("detail"):
         job["detail"] = json.loads(job["detail"])
@@ -93,7 +144,20 @@ def _login_hides_salary(provider: str, logged_in) -> bool:
         return False
 
 
-def _why(job: dict, element: str, logged_in) -> str:
+def _being_completed(job: dict, names: list[str], logged_in) -> bool:
+    """A queued or running task has yet to request this job's detail (`detail_due`), the platform has one, and it
+    could supply what the job lacks."""
+    if not job.get("detail_due"):
+        return False
+    try:
+        prov = providers.get(job["provider"])
+    except KeyError:  # a platform that was removed after the job was stored
+        return False
+    session = prov.login is not None and logged_in(job["provider"])
+    return prov.has_detail and prov.detail_can_fill(names, session)
+
+
+def _why(job: dict, element: str, logged_in, completing: bool) -> str:
     """Why one core element is absent from a job."""
     if element == "salary" and "面议" in (job.get("salary_text") or ""):
         return "面议"
@@ -101,16 +165,20 @@ def _why(job: dict, element: str, logged_in) -> str:
         return "需登录才能看到薪资"
     if element == "description" and job.get("detail_error"):
         return "详情获取失败"
+    if completing:
+        return "正在补全详情"
     return f"平台未提供{CORE[element]}"
 
 
 def reasons(job: dict, logged_in=None) -> list[str]:
     """Why each core element a job lacks is absent, in a few Chinese words each (empty when nothing is missing).
     `job["missing"]` is the stored comma-joined text or a list; `logged_in(provider)` defaults to the saved login
-    state."""
-    names = job["missing"].split(",") if isinstance(job["missing"], str) else job["missing"]
+    state. A job whose detail is still to be fetched (`job["detail_due"]`, see query.DUE) is being completed, not
+    lacking."""
+    names = jobs.gaps(job["missing"]) if isinstance(job["missing"], str) else job["missing"]
     logged_in = logged_in or login_lookup()
-    return [_why(job, name, logged_in) for name in names if name]
+    completing = bool(names) and _being_completed(job, names, logged_in)
+    return list(dict.fromkeys(_why(job, name, logged_in, completing) for name in names))   # "being completed" once
 
 
 def incomplete_reason(job: dict, logged_in=None) -> str | None:
@@ -124,33 +192,80 @@ def login_lookup():
 
 
 def explain(rows: list[dict]) -> list[dict]:
-    """Adds `incomplete_reason` to each job."""
+    """Adds `incomplete_reason` to each job (and takes the `detail_due` flag it was worked out from)."""
     logged_in = login_lookup()
     for job in rows:
         job["incomplete_reason"] = incomplete_reason(job, logged_in)
+        job.pop("detail_due", None)
     return rows
 
 
-def jobs_get(conn, task_id=None, provider=None, limit=50, with_detail=False, complete_only=True) -> list[dict]:
-    """Stored jobs, newest first. By default only the complete ones (every core element present); complete_only=False
-    adds the rest, each with `missing` and `incomplete_reason`."""
-    cols = JOB_COLS + (", detail" if with_detail else "")
-    rows = conn.execute(
-        f"SELECT {cols} FROM jobs WHERE (? IS NULL OR id IN (SELECT job_id FROM task_jobs WHERE task_id=?))"
-        " AND (? IS NULL OR provider=?) AND (? = 0 OR complete = 1) ORDER BY id DESC LIMIT ?",
-        (task_id, task_id, provider, provider, int(bool(complete_only)), limit)).fetchall()
-    return explain([load_job(r) for r in rows])
+def _snippet(text) -> str:
+    """The start of a description as one line of at most SNIPPET characters."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= SNIPPET else flat[:SNIPPET - 1] + "…"
+
+
+def _shaped(job: dict, fields: str) -> dict:
+    """One job as jobs_get returns it: the SUMMARY fields, the description (whole, or its start) and, for a job that
+    lacks something, why."""
+    out = {name: job[name] for name in SUMMARY}
+    if fields == "full":
+        out["description"] = job["description"]
+    else:
+        out["description_snippet"] = _snippet(job["description"])
+    if job["missing"]:
+        out["incomplete_reason"] = job["incomplete_reason"]
+    return out
+
+
+def search_key(keyword, city) -> tuple[str, str]:
+    """A search is told by its keyword and city, as typed minus the spaces around them ('' = no city)."""
+    return (keyword or "").strip(), (city or "").strip()
+
+
+def _tasks_of(conn, keyword: str, city: str) -> list[dict]:
+    tasks = taskqueue.of_search(conn, keyword, city)
+    if not tasks:
+        raise ValueError(f"no search for keyword={keyword!r}, city={city or None!r}; start one with search")
+    return tasks
+
+
+def jobs_get(conn, keyword=None, city=None, task_id=None, provider=None, min_month_salary=None, max_month_salary=None,
+             text=None, complete_only=True, dedupe=True, fields="summary", limit=20, offset=0) -> dict:
+    """One page of stored jobs, as {jobs, total, returned, next_offset} (next_offset None on the last page). Where from:
+    the search (keyword and city as given to `search`), a task and/or a platform; none = every stored job. Filters: the
+    job's city, the pay per month overlapping min_month_salary..max_month_salary, `text` (every word in the title or the
+    description). By default only complete jobs, each job once (`also_on` lists the other platforms that carry it).
+    With a search, `searching` says whether its tasks still run."""
+    if fields not in ("summary", "full"):
+        raise ValueError(f"fields must be 'summary' or 'full', not {fields!r}")
+    keyword, city = search_key(keyword, city)
+    tasks = _tasks_of(conn, keyword, city) if keyword else None
+    limit, offset = max(1, min(int(limit), MAX_LIMIT)), max(0, int(offset))
+    wh = query.where(search=(keyword, city) if keyword else None, task_id=task_id, provider=provider, city=city,
+                     min_month_salary=min_month_salary, max_month_salary=max_month_salary, text=text,
+                     complete_only=complete_only)
+    rows, total = query.find(conn, wh, sort="newest", limit=limit, offset=offset, dedupe=dedupe, description=True)
+    for job in rows:
+        job["missing"], job["label"] = jobs.gaps(job["missing"]), providers.label(job["provider"])
+    found = [_shaped(job, fields) for job in explain(rows)]
+    after = offset + len(found)
+    out = {"jobs": found, "total": total, "returned": len(found), "next_offset": after if after < total else None}
+    if tasks is not None:
+        out["searching"] = any(t["status"] in taskqueue.ACTIVE for t in tasks)
+    return out
 
 
 def _job(conn, job_id: int) -> dict:
-    row = conn.execute(f"SELECT {JOB_COLS}, detail FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = conn.execute(f"SELECT {JOB_COLS}, detail, {query.DUE} FROM jobs j WHERE j.id=?", (job_id,)).fetchone()
     if row is None:
         raise ValueError(f"job {job_id} not found")
     return explain([load_job(row)])[0]
 
 
 def _friendly(prov, exc: Exception) -> str:
-    label = _label(prov)
+    label = providers.label(prov.name)
     if isinstance(exc, LoginRequired):
         return f"{label}: login required; log in and try again"
     if isinstance(exc, Blocked):
@@ -182,15 +297,18 @@ def job_detail(conn, job_id: int) -> dict:
 
 
 def _search_status(statuses: set[str]) -> str:
-    if statuses & {"pending", "running"}:
+    if statuses & set(taskqueue.ACTIVE):
         return "running"
     return "waiting_login" if "waiting_login" in statuses else "done"
 
 
 def _site(name: str, task: dict, found: dict) -> dict:
+    """One platform of a search, from its newest task: status, how many jobs (complete or not), and the outcome (found,
+    no_results, failed, waiting_login or running, with the completion progress while it runs)."""
     jobs_n, complete = found.get(name, (0, 0))
-    return {"provider": name, "label": _label(providers.get(name)), "status": task["status"], "jobs": jobs_n,
-            "complete": complete, "incomplete": jobs_n - complete, "last_error": task["last_error"]}
+    return {"provider": name, "label": providers.label(name), "status": task["status"], "jobs": jobs_n,
+            "complete": complete, "incomplete": jobs_n - complete, "last_error": task["last_error"],
+            **taskqueue.summary(task["status"], jobs_n, task["stats"])}
 
 
 def _search(conn, keyword, city, tasks: list[dict]) -> dict:
@@ -214,6 +332,12 @@ def searches(conn, limit=20) -> list[dict]:
     for t in taskqueue.by_search(conn, limit):
         groups.setdefault((t["keyword"], t["city"]), []).append(t)
     return [_search(conn, keyword, city, tasks) for (keyword, city), tasks in groups.items()]
+
+
+def search_status(conn, keyword, city=None) -> dict:
+    """One search, told by the keyword and city given to `search`: like an entry of `searches`."""
+    keyword, city = search_key(keyword, city)
+    return _search(conn, keyword, city, _tasks_of(conn, keyword, city))
 
 
 def login(conn, provider) -> dict:

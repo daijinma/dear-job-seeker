@@ -8,6 +8,7 @@ import pytest
 
 from djs import db, egress, engine, pacer, providers, server, service, taskqueue
 from djs.providers.base import Blocked, Delisted, Login, LoginRequired, Provider, StructureError, get_json, need
+from provider_fakes import stored_jobs
 
 
 class Fake(Provider):
@@ -264,9 +265,8 @@ def test_engine_happy_path_and_dedupe(env):
     row = status(env, t["id"])
     assert row["status"] == "done"
     assert taskqueue.as_dict(row)["stats"] == {"pages": 2, "jobs_new": 3, "jobs_seen": 0, "details_ok": 3,
-                                               "details_failed": 0, "complete": 0, "incomplete": 3}
-    jobs = {j["source_job_id"]: j for j in service.jobs_get(env.conn, task_id=t["id"], with_detail=True,
-                                                            complete_only=False)}
+                                               "details_failed": 0, "details_total": 3, "complete": 0, "incomplete": 3}
+    jobs = {j["source_job_id"]: j for j in stored_jobs(env.conn, task_id=t["id"], with_detail=True)}
     assert jobs["1"]["description"] == "jd1" and jobs["2"]["detail"] is None and jobs["2"]["detail_error"] is None
     t2 = task(env)
     engine.run_task(env.conn, t2)
@@ -361,7 +361,7 @@ def test_quick_mode_stores_list_items_only(env):
     engine.run_task(env.conn, t)
     stats = taskqueue.as_dict(status(env, t["id"]))["stats"]
     assert asked == [] and stats["jobs_new"] == 2 and stats["details_ok"] == 0
-    job = service.jobs_get(env.conn, task_id=t["id"], with_detail=True, complete_only=False)[0]
+    job = stored_jobs(env.conn, task_id=t["id"], with_detail=True)[0]
     assert job["title"] and job["description"] is None and job["detail"] is None and job["detail_error"] is None
 
 
@@ -373,7 +373,7 @@ def test_job_detail_on_demand_then_cached(env):
                                                     "salary_text": detail and "20-30K",
                                                     "description": detail and detail["jd"]})
     engine.run_task(env.conn, task(env, detail=False))
-    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
+    job_id = stored_jobs(env.conn)[0]["id"]
     env.conn.execute("UPDATE jobs SET city='Hangzhou' WHERE id=?", (job_id,))  # the detail knows no city: keep ours
     got = service.job_detail(env.conn, job_id)
     assert got["description"] == "jd1" and got["salary_text"] == "20-30K" and got["city"] == "Hangzhou"
@@ -385,7 +385,7 @@ def test_job_detail_on_demand_then_cached(env):
 def test_job_detail_failures_are_friendly_and_store_nothing(env):
     mock_client(env, pages({1: [{"id": 1}]}))
     engine.run_task(env.conn, task(env, detail=False))
-    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
+    job_id = stored_jobs(env.conn)[0]["id"]
     with pytest.raises(ValueError, match="not found"):
         service.job_detail(env.conn, 999)
     env.mp.setattr(env.provs["fake"], "detail", boom(StructureError("shape")))
@@ -398,14 +398,14 @@ def test_job_detail_failures_are_friendly_and_store_nothing(env):
         egress.lease(env.conn, "fake", "x")
     with pytest.raises(ValueError, match="cooling down"):
         service.job_detail(env.conn, job_id)
-    assert service.jobs_get(env.conn, with_detail=True, complete_only=False)[0]["detail"] is None
+    assert stored_jobs(env.conn, with_detail=True)[0]["detail"] is None
 
 
 def test_job_detail_on_login_platform_needs_a_cookie(env):
     env.auth.cookies = {"s": "1"}
     mock_client(env, pages({1: [{"id": 1}]}))
     engine.run_task(env.conn, task(env, "fakelogin", city="x", detail=False))
-    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
+    job_id = stored_jobs(env.conn)[0]["id"]
     env.mp.setattr(env.provs["fakelogin"], "detail", boom(LoginRequired("401")))
     with pytest.raises(ValueError, match="login required"):  # cookie expired on the server
         service.job_detail(env.conn, job_id)
@@ -433,9 +433,9 @@ def test_repeat_search_gets_its_own_results(env):
     engine.run_task(env.conn, again)
     assert taskqueue.as_dict(status(env, again["id"]))["stats"]["jobs_new"] == 0
     for t in (first, again):
-        found = service.jobs_get(env.conn, task_id=t["id"], complete_only=False)
+        found = stored_jobs(env.conn, task_id=t["id"])
         assert sorted(j["source_job_id"] for j in found) == ["1", "2"]
-    discoverers = {j["task_id"] for j in service.jobs_get(env.conn, complete_only=False)}
+    discoverers = {j["task_id"] for j in stored_jobs(env.conn)}
     assert discoverers == {first["id"]}  # still "first discovered by"
     assert [t["jobs_found"] for t in taskqueue.list_(env.conn)] == [2, 2]
 
@@ -476,7 +476,8 @@ def test_searches_group_tasks_by_keyword_and_city(env):
         ("fake", "fake", "done", 3), ("fake2", "fake2", "done", 3)]
     assert got[1]["task_ids"] == [go["id"]] and got[1]["per_site"][0]["status"] == "pending"
     assert got[0]["per_site"] == [{"provider": "fakelogin", "label": "fakelogin", "status": "waiting_login",
-                                   "jobs": 0, "complete": 0, "incomplete": 0, "last_error": "login required"}]
+                                   "jobs": 0, "complete": 0, "incomplete": 0, "last_error": "login required",
+                                   "outcome": "waiting_login"}]
     assert [s["keyword"] for s in service.searches(env.conn, limit=1)] == ["rust"]
 
 
@@ -492,7 +493,7 @@ def test_mcp_tools_smoke(env, monkeypatch):
     assert "error" in call("crawl_start", provider="nope", keyword="x")
     assert call("crawl_start", provider="fake", keyword="py", detail=False)["task_id"] == 2
     assert call("task_list")["result"][0]["status"] == "pending"
-    assert call("jobs_get")["result"] == []
+    assert call("jobs_get") == {"jobs": [], "total": 0, "returned": 0, "next_offset": None}
     assert "error" in call("job_detail", job_id=99)
     assert [(s["keyword"], s["task_ids"]) for s in call("search_list")["result"]] == [("py", [1, 2])]
     assert call("login", provider="fakelogin")["logged_in"] is True

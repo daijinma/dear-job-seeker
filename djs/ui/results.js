@@ -1,17 +1,20 @@
 /* 我的结果: pick a search, filter and sort its jobs, read them as cards, open one in the drawer, export a table.
    Only jobs with every core element are listed unless asked; a quiet line says how many are held back and why.
+   The same job on several sites is one card that says where else it is. The salary filter works on the pay per month.
    Job text comes from third-party sites: it only ever enters the page through esc() or textContent. */
 
 const PAGE = 30;
 const REASONS_SHOWN = 3;
 const SORT_OPTIONS = [["mixed", "综合"], ["salary", "薪资从高到低"], ["company", "公司"]];
+const SALARY_OPTIONS = [[0, "不限"], [5000, "5千+"], [10000, "1万+"], [15000, "1.5万+"], [20000, "2万+"], [30000, "3万+"]];   // yuan per month, at least
 const CSV_HEAD = ["岗位", "公司", "薪资", "城市", "网站", "链接", "区", "学历", "经验", "最低薪资", "最高薪资", "薪资单位", "发薪月数", "缺少的信息"];
-let R = null;   // the open results page: { search, searches, provider, sort, showIncomplete, jobs, total, perSite, incomplete, searching, state, error, desc, open }
+let R = null;   // the open results page: { search, searches, provider, sort, minSalary, showIncomplete, jobs, total, all, merged, perSite, incomplete, searching, state, error, desc, open }
 
 const sameSearch = (a, b) => a.keyword === b.keyword && (a.city || "") === (b.city || "");
-const allCount = () => R.perSite.reduce((n, x) => n + x.count, 0);
+const allCount = () => R.all;   // the jobs of the whole search, each one once: what the heading and the 全部 chip say
 const jobQuery = (extra = {}) => ({
-  keyword: R.search.keyword, city: R.search.city || "", provider: R.provider, sort: R.sort, complete_only: !R.showIncomplete, ...extra,
+  keyword: R.search.keyword, city: R.search.city || "", provider: R.provider, sort: R.sort, complete_only: !R.showIncomplete,
+  min_month_salary: R.minSalary || null, ...extra,
 });
 
 /* ---- pieces of a job, shared by the card and the drawer ---- */
@@ -31,7 +34,12 @@ function salaryLabel(j) {
 
 const jobPay = (j, cls = "") => (salaryLabel(j) ? `<div class="salary ${cls}">${esc(salaryLabel(j))}</div>` : '<div class="salary none">薪资未公开</div>');
 const jobMissing = (j) => (j.complete ? "" : `<p class="miss">信息不全：${esc(j.incomplete_reason)}</p>`);
-const jobTags = (j) => `<div class="tags">${j.city ? pill(j.city, "gray") : ""}${pill(j.label)}<span class="when">${since(j.first_seen_at)}发现</span></div>`;
+const alsoBadge = (j) => (j.also_on.length ? pill(`也在 ${j.also_on.map((o) => o.label).join("、")}`, "gray") : "");
+const jobTags = (j) => `<div class="tags">${j.city ? pill(j.city, "gray") : ""}${pill(j.label)}${alsoBadge(j)}<span class="when">${since(j.first_seen_at)}发现</span></div>`;
+
+/* the same job on other sites: a button to each one's own page (a site without a link is only named) */
+const alsoLink = (o) => (o.source_url ? btn(`在${o.label}打开`, "open-url", { u: o.source_url }) : pill(o.label, "gray"));
+const alsoList = (j) => (j.also_on.length ? `<h3 class="label">也在这些网站</h3><ul class="also">${j.also_on.map((o) => `<li>${alsoLink(o)}</li>`).join("")}</ul>` : "");
 
 function jobCard(j) {
   return `<article class="card job"><h3><button type="button" class="job-open" ${act("job", { id: j.id })}>${jobTitle(j)}</button></h3>
@@ -62,6 +70,13 @@ function filtersHtml() {
   return one("all", "全部", allCount()) + R.perSite.map((x) => one(x.provider, x.label, x.count)).join("");
 }
 
+/* the least pay per month, as chips; it stays while nothing matches, so the filter can be taken off again */
+function salaryHtml() {
+  if (R.state !== "ready" || !(R.jobs.length || R.minSalary)) return "";
+  const chips = SALARY_OPTIONS.map(([k, text]) => chip(text, R.minSalary === k, act("salary", { k }), { sm: true })).join("");
+  return `<div class="seg" role="group" aria-label="按月薪筛选"><span class="sub">月薪</span>${chips}</div>`;
+}
+
 /* what the list leaves out, and why: "另有 12 条信息不全（原因：面议 12 · 需登录才能看到薪资 5）" + the switch that shows them */
 function incompleteHtml() {
   const x = R.incomplete;
@@ -77,6 +92,11 @@ function noJobs() {
     ${notesHtml(R.search, true)}${linkBtn("回到查找", "#/search", "primary")}</div>`;
 }
 
+/* the salary filter leaves nothing: say so and offer the way back */
+function noMatch() {
+  return `<div class="card empty"><h2>没有符合这个月薪的岗位</h2><p class="sub">把月薪要求放低一点，或者选“不限”，就能看到更多。</p>${btn("不限月薪", "salary", { k: 0 }, "primary")}</div>`;
+}
+
 /* found something, but not one job is whole: the list is empty for a reason the user can act on */
 function onlyIncomplete() {
   return `<div class="card empty"><h2>找到的岗位信息都不全</h2>
@@ -87,6 +107,7 @@ function listHtml() {
   if (R.state === "error") return emptyState("没能读取结果", R.error, btn("重试", "reload", {}, "primary"));
   if (R.jobs.length) return `<div class="jobs">${R.jobs.map(jobCard).join("")}</div>`;
   if (R.state === "loading" || R.searching) return `<div class="jobs">${skeletons(6)}</div>`;
+  if (R.minSalary) return noMatch();
   return R.incomplete.count && !R.showIncomplete ? onlyIncomplete() : noJobs();
 }
 
@@ -100,10 +121,11 @@ function moreHtml() {
 function paintResults() {
   paint($("#strip"), R.searches.map(stripChip).join(""));
   $("#found").textContent = R.state === "ready" ? `找到 ${allCount()} 个岗位` : "我的结果";
-  $("#what").textContent = searchTitle(R.search);
+  $("#what").textContent = searchTitle(R.search) + (R.merged ? ` · 已合并 ${R.merged} 个重复岗位` : "");
   paint($("#tools"), toolsHtml());
   paint($("#notice"), noticeHtml());
   paint($("#filters"), filtersHtml());
+  paint($("#salary"), salaryHtml());
   paint($("#incomplete"), incompleteHtml());
   paint($("#list"), listHtml());
   paint($("#more"), moreHtml());
@@ -113,13 +135,13 @@ const resultsFrame = () => `<section class="results">
   <nav class="strip" id="strip" aria-label="最近的查找"></nav>
   <div class="head"><div><h1 id="found"></h1><p class="sub" id="what"></p></div><div class="tools" id="tools"></div></div>
   <div id="notice"></div><div class="chips" id="filters" role="group" aria-label="按网站筛选"></div>
-  <div id="incomplete"></div><div id="list"></div><div class="more-row" id="more"></div></section>`;
+  <div id="salary"></div><div id="incomplete"></div><div id="list"></div><div class="more-row" id="more"></div></section>`;
 
 /* ---- loading ---- */
 function takePage(d, append) {
   const have = new Set(R.jobs.map((j) => j.id));
   R.jobs = append ? [...R.jobs, ...d.jobs.filter((j) => !have.has(j.id))] : d.jobs;
-  Object.assign(R, { total: d.total, perSite: d.per_site, incomplete: d.incomplete, searching: d.searching, state: "ready" });
+  Object.assign(R, { total: d.total, all: d.all_total, merged: d.merged, perSite: d.per_site, incomplete: d.incomplete, searching: d.searching, state: "ready" });
 }
 
 /* the first page (view start, filter, sort): a failure here becomes the error state with a retry button */
@@ -176,8 +198,8 @@ async function viewResults(params, e) {
   }
   const wanted = { keyword: params.get("k"), city: params.get("c") || "" };
   R = {
-    search: searches.find((s) => sameSearch(s, wanted)) || searches[0], searches, provider: null, sort: "mixed", showIncomplete: false,
-    jobs: [], total: 0, perSite: [], incomplete: { count: 0, reasons: [] }, searching: false, state: "loading", desc: new Map(), open: null,
+    search: searches.find((s) => sameSearch(s, wanted)) || searches[0], searches, provider: null, sort: "mixed", minSalary: 0, showIncomplete: false,
+    jobs: [], total: 0, all: 0, merged: 0, perSite: [], incomplete: { count: 0, reasons: [] }, searching: false, state: "loading", desc: new Map(), open: null,
   };
   $("#view").innerHTML = resultsFrame();
   paintResults();
@@ -203,11 +225,11 @@ function paintDescription() {
 
 /* the close button is a labelled button and takes the focus when the drawer opens, so it is the first thing to reach */
 function drawerHtml(j) {
-  const open = j.source_url ? btn("打开原页面", "open-source", {}, "primary") : "";
+  const open = j.source_url ? btn("打开原页面", "open-url", { u: j.source_url }, "primary") : "";
   return `<aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
     <div class="drawer-head"><button type="button" class="btn line sm" data-close data-autofocus ${act("close-drawer")}>${icon("x", 14)}关闭</button></div>
     <div class="drawer-body"><h2 id="drawer-title">${jobTitle(j)}</h2><p class="sub">${jobCompany(j)}</p>
-      ${jobPay(j, "big")}${jobMissing(j)}${jobTags(j)}<h3 class="label">岗位介绍</h3>
+      ${jobPay(j, "big")}${jobMissing(j)}${jobTags(j)}${alsoList(j)}<h3 class="label">岗位介绍</h3>
       <div id="drawer-status"></div><div id="drawer-text" class="prose" hidden></div></div>
     <div class="drawer-foot">${open}</div></aside>`;
 }
@@ -262,9 +284,10 @@ Object.assign(ACTIONS, {
   job: (el) => openJob(Number(el.dataset.id)),
   "close-drawer": () => { R.open = null; hideLayer("drawer"); },
   "desc-retry": () => { R.desc.delete(R.open.id); return loadDescription(R.open); },
-  "open-source": () => api("POST /api/open_url", { url: R.open.source_url }),
+  "open-url": (el) => api("POST /api/open_url", { url: el.dataset.u }),
   site: (el) => { R.provider = el.dataset.k === "all" ? null : el.dataset.k; return showJobs(); },
   sort: (el) => { R.sort = el.dataset.k; return showJobs(); },
+  salary: (el) => { R.minSalary = Number(el.dataset.k); return showJobs(); },
   "show-incomplete": () => { R.showIncomplete = !R.showIncomplete; return showJobs(); },
   more: loadMore,
   export: exportCsv,

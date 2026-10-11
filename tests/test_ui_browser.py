@@ -69,7 +69,8 @@ class FakeSite(Provider):
 
     def row(self, job, detail):
         return {"title": job["title"], "company": job["company"], "city": job.get("city"),
-                "salary_text": job.get("salary"), "description": job.get("jd") or (detail or {}).get("jd")}
+                "salary_text": job.get("salary"), "description": job.get("jd") or (detail or {}).get("jd"),
+                **{k: job[k] for k in ("district", "education", "experience") if k in job}}
 
     def detail(self, client, job):
         if self.detail_hop:
@@ -643,6 +644,121 @@ def test_the_salary_is_written_from_its_figures_and_falls_back_to_the_sites_word
     assert page.evaluate("j => salaryLabel(j)", job) == label
 
 
+PAYS = "薪资"
+
+
+def paid_jobs(app):
+    """A search whose jobs are paid per month, per day and per year (no two share a company, so none is a duplicate)."""
+    pay = [("低薪", "8-12K"), ("日薪", "700元/天"), ("中薪", "15-25K"), ("高薪", "30-45K"), ("年薪", "20-30万/年")]   # 700 a day is 15225 a month
+    app.data["nc"][PAYS] = [{"id": 1000 + i, "title": f"牛客{name}", "company": f"示例{name}有限公司", "city": "杭州", "salary": text,
+                             "jd": "说明"} for i, (name, text) in enumerate(pay)] + [
+        {"id": 1099, "title": "牛客无薪", "company": "示例无薪有限公司", "city": "杭州", "salary": None, "jd": "说明"}]   # held back: no salary
+
+
+def shown_titles(page):
+    return sorted(only_text(page.locator(JOBS).locator("h3")))
+
+
+def test_the_salary_chips_filter_by_the_pay_per_month_whatever_the_unit(page, app):
+    paid_jobs(app)
+    open_results(page, keyword=PAYS)
+    chips = page.locator("#salary .chip")
+    expect(chips).to_have_text(["不限", "5千+", "1万+", "1.5万+", "2万+", "3万+"])
+    expect(page.get_by_role("group", name="按月薪筛选")).to_be_visible()
+    expect(page.get_by_role("button", name="不限", exact=True)).to_have_attribute("aria-pressed", "true")
+    assert shown_titles(page) == sorted(["牛客低薪", "牛客日薪", "牛客中薪", "牛客年薪", "牛客高薪"])
+
+    page.get_by_role("button", name="1.5万+").click()   # a day's pay counts 21.75 days and a year's a twelfth: 700 a day is 15225
+    expect(page.get_by_role("button", name="1.5万+")).to_have_attribute("aria-pressed", "true")
+    expect(page.get_by_role("button", name="不限", exact=True)).to_have_attribute("aria-pressed", "false")
+    expect(page.locator(JOBS)).to_have_count(4)
+    assert shown_titles(page) == sorted(["牛客日薪", "牛客中薪", "牛客高薪", "牛客年薪"])
+    expect(page.locator("#more")).to_contain_text("已显示 4 / 4 个")
+    expect(page.locator("#found")).to_have_text("找到 4 个岗位")
+    page.get_by_role("button", name="2万+").click()   # 15-25K, 20-30万 a year (25000 a month at most) and 30-45K can reach 20000
+    expect(page.locator(JOBS)).to_have_count(3)
+    assert shown_titles(page) == sorted(["牛客中薪", "牛客高薪", "牛客年薪"])
+    page.get_by_role("button", name="3万+").click()
+    expect(page.locator(JOBS)).to_have_count(1)
+    assert shown_titles(page) == ["牛客高薪"]
+    page.get_by_role("button", name="导出表格").click()   # the export follows the filter
+    assert len(exported(page, app)[1]) == 1 + 1
+    page.get_by_role("button", name="不限", exact=True).click()
+    expect(page.locator(JOBS)).to_have_count(5)
+    assert page.evaluate(NAMELESS) == []
+
+
+def test_a_salary_filter_that_leaves_nothing_says_so_and_keeps_the_way_back(page, app):
+    app.data["nc"]["没钱"] = [{"id": 1500 + i, "title": f"低薪岗位 {i}", "company": f"示例低{i}有限公司", "city": "杭州", "salary": "3-5K", "jd": "说明"}
+                              for i in range(3)]
+    open_results(page, keyword="没钱")
+    expect(page.locator(JOBS)).to_have_count(3)
+    page.get_by_role("button", name="1万+").click()
+    expect(page.get_by_role("heading", name="没有符合这个月薪的岗位")).to_be_visible()
+    expect(page.get_by_role("heading", name="这次没有找到岗位")).to_have_count(0)   # the search did find jobs
+    expect(page.locator("#salary .chip")).to_have_count(6)                          # the row stays: the filter can be taken off
+    expect(page.get_by_role("button", name="导出表格")).to_have_count(0)
+    page.get_by_role("button", name="不限月薪").click()
+    expect(page.locator(JOBS)).to_have_count(3)
+    assert page.evaluate(NAMELESS) == []
+
+
+def test_the_salary_row_is_not_there_when_nothing_was_found(page, app):
+    finish_search(page, keyword="运营", city="")
+    page.get_by_role("link", name="查看结果：运营 · 全国").click()
+    expect(page.get_by_role("heading", name="这次没有找到岗位")).to_be_visible()
+    expect(page.locator("#salary")).to_be_empty()
+
+
+# ---- the same job on several sites
+def twin_jobs(app):
+    """One job posted on 牛客网 (with its education) and 智联招聘, and one that only 智联招聘 has."""
+    same = {"title": "全栈工程师", "company": "示例科技有限公司", "city": "杭州", "salary": "20-30K", "jd": "负责全栈开发"}
+    app.data["nc"]["重复"] = [{**same, "id": 2000, "education": "本科"}]
+    app.data["zl"]["重复"] = [{**same, "id": 2300, "title": "【急聘】全栈工程师"}, {**same, "id": 2301, "title": "测试工程师", "company": "另一家公司"}]
+
+
+def test_the_same_job_on_two_sites_is_one_card_with_a_badge_and_a_way_to_the_other_site(page, app, monkeypatch):
+    opened = []
+    monkeypatch.setattr(ui_api.webbrowser, "open", opened.append)
+    twin_jobs(app)
+    open_results(page, keyword="重复")
+    expect(page.locator(JOBS)).to_have_count(2)                       # three records, two jobs
+    expect(page.locator("#found")).to_have_text("找到 2 个岗位")
+    expect(page.locator("#what")).to_have_text("重复 · 杭州 · 已合并 1 个重复岗位")
+    expect(page.locator("#filters .chip")).to_have_text(["全部 2", "牛客网 1", "智联招聘 2"])   # a site's chip counts its own jobs
+    twin = page.locator(JOBS, has_text="全栈工程师")
+    expect(twin.locator(".tags .pill:not(.gray)")).to_have_text("牛客网")        # the record with more of its columns stands for the job
+    expect(twin.locator(".tags .pill.gray", has_text="也在")).to_have_text("也在 智联招聘")
+    expect(page.locator(JOBS, has_text="测试工程师").locator(".tags .pill.gray", has_text="也在")).to_have_count(0)
+
+    twin.get_by_role("button").click()
+    drawer = page.locator("#drawer")
+    expect(drawer.locator(".tags .pill.gray", has_text="也在")).to_have_text("也在 智联招聘")
+    expect(drawer.get_by_role("heading", name="也在这些网站")).to_be_visible()
+    drawer.get_by_role("button", name="在智联招聘打开").click()
+    until(page, lambda: opened == ["https://fake.test/zl/job/2300"])
+    drawer.get_by_role("button", name="打开原页面").click()
+    until(page, lambda: opened[-1] == "https://fake.test/nc/job/2000")   # the drawer's own button reads the same data
+    assert page.evaluate(NAMELESS) == []
+    page.keyboard.press("Escape")
+
+    page.locator("#filters").get_by_role("button", name="智联招聘").click()   # that site's own page: both of its jobs, nothing folded in
+    expect(page.locator(JOBS)).to_have_count(2)
+    expect(page.locator("#list .tags .pill.gray", has_text="也在")).to_have_count(0)
+    expect(page.locator("#what")).to_have_text("重复 · 杭州 · 已合并 1 个重复岗位")   # the search as a whole still folded one record
+    expect(page.locator("#more")).to_contain_text("已显示 2 / 2 个")                 # and the chip said 2: clicking it lists 2
+
+
+def test_a_job_that_is_only_on_one_site_has_no_badge_and_no_list_of_sites(page, app):
+    open_results(page, keyword=KEYWORD)
+    expect(page.locator("#list .tags .pill.gray", has_text="也在")).to_have_count(0)
+    expect(page.locator("#what")).to_have_text("前端工程师 · 杭州")   # nothing merged: nothing to say
+    page.locator(JOBS).first.get_by_role("button").click()
+    expect(page.locator("#drawer-title")).to_be_visible()
+    expect(page.get_by_role("heading", name="也在这些网站")).to_have_count(0)
+
+
 def test_results_follow_a_running_search(page, app):
     hold(app, "zl", "zz")
     start_search(page)
@@ -655,6 +771,34 @@ def test_results_follow_a_running_search(page, app):
     expect(notice).to_have_count(0)   # the banner goes by itself ...
     expect(page.locator("#found")).to_have_text("找到 128 个岗位")   # ... and the numbers arrived without a click
     expect(page.locator("#filters .chip")).to_have_text(["全部 128", "牛客网 25", "国聘 60", "智联招聘 40", "中智招聘 3"])
+
+
+# layout size: the bounding box of a turning square is bigger than the square
+SPIN_SIZES = "() => [...document.querySelectorAll('.spin')].filter((el) => el.getClientRects().length).map((el) => [el.offsetWidth, el.offsetHeight])"
+
+
+def test_a_spinner_keeps_its_own_size_wherever_it_turns(page, app):
+    hold(app, "zl", "zz")
+    start_search(page)
+    expect(newest_card(page).locator(".dot.run")).to_have_count(2)
+    sizes = page.evaluate(SPIN_SIZES)
+    assert len(sizes) == 3 and all(size == [14, 14] for size in sizes)   # the card's pill and its two running sites
+    page.get_by_role("link", name="查看结果：前端工程师 · 杭州").click()
+    expect(page.locator(".notice .spin")).to_be_visible()
+    assert page.evaluate(SPIN_SIZES) == [[14, 14]]   # a rule meant for the banner's text once stretched the spinner across the page
+    assert page.locator(".notice > span:not(.spin)").bounding_box()["width"] > 200   # the text still takes the room that is left
+    release(app, "zl", "zz")
+    expect(page.locator(".notice")).to_have_count(0)
+
+
+def test_the_notice_of_a_search_that_has_found_nothing_yet_keeps_its_spinner_small_too(page, app):
+    hold(app, "nc", "gp", "xh", "zl", "zz")
+    start_search(page)
+    page.get_by_role("link", name="我的结果").click()
+    expect(page.locator(".skeleton")).to_have_count(6)
+    expect(page.locator(".notice .spin")).to_be_visible()
+    assert page.evaluate(SPIN_SIZES) == [[14, 14]]
+    release(app, "nc", "gp", "xh", "zl", "zz")
 
 
 def test_results_with_nothing_yet_show_loading_cards(page, app):
@@ -873,6 +1017,24 @@ def test_a_search_that_is_still_completing_shows_the_whole_jobs_growing(page, ap
     expect(dot).to_have_text("国聘0 / 4")
     app.detail_gates["gp"].set()
     expect(dot).to_have_text("国聘4")
+
+
+def test_jobs_that_wait_for_their_detail_say_so_instead_of_blaming_the_platform(page, app):
+    app.detail_gates["gp"] = threading.Event()   # the list is stored, but no detail request has been answered yet
+    app.data["gp"]["补全中"] = jobs("国聘", 4, 700, jd=None)
+    start_search(page, keyword="补全中")
+    page.get_by_role("link", name="查看结果：补全中 · 杭州").click()
+    expect(page.locator("#incomplete")).to_contain_text("另有 4 条信息不全（原因：正在补全详情 4）")
+    show_incomplete(page)
+    expect(page.locator(JOBS)).to_have_count(4)
+    expect(page.locator("#list .miss")).to_have_text(["信息不全：正在补全详情"] * 4)
+    page.locator(JOBS).first.get_by_role("button").click()
+    expect(page.locator("#drawer .miss")).to_have_text("信息不全：正在补全详情")
+    page.keyboard.press("Escape")
+    app.detail_gates["gp"].set()   # the details arrive: the jobs are whole, nothing is held back any more
+    expect(page.locator("#list .miss")).to_have_count(0)
+    expect(page.locator("#incomplete")).to_be_empty()
+    expect(page.locator(JOBS)).to_have_count(4)
 
 
 def test_a_job_that_lacks_something_says_so_in_the_drawer_too(page, app):
@@ -1302,6 +1464,7 @@ def test_login_dialog_waiting_cancel_success(page, app):
     expect(modal.get_by_role("dialog")).to_be_visible()
     expect(modal.locator("h2")).to_have_text("登录 登录专用站")
     expect(modal.locator(".state.waiting")).to_be_visible()
+    assert page.evaluate(SPIN_SIZES) == [[32, 32]]   # the dialog's own, larger spinner
     expect(modal.locator(".steps li")).to_have_text(steps("在弹出的窗口里找到登录框", "输入你的账号和密码，完成登录"))
     expect(modal.locator("#count")).to_have_text(re.compile(r"^[0-3]:\d\d$"))
     expect(modal).to_contain_text("账号信息不会上传到任何地方")
@@ -1439,6 +1602,32 @@ def test_every_control_has_a_name_in_every_state(page, app):
     page.get_by_role("button", name="高级设置").click()
     page.get_by_role("switch", name="使用代理服务器").click()
     assert names() == []
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 860), (700, 800)])
+def test_the_search_cards_button_stays_in_view_even_when_the_card_is_tall(browser, app, size):
+    lacking(app)   # two sites found jobs that all lack something: the newest card carries two notes under its sites
+    page = open_page(browser, app, size)
+    finish_search(page, keyword=INCOMPLETE)
+    card = newest_card(page)
+    expect(card.locator(".notes .note")).to_have_count(2)
+    link = card.get_by_role("link", name=re.compile("查看结果"))
+    box = link.bounding_box()
+    assert box["y"] + box["height"] <= size[1] and page.evaluate("scrollY") == 0   # on the first screen, nothing cut off
+    expect(link).to_be_in_viewport(ratio=1)
+    assert box["x"] >= 0 and box["x"] + box["width"] <= size[0]
+    link.click()
+    expect(page.locator("#what")).to_have_text("缺信息 · 杭州")
+    page.context.close()
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 860)])
+def test_the_search_card_is_whole_on_the_first_screen_while_it_has_no_notes(browser, app, size):
+    page = open_page(browser, app, size)
+    finish_search(page)
+    box = newest_card(page).bounding_box()
+    assert box["y"] + box["height"] <= size[1] and page.evaluate("scrollY") == 0
+    page.context.close()
 
 
 @pytest.mark.parametrize("size, columns", [((960, 640), 2), ((1280, 860), 3), ((1440, 900), 3), ((700, 800), 1)])

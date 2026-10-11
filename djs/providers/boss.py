@@ -101,6 +101,10 @@ class Boss(Provider):
         need(zp, "jobInfo", typ=dict)
         return zp
 
+    def detail_can_fill(self, missing: list[str], logged_in: bool) -> bool:
+        """Anonymous details have no salary either (the page hides it), so a job that lacks one cannot be completed."""
+        return logged_in or "salary" not in missing
+
     def meta(self, job: dict, detail: dict | None) -> dict:
         # lastLoginTime is the recruiter's activity, not a posting date: leave published_at unknown.
         return {"source_url": f"{BASE}/job_detail/{self.job_id(job)}.html", "apply_url": None,

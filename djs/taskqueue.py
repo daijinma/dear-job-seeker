@@ -11,6 +11,12 @@ LOCK_TTL = 15 * 60
 MAX_ATTEMPTS = 8
 BACKOFF_CAP = 360
 DETAIL_MODES = ("auto", "always", "never")
+ACTIVE = ("pending", "running")   # a task that still needs a worker (pending also covers a wait before a retry)
+ACTIVE_SQL = "(" + ", ".join(f"'{status}'" for status in ACTIVE) + ")"
+# One search = the tasks with the same keyword and city (named parameters :k and :c); a task without a city is the
+# search made without one.
+SEARCH = "json_extract(payload, '$.keyword') = :k AND IFNULL(json_extract(payload, '$.city'), '') = :c"
+_SEARCH_COLS = "id, provider, status, last_error, created_at, stats"
 
 
 def detail_mode(value) -> str:
@@ -102,11 +108,36 @@ def requeue(conn, task_ids) -> int:
         f"WHERE status IN ('dead','waiting_login') AND id IN ({','.join('?' * len(ids))})", ids).rowcount
 
 
+def _stats(raw) -> dict | None:
+    return json.loads(raw) if raw else None
+
+
 def as_dict(row) -> dict:
     d = dict(row)
     d["payload"] = json.loads(d["payload"])
-    d["stats"] = json.loads(d["stats"]) if d["stats"] else None
+    d["stats"] = _stats(d["stats"])
     return d
+
+
+def outcome(status: str, jobs: int) -> str:
+    """How a task (or a platform's newest task in a search) stands, in one word: running (queued, working, or waiting
+    to retry), waiting_login, failed, found or no_results. A finished task that found nothing is no_results, never a
+    failure."""
+    if status in ACTIVE:
+        return "running"
+    if status == "done":
+        return "found" if jobs else "no_results"
+    return {"waiting_login": "waiting_login", "dead": "failed"}[status]
+
+
+def summary(status: str, jobs: int, stats: dict | None) -> dict:
+    """{outcome} and, while a queued or running task is in its completion pass, {completing: {done, total}}: how many
+    of the details it set out to fetch are in (the engine writes details_total, details_ok and details_failed)."""
+    found = {"outcome": outcome(status, jobs)}
+    total = (stats or {}).get("details_total")
+    if status in ACTIVE and total:
+        found["completing"] = {"done": stats.get("details_ok", 0) + stats.get("details_failed", 0), "total": total}
+    return found
 
 
 def get(conn, task_id: int) -> dict:
@@ -115,24 +146,31 @@ def get(conn, task_id: int) -> dict:
 
 def active_ids(conn) -> set[int]:
     """Tasks that still need a worker: queued (also while backing off before a retry) or running."""
-    return {r["id"] for r in conn.execute("SELECT id FROM tasks WHERE status IN ('pending','running')")}
+    return {r["id"] for r in conn.execute(f"SELECT id FROM tasks WHERE status IN {ACTIVE_SQL}")}
 
 
 def list_(conn, status: str | None = None, limit: int = 20) -> list[dict]:
     rows = conn.execute("SELECT t.*, (SELECT COUNT(*) FROM task_jobs j WHERE j.task_id=t.id) AS jobs_found "
                         "FROM tasks t WHERE (? IS NULL OR t.status=?) ORDER BY t.id DESC LIMIT ?",
                         (status, status, limit)).fetchall()
-    return [as_dict(r) for r in rows]
+    return [{**t, **summary(t["status"], t["jobs_found"], t["stats"])} for t in map(as_dict, rows)]
 
 
 def by_search(conn, limit: int = 20) -> list[dict]:
     """Tasks of the `limit` most recent searches (one search = one keyword + city), newest search first, then by id."""
     rows = conn.execute(
-        """WITH t AS MATERIALIZED (SELECT id, provider, status, last_error, created_at,
-                                  json_extract(payload, '$.keyword') AS keyword,
-                                  IFNULL(json_extract(payload, '$.city'), '') AS city FROM tasks),
-                g AS (SELECT keyword, city, MAX(id) AS last_id FROM t
-                      GROUP BY keyword, city ORDER BY last_id DESC LIMIT ?)
-           SELECT t.* FROM t JOIN g ON t.keyword IS g.keyword AND t.city = g.city
-           ORDER BY g.last_id DESC, t.id""", (limit,)).fetchall()
-    return [dict(r) for r in rows]
+        f"""WITH t AS MATERIALIZED (SELECT {_SEARCH_COLS},
+                                   json_extract(payload, '$.keyword') AS keyword,
+                                   IFNULL(json_extract(payload, '$.city'), '') AS city FROM tasks),
+                 g AS (SELECT keyword, city, MAX(id) AS last_id FROM t
+                       GROUP BY keyword, city ORDER BY last_id DESC LIMIT ?)
+            SELECT t.* FROM t JOIN g ON t.keyword IS g.keyword AND t.city = g.city
+            ORDER BY g.last_id DESC, t.id""", (limit,)).fetchall()
+    return [{**dict(r), "stats": _stats(r["stats"])} for r in rows]
+
+
+def of_search(conn, keyword: str, city: str) -> list[dict]:
+    """The tasks of one search, oldest first, in the shape by_search gives."""
+    rows = conn.execute(f"SELECT {_SEARCH_COLS} FROM tasks WHERE {SEARCH} ORDER BY id",
+                        {"k": keyword, "c": city or ""}).fetchall()
+    return [{**dict(r), "stats": _stats(r["stats"])} for r in rows]

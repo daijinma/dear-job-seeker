@@ -52,14 +52,14 @@ def test_old_database_is_migrated_and_keeps_working(home):
     write_old_db(home)
     conn = db.connect()
     assert sorted(map(tuple, conn.execute("SELECT task_id, job_id FROM task_jobs"))) == [(1, 1), (1, 2), (2, 3)]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert [j["title"] for j in service.jobs_get(conn, task_id=1, complete_only=False)] == ["B", "A"]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert [j["title"] for j in service.jobs_get(conn, task_id=1, complete_only=False)["jobs"]] == ["B", "A"]
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 4
     conn.execute("INSERT INTO task_jobs VALUES (2, 1)")  # a link the engine made after the upgrade
     conn.execute("PRAGMA user_version = 0")  # as if another process were migrating right now
     db.connect().close()
     assert conn.execute("SELECT COUNT(*) FROM task_jobs").fetchone()[0] == 4  # nothing duplicated, nothing dropped
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     assert taskqueue.claim(conn, "nowcoder") is None  # old tasks are done; the queue itself works
     tid = taskqueue.create(conn, "nowcoder", {"keyword": "go"})
     assert taskqueue.claim(conn, "nowcoder")["id"] == tid
@@ -67,7 +67,8 @@ def test_old_database_is_migrated_and_keeps_working(home):
 
 def test_fresh_database_is_at_the_current_version(home):
     conn = db.connect()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert "jobs_fingerprint" in {r["name"] for r in conn.execute("PRAGMA index_list(jobs)")}   # made by the migration, not schema.sql
     assert conn.execute("SELECT COUNT(*) FROM task_jobs").fetchone()[0] == 0
 
 
@@ -129,7 +130,8 @@ def test_call_round_trip(home, capsys):
     code, out, _ = run(capsys, "call", "task_list")
     queued = json.loads(out)["result"][0]
     assert code == 0 and queued["payload"] == {"keyword": "python", "max_pages": 1, "detail": False}
-    assert run(capsys, "call", "jobs_get", '{"task_id": 1, "limit": 3}')[:2] == (0, '{"result": []}\n')
+    assert run(capsys, "call", "jobs_get", '{"task_id": 1, "limit": 3}')[:2] == (
+        0, '{"jobs": [], "total": 0, "returned": 0, "next_offset": null}\n')
     assert json.loads(run(capsys, "call", "search_list")[1])["result"][0]["per_site"][0]["provider"] == "nowcoder"
 
 

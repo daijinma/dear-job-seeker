@@ -93,21 +93,16 @@ def provider_rows(conn, a) -> dict:
 
 def crawl(conn, a) -> dict:
     """One task per chosen site; the engine completes each job that still lacks a core element (detail 'auto')."""
-    keyword = (a.get("keyword") or "").strip()
+    keyword, city = service.search_key(a.get("keyword"), a.get("city"))
     sites = a.get("providers") or []
     if not keyword:
         raise ValueError("请先填写岗位关键词")
     if not sites:
         raise ValueError("请至少选择一个网站")
-    city = (a.get("city") or "").strip() or None
-    conn.execute("BEGIN")  # every chosen site starts, or none does
     try:
-        ids = [service.crawl_start(conn, s, keyword=keyword, city=city)["task_id"] for s in sites]
-        conn.execute("COMMIT")
+        return {"task_ids": service.crawl_many(conn, sites, keyword, city or None)}
     except Exception as e:  # the service words its refusals in English; the page shows Chinese only
-        conn.execute("ROLLBACK")
         raise ValueError(results.friendly_error(str(e))) from e
-    return {"task_ids": ids}
 
 
 def searches(conn, a) -> dict:
@@ -116,7 +111,8 @@ def searches(conn, a) -> dict:
 
 def search_jobs(conn, a) -> dict:
     return results.search_jobs(conn, a.get("keyword"), a.get("city"), a.get("provider"), a.get("sort") or "mixed",
-                               a.get("limit") or 30, a.get("offset") or 0, a.get("complete_only", True))
+                               a.get("limit") or 30, a.get("offset") or 0, a.get("complete_only", True),
+                               a.get("min_month_salary"))
 
 
 def job_detail(conn, a) -> dict:

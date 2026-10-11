@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
+
+from djs import cities
 
 CORE = {"title": "职位名", "company": "公司", "city": "城市", "salary": "薪资", "description": "职位描述"}
-UNITS = ("元/月", "元/天", "元/时", "元/年")
+# One unit of pay as months of pay: a day is 21.75 working days, an hour 174, a year a twelfth of its pay
+TO_MONTH = {"元/月": 1, "元/天": 21.75, "元/时": 174, "元/年": 1 / 12}
+UNITS = tuple(TO_MONTH)
 NO_SALARY = 9_999_999  # sites write "0 - 9999999" for "no salary"
 MONTHS = range(12, 37)  # monthly payments per year worth keeping: 12 is the default, "·14薪" the usual extra
 
@@ -56,6 +61,15 @@ def parse_salary(text) -> dict | None:
                         int(paid.group(1)) if paid else None) or None
 
 
+def monthly(fields) -> dict:
+    """salary_month_min / salary_month_max: the salary range as 元/月 (see TO_MONTH), so that day, hour, year and month
+    rates compare. Both None unless `fields` holds a whole-number range in a known unit."""
+    factor, lo, hi = TO_MONTH.get(fields.get("salary_unit")), fields.get("salary_min"), fields.get("salary_max")
+    if factor is None or not (isinstance(lo, int) and isinstance(hi, int)):
+        return {"salary_month_min": None, "salary_month_max": None}
+    return {"salary_month_min": round(lo * factor), "salary_month_max": round(hi * factor)}
+
+
 _DROP = re.compile(r"<(script|style)\b.*?</\1\s*>", re.I | re.S)
 _BREAK = re.compile(r"<\s*br\b[^>]*>|<\s*/\s*(?:p|div|li|ul|ol|tr|h[1-6])\s*>", re.I)
 _TAG = re.compile(r"</?[a-z!][^>]*>", re.I)
@@ -77,3 +91,26 @@ def missing(fields) -> list[str]:
             return all(isinstance(fields.get(k), int) for k in ("salary_min", "salary_max"))
         return bool(str(fields.get(name) or "").strip())
     return [name for name in CORE if not has(name)]
+
+
+_ROUND = re.compile(r"\([^)]*\)")                  # (杭州), (中国): city and region wrappers of a company name
+_FIRMS = re.compile(r"有限责任公司|股份有限公司|有限公司|股份|集团|科技|公司")   # what differs between two spellings of one company
+_TAGS = re.compile(r"【[^】]*】|\[[^\]]*\]")         # 【14-16薪】, [急聘]: a tag sites put in front of a title
+_PUNCT = re.compile(r"[^\w+#]|_")                  # spaces and punctuation; the signs of C++ and C# stay
+_FIRST_PLACE = re.compile(r"[·\-、,/\s]")           # '杭州·滨江区', '杭州、上海': the first place is the city
+
+
+def _fold(text) -> str:
+    """Full-width letters and brackets become plain ones, upper case lower: sites spell the same words differently."""
+    return unicodedata.normalize("NFKC", str(text or "")).lower()
+
+
+def fingerprint(fields) -> str | None:
+    """company|title|city with everything that differs between sites taken out (legal-form words and bracketed city
+    in the company, bracketed tags in the title, spaces, punctuation, case, a 市 suffix, every place but the first):
+    one job posted on several sites gets one fingerprint. None unless all three are known, so that a job is never
+    merged with another on a guess."""
+    company = _PUNCT.sub("", _FIRMS.sub("", _ROUND.sub("", _fold(fields.get("company")))))
+    title = _PUNCT.sub("", _TAGS.sub("", _fold(fields.get("title"))))
+    city = cities.norm(_FIRST_PLACE.split(_fold(fields.get("city")).strip(), 1)[0])
+    return "|".join((company, title, city)) if company and title and city else None

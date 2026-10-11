@@ -23,3 +23,11 @@ def get(name: str):
 
 def names() -> list[str]:
     return list(_MODULES)
+
+
+def label(name: str) -> str:
+    """What end users call a platform; the name itself for one that was removed after its jobs were stored."""
+    try:
+        return get(name).label or name
+    except KeyError:
+        return name

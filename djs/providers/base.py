@@ -214,6 +214,12 @@ class Provider:
         """None = list item already is the detail (no second hop)."""
         return None
 
+    def detail_can_fill(self, missing: list[str], logged_in: bool) -> bool:
+        """Could the detail request supply what a job still lacks (`missing`: core element names)? The completion pass
+        of a crawl with detail 'auto' skips the jobs for which it cannot, instead of paying a request that completes
+        nothing. `logged_in`: the user has a session on this platform. The default says it can."""
+        return True
+
     def warmup(self, client, payload: dict) -> None:
         """Runs once after the client opens. A browser client loads `home` first; an http client has no goto."""
         if self.home and hasattr(client, "goto"):

@@ -6,9 +6,9 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-EXPECTED = {"provider_list", "crawl_start", "task_list", "jobs_get", "job_detail", "search_list", "login",
-            "login_status", "login_check", "logout", "set_frequency", "set_transport", "egress_add", "egress_remove",
-            "egress_list"}
+EXPECTED = {"provider_list", "crawl_start", "search", "wait_for_search", "task_list", "jobs_get", "job_detail",
+            "search_list", "login", "login_status", "login_check", "logout", "set_frequency", "set_transport",
+            "egress_add", "egress_remove", "egress_list"}
 
 
 def test_djs_entrypoint_lists_tools(tmp_path):

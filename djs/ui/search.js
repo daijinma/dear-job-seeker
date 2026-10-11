@@ -93,11 +93,11 @@ function searchCard(s) {
   const [text, tone, busy] = searchState(s);
   const done = s.per_site.filter((x) => x.status === "done" || x.status === "dead").length;
   return `<article class="card search-card">
-    <div class="row"><h3>${esc(searchTitle(s))}</h3>${pill(text, tone, busy ? spinner() : "")}</div>
+    <div class="row"><h3>${esc(searchTitle(s))}</h3>
+      <div class="actions">${pill(text, tone, busy ? spinner() : "")}${linkBtn("查看结果", resultsHref(s), "line sm", `查看结果：${searchTitle(s)}`)}</div></div>
     ${progress(done, s.per_site.length, busy)}
     <p class="sub small">已完成 ${done} / ${s.per_site.length} 个网站 · 已找到 ${wholeJobs(s)} 个岗位</p>
-    <ul class="dots">${s.per_site.map(siteDot).join("")}</ul>${notesHtml(s)}
-    <div class="actions">${linkBtn("查看结果", resultsHref(s), "line", `查看结果：${searchTitle(s)}`)}</div></article>`;
+    <ul class="dots">${s.per_site.map(siteDot).join("")}</ul>${notesHtml(s)}</article>`;
 }
 
 const FIRST_RUN = '<p class="sub first-run">还没有查找记录。填好上面的岗位，点“开始查找”就行。</p>';

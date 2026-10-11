@@ -36,14 +36,17 @@ def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
                 raise
 
 
-# jobs columns added by schema v3 (the data contract); a fresh database gets them from schema.sql
+# jobs columns added by schema v3 (the data contract) and v4 (monthly salary, duplicate fingerprint); a fresh
+# database gets them from schema.sql
 JOBS_V3 = (("district", "TEXT"), ("salary_min", "INTEGER"), ("salary_max", "INTEGER"), ("salary_unit", "TEXT"),
            ("salary_months", "INTEGER"), ("education", "TEXT"), ("experience", "TEXT"), ("missing", "TEXT"),
            ("complete", "INTEGER NOT NULL DEFAULT 0"))
+JOBS_V4 = (("salary_month_min", "INTEGER"), ("salary_month_max", "INTEGER"), ("fingerprint", "TEXT"))
 
 
 def _backfill_jobs(conn) -> None:
-    """Fill the v3 columns of every stored job with the code the crawl uses (imported late: it imports this package)."""
+    """Fill the derived columns of every stored job with the code the crawl uses (imported late: it imports this
+    package)."""
     from djs import jobs, providers
     for (job_pk,) in conn.execute("SELECT id FROM jobs").fetchall():  # ids only: the raw payloads can be large
         row = conn.execute("SELECT provider, payload, detail FROM jobs WHERE id=?", (job_pk,)).fetchone()
@@ -54,14 +57,17 @@ def _backfill_jobs(conn) -> None:
             jobs.refresh(conn, job_pk)
 
 
-def _migrate_jobs_v3(conn) -> None:
-    """One transaction, so a crash half way leaves version 2 and the next start does it all again."""
+def _migrate_jobs(conn) -> None:
+    """The derived columns of jobs (v3 and v4) in one transaction, so a crash half way leaves the old version and the
+    next start does it all again. The index on a column added here is created here too: schema.sql runs first, and an
+    old database has no such column yet."""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for column, ddl in JOBS_V3:
+        for column, ddl in (*JOBS_V3, *JOBS_V4):
             _add_column_if_missing(conn, "jobs", column, ddl)
+        conn.execute("CREATE INDEX IF NOT EXISTS jobs_fingerprint ON jobs(fingerprint)")
         _backfill_jobs(conn)
-        conn.execute("PRAGMA user_version = 3")
+        conn.execute("PRAGMA user_version = 4")
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -80,8 +86,8 @@ def _migrate(conn) -> None:
     if version < 2:
         _add_column_if_missing(conn, "provider_settings", "transport", "TEXT")  # v2: per-platform capture transport
         conn.execute("PRAGMA user_version = 2")
-    if version < 3:
-        _migrate_jobs_v3(conn)  # v3: the data contract's columns on jobs, derived for what is already stored
+    if version < 4:
+        _migrate_jobs(conn)  # v3 columns (the data contract), v4 columns (monthly salary, fingerprint), derived for stored jobs
 
 
 _init_lock = threading.Lock()

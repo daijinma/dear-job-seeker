@@ -11,6 +11,7 @@ import pytest
 
 from djs import db, egress, engine, jobs, providers, server, service, taskqueue
 from djs.providers.base import Blocked, Delisted, Login, Provider, StructureError, get_json, need
+from provider_fakes import job, stored_jobs, task
 
 LIST_JD = "列表里的职位描述"
 PAGES = {1: [{"id": 1, "title": "t1", "salary": "15-25K·14薪", "jd": LIST_JD},   # complete from the list alone
@@ -55,6 +56,14 @@ class Closed(Shop):
     login = Login(url="https://shop.test/login", method="qr", domain="shop.test", cookies_any=("s",))
 
 
+class Picky(Closed):
+    """BOSS in miniature: an anonymous visitor's detail never has the salary, so it cannot complete a job without one."""
+    name = "picky"
+
+    def detail_can_fill(self, missing, logged_in):
+        return logged_in or "salary" not in missing
+
+
 class Flat(Provider):
     """The list item is the whole job: no detail request exists."""
     name = "flat"
@@ -88,7 +97,7 @@ class FakeAuth:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DJS_HOME", str(tmp_path))
-    provs = {"shop": Shop(), "closed": Closed(), "flat": Flat()}
+    provs = {"shop": Shop(), "closed": Closed(), "flat": Flat(), "picky": Picky()}
     monkeypatch.setattr(providers, "get", lambda n: provs[n] if n in provs else (_ for _ in ()).throw(KeyError(n)))
     monkeypatch.setattr(providers, "names", lambda: list(provs))
     auth = FakeAuth()
@@ -112,8 +121,7 @@ def run(env, provider="shop", **payload):
 
 
 def stored(env, provider="shop"):
-    rows = service.jobs_get(env.conn, provider=provider, with_detail=True, complete_only=False)
-    return {j["source_job_id"]: j for j in rows}
+    return {j["source_job_id"]: j for j in stored_jobs(env.conn, provider=provider, with_detail=True)}
 
 
 # ---- the completion pass
@@ -121,7 +129,8 @@ def test_auto_requests_the_detail_only_for_jobs_that_miss_something(env):
     task = run(env)   # no `detail` in the payload = auto
     assert env.shop.asked == [2, 3, 4]   # job 1 had everything in its list item
     assert task["status"] == "done" and task["stats"] == {
-        "pages": 2, "jobs_new": 4, "jobs_seen": 0, "details_ok": 3, "details_failed": 0, "complete": 3, "incomplete": 1}
+        "pages": 2, "jobs_new": 4, "jobs_seen": 0, "details_ok": 3, "details_failed": 0, "details_total": 3,
+        "complete": 3, "incomplete": 1}
     got = stored(env)
     assert got["1"]["description"] == LIST_JD and got["1"]["detail"] is None
     assert got["2"]["description"] == "jd2\n要求" and got["2"]["complete"] is True   # HTML became plain text
@@ -230,6 +239,122 @@ def test_detail_mode_validation():
             taskqueue.detail_mode(bad)
 
 
+# ---- the details that cannot complete a job
+def test_auto_skips_the_details_that_cannot_complete_a_job_and_always_still_asks(env):
+    picky = env.provs["picky"]
+    done = run(env, "picky")
+    assert picky.asked == [2, 4]   # job 3 lacks a salary, and an anonymous detail has none to give: not worth a request
+    assert (done["stats"]["details_total"], done["stats"]["details_ok"], done["stats"]["incomplete"]) == (2, 2, 1)
+    env.auth.session = True        # logged in, the same detail does carry the salary
+    picky.asked.clear()
+    run(env, "picky")
+    assert picky.asked == [3]      # and only that one: the others hold their detail already
+    env.auth.session = False
+    env.conn.execute("DELETE FROM jobs")
+    picky.asked.clear()
+    run(env, "picky", detail="always")
+    assert picky.asked == [1, 2, 3, 4]   # 'always' asks for everything, whatever the platform thinks of it
+
+
+def test_a_platform_that_says_nothing_about_its_details_keeps_asking_for_every_missing_one(env):
+    assert env.shop.detail_can_fill(["salary", "description"], False) is True
+    run(env)
+    assert env.shop.asked == [2, 3, 4]
+
+
+def test_a_task_in_its_completion_pass_reports_how_far_it_is(env):
+    seen = []
+    real = env.shop.detail
+
+    def spy(client, job):
+        c = db.connect()
+        [t] = taskqueue.list_(c)
+        site = service.searches(c)[0]["per_site"][0]
+        seen.append(((t["outcome"], t.get("completing")), (site["outcome"], site.get("completing"))))
+        c.close()
+        return real(client, job)
+
+    env.mp.setattr(env.shop, "detail", spy)
+    run(env)
+    running = lambda done: (("running", {"done": done, "total": 3}), ("running", {"done": done, "total": 3}))   # noqa: E731
+    assert seen == [running(0), running(1), running(2)]
+    [t] = taskqueue.list_(env.conn)
+    assert (t["outcome"], "completing" in t, t["stats"]["details_total"]) == ("found", False, 3)   # over: no progress to show
+
+
+# ---- a job whose detail is still to come is being completed, not lacking
+def lacking(env, provider="shop", status="running", sid="x", **cols):
+    """A job without its description (or whatever `cols` says), seen by a task in `status`."""
+    t = task(env.conn, provider, "py", status=status)
+    cols = {"title": "t", "company": "c", "city": "杭州", "salary_text": "15-25K", "salary_min": 15000,
+            "salary_max": 25000, "salary_unit": "元/月", "complete": 0, "missing": "description", **cols}
+    job(env.conn, provider, sid, [t], **cols)
+    return t
+
+
+def reason(env):
+    [one] = service.jobs_get(env.conn, complete_only=False)["jobs"]
+    return one["incomplete_reason"]
+
+
+def test_a_running_task_that_has_yet_to_ask_for_the_detail_is_completing_the_job(env):
+    t = lacking(env)
+    assert reason(env) == "正在补全详情"
+    env.conn.execute("UPDATE tasks SET status='pending' WHERE id=?", (t,))   # queued (or waiting to retry) counts too
+    assert reason(env) == "正在补全详情"
+    env.conn.execute("UPDATE tasks SET status='done' WHERE id=?", (t,))
+    assert reason(env) == "平台未提供职位描述"   # finished: the platform really has none
+
+
+def test_the_reason_stays_plain_when_the_detail_is_not_coming(env):
+    t = lacking(env)
+    env.conn.execute("UPDATE tasks SET payload=json_set(payload, '$.detail', 'never') WHERE id=?", (t,))
+    assert reason(env) == "平台未提供职位描述"                                  # the task is told not to ask
+    env.conn.executescript("DELETE FROM jobs; DELETE FROM task_jobs")
+    lacking(env, detail_error="StructureError: shape")
+    assert reason(env) == "详情获取失败"                                        # asked, and it failed
+    env.conn.executescript("DELETE FROM jobs; DELETE FROM task_jobs")
+    lacking(env, "flat")
+    assert reason(env) == "平台未提供职位描述"                                  # the platform has no detail request at all
+    env.conn.executescript("DELETE FROM jobs; DELETE FROM task_jobs")
+    lacking(env, detail="{}")
+    assert reason(env) == "平台未提供职位描述"                                  # asked already, and it did not have one
+
+
+def test_the_other_reasons_keep_their_words_while_the_detail_is_on_its_way(env):
+    lacking(env, missing="salary,description", salary_text="面议", salary_min=None, salary_max=None)
+    assert reason(env) == "面议；正在补全详情"   # the site's own word for the salary is a fact, not something to wait for
+    env.conn.executescript("DELETE FROM jobs; DELETE FROM task_jobs")
+    lacking(env, "closed", missing="salary,description", salary_text=None, salary_min=None, salary_max=None)
+    assert reason(env) == "需登录才能看到薪资；正在补全详情"   # logged out, the salary needs the login; the JD may still arrive
+    env.auth.session = True
+    assert reason(env) == "正在补全详情"                      # one phrase, however many elements wait for the detail
+
+
+def test_a_detail_that_cannot_complete_the_job_is_not_on_its_way(env):
+    lacking(env, "picky", missing="salary,description", salary_text=None, salary_min=None, salary_max=None)
+    assert reason(env) == "需登录才能看到薪资；平台未提供职位描述"   # anonymous: the engine will not ask (Provider.detail_can_fill)
+    env.auth.session = True
+    assert reason(env) == "正在补全详情"
+
+
+def test_reasons_cope_with_a_platform_that_no_longer_exists(env):
+    job_row = {"provider": "gone", "missing": ["description"], "salary_text": None, "detail_error": None, "detail_due": 1}
+    assert service.reasons(job_row, lambda provider: False) == ["平台未提供职位描述"]
+    assert service.reasons({**job_row, "provider": "shop"}, lambda provider: False) == ["正在补全详情"]
+    assert service.reasons({**job_row, "missing": ""}, lambda provider: False) == []
+
+
+def test_the_results_page_says_the_same(env):
+    from djs import results
+    lacking(env)
+    lacking(env, sid="y", missing="salary,description", title="u")   # two elements wait for the detail: still one reason
+    page = results.search_jobs(env.conn, "py", None, complete_only=False)
+    assert page["incomplete"] == {"count": 2, "reasons": [{"text": "正在补全详情", "count": 2}]}
+    assert {j["incomplete_reason"] for j in page["jobs"]} == {"正在补全详情"}
+    assert all("detail_due" not in j for j in page["jobs"])
+
+
 # ---- derivation
 def test_figures_the_provider_read_from_fields_beat_the_text(env):
     prov = env.shop
@@ -271,16 +396,19 @@ def test_job_detail_derives_the_new_fields_and_the_verdict(env):
 # ---- what readers see
 def test_jobs_get_returns_complete_jobs_unless_asked_for_the_rest(env):
     task = run(env)
-    complete = service.jobs_get(env.conn, task_id=1)
-    assert sorted(j["source_job_id"] for j in complete) == ["1", "2", "4"]
-    assert all(j["complete"] and j["missing"] == [] and j["incomplete_reason"] is None for j in complete)
-    everything = {j["source_job_id"]: j for j in service.jobs_get(env.conn, task_id=1, complete_only=False)}
-    assert sorted(everything) == ["1", "2", "3", "4"]
-    assert everything["3"]["missing"] == ["salary"] and everything["3"]["incomplete_reason"] == "面议"
+    complete = service.jobs_get(env.conn, task_id=1)["jobs"]
+    assert sorted(j["title"] for j in complete) == ["t1", "t2", "t4"]
+    assert all(j["missing"] == [] and "incomplete_reason" not in j for j in complete)
+    everything = {j["title"]: j for j in service.jobs_get(env.conn, task_id=1, complete_only=False)["jobs"]}
+    assert sorted(everything) == ["t1", "t2", "t3", "t4"]
+    assert everything["t3"]["missing"] == ["salary"] and everything["t3"]["incomplete_reason"] == "面议"
     assert task["stats"]["incomplete"] == 1
-    one = everything["1"]
-    assert (one["salary_min"], one["salary_max"], one["salary_unit"], one["salary_months"]) == (15000, 25000, "元/月", 14)
-    assert set(one) >= {"district", "education", "experience", "salary_text", "published_at"}
+    one = everything["t1"]
+    assert (one["salary_month_min"], one["salary_month_max"], one["salary_unit"], one["salary_months"]) == (15000, 25000, "元/月", 14)
+    assert set(one) >= {"district", "education", "experience", "salary_text", "source_url"}
+    raw = stored(env)["1"]   # the whole row keeps the figures as the site gave them
+    assert (raw["salary_min"], raw["salary_max"], raw["salary_unit"], raw["salary_months"]) == (15000, 25000, "元/月", 14)
+    assert set(raw) >= {"published_at", "source_job_id", "task_id", "detail_error"}
 
 
 def test_search_list_counts_complete_and_incomplete_per_site(env):
@@ -310,14 +438,12 @@ def test_incomplete_reason_says_why_in_a_few_words(env):
 
 def test_the_reason_follows_the_login_state(env):
     run(env, "closed")
-    job = next(j for j in service.jobs_get(env.conn, complete_only=False) if j["source_job_id"] == "3")
-    assert job["incomplete_reason"] == "面议"
-    env.conn.execute("UPDATE jobs SET salary_text='' WHERE id=?", (job["id"],))
-    anonymous = service.jobs_get(env.conn, complete_only=False)
-    assert {j["incomplete_reason"] for j in anonymous if not j["complete"]} == {"需登录才能看到薪资"}
+    reasons = lambda: {j["incomplete_reason"] for j in service.jobs_get(env.conn, complete_only=False)["jobs"] if j["missing"]}  # noqa: E731
+    assert reasons() == {"面议"}
+    env.conn.execute("UPDATE jobs SET salary_text=''")
+    assert reasons() == {"需登录才能看到薪资"}
     env.auth.session = True
-    assert {j["incomplete_reason"] for j in service.jobs_get(env.conn, complete_only=False) if not j["complete"]} == {
-        "平台未提供薪资"}
+    assert reasons() == {"平台未提供薪资"}
 
 
 def test_mcp_tools_take_the_new_parameters(env):
@@ -329,8 +455,8 @@ def test_mcp_tools_take_the_new_parameters(env):
     assert "error" in call("crawl_start", provider="shop", keyword="py", detail="sometimes")
     while (task := taskqueue.claim(env.conn, "shop")) is not None:
         engine.run_task(env.conn, task)
-    assert sorted(j["source_job_id"] for j in call("jobs_get")["result"]) == ["1", "2", "4"]
-    assert len(call("jobs_get", complete_only=False)["result"]) == 4
+    assert sorted(j["title"] for j in call("jobs_get")["jobs"]) == ["t1", "t2", "t4"]
+    assert call("jobs_get", complete_only=False)["total"] == 4
     schemas = {t.name: t.inputSchema["properties"] for t in asyncio.run(server.mcp.list_tools())}
     assert schemas["jobs_get"]["complete_only"]["default"] is True
     assert {"string", "boolean"} <= {opt["type"] for opt in schemas["crawl_start"]["detail"]["anyOf"]}
@@ -383,7 +509,7 @@ def test_v2_database_is_upgraded_and_every_stored_job_is_derived(tmp_path, monke
     monkeypatch.setenv("DJS_HOME", str(tmp_path))
     write_v2(tmp_path)
     conn = db.connect()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     got = {r["source_job_id"]: r for r in conn.execute("SELECT * FROM jobs")}
     nc = got["7"]
     assert (nc["salary_min"], nc["salary_max"], nc["salary_unit"], nc["salary_months"]) == (20000, 30000, "元/月", 14)
@@ -395,6 +521,11 @@ def test_v2_database_is_upgraded_and_every_stored_job_is_derived(tmp_path, monke
     gone, bare = got["x"], got["no-payload"]   # nothing to derive from: judged by what is stored, no salary figures
     assert (gone["missing"], gone["complete"], bare["missing"]) == ("salary,description", 0, "salary,description")
     assert gone["description"] is None and gone["salary_text"] == "10-20K"
+    # v4: the salary per month and the duplicate fingerprint are derived for what was already stored
+    assert (nc["salary_month_min"], nc["salary_month_max"], nc["fingerprint"]) == (20000, 30000, "甲|算法|杭州")
+    assert (ch["salary_month_min"], ch["salary_month_max"], ch["fingerprint"]) == (6000, 9000, "乙|销售|南京")
+    assert (gone["salary_month_min"], gone["salary_month_max"], gone["fingerprint"]) == (None, None, None)
+    assert "jobs_fingerprint" in {r["name"] for r in conn.execute("PRAGMA index_list(jobs)")}
 
 
 def test_the_upgrade_is_repeatable_and_matches_a_fresh_database(tmp_path, monkeypatch):
@@ -406,7 +537,7 @@ def test_the_upgrade_is_repeatable_and_matches_a_fresh_database(tmp_path, monkey
     upgraded.execute("PRAGMA user_version = 2")   # as if another process were upgrading right now
     db.connect().close()
     assert [tuple(r) for r in upgraded.execute("SELECT * FROM jobs ORDER BY id")] == before
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 4
     monkeypatch.setenv("DJS_HOME", str(tmp_path / "new"))
     fresh = db.connect()
     assert sorted(columns(fresh)) == sorted(columns(upgraded))   # same names, types, NOT NULL and defaults

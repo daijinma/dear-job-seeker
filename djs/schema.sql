@@ -25,11 +25,13 @@ CREATE TABLE IF NOT EXISTS jobs (
   salary_min       INTEGER, salary_max INTEGER,         -- the range as numbers, in salary_unit
   salary_unit      TEXT,                                -- 元/月 | 元/天 | 元/时 | 元/年
   salary_months    INTEGER,                             -- paid months per year when stated ("·14薪" -> 14)
+  salary_month_min INTEGER, salary_month_max INTEGER,   -- the range as 元/月 (day, hour and year rates converted): comparable across sites
   description      TEXT,                                -- plain text
   education        TEXT, experience TEXT,
   source_url       TEXT, published_at TEXT, published_at_kind TEXT,
   missing          TEXT,                                -- core elements still absent, comma-joined; '' when complete
   complete         INTEGER NOT NULL DEFAULT 0,          -- 1 = every core element present
+  fingerprint      TEXT,                                -- company|title|city, normalised: one job on several sites shares it; NULL = not enough to tell
   payload          TEXT,                                -- raw list item JSON
   detail           TEXT,                                -- raw detail JSON, NULL if none/failed
   detail_error     TEXT,
@@ -37,6 +39,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_seen_at     REAL NOT NULL DEFAULT (strftime('%s','now')),
   UNIQUE(provider, source_job_id)
 );
+
+-- jobs(fingerprint) is indexed by the v4 migration (djs.db), not here: this script runs before the column exists on an old database.
 
 -- Every job a task saw, new or already known (jobs.task_id only records the first discoverer).
 CREATE TABLE IF NOT EXISTS task_jobs (

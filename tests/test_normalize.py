@@ -1,7 +1,7 @@
 """djs.normalize: salary text and figures, plain-text JD, the list of missing core elements. Pure functions, no I/O."""
 import pytest
 
-from djs.normalize import CORE, UNITS, missing, parse_salary, plain_text, salary_range
+from djs.normalize import CORE, UNITS, fingerprint, missing, monthly, parse_salary, plain_text, salary_range
 
 M, D, H, Y = UNITS   # 元/月 元/天 元/时 元/年
 
@@ -136,3 +136,79 @@ def test_a_salary_counts_only_as_two_numbers():
     assert missing({**FULL, "salary_min": None}) == ["salary"]
     assert missing({**FULL, "salary_min": "1", "salary_max": "2"}) == ["salary"]    # text is not a figure
     assert missing({**{k: v for k, v in FULL.items() if k != "salary_min"}, "salary_text": "面议"}) == ["salary"]
+
+
+# ---- the salary per month
+def pay(lo, hi, unit):
+    return {"salary_min": lo, "salary_max": hi, "salary_unit": unit}
+
+
+@pytest.mark.parametrize("fields, want", [
+    (pay(15000, 25000, M), (15000, 25000)),     # a month is a month
+    (pay(200, 400, D), (4350, 8700)),           # a day is 21.75 working days
+    (pay(50, 100, H), (8700, 17400)),           # an hour is 174 hours
+    (pay(200000, 480000, Y), (16667, 40000)),   # a year is a twelfth of its pay a month
+    (pay(4000, 4000, M), (4000, 4000)),         # a range of one
+    (pay(1, 1, H), (174, 174)),
+    ({**pay(8000, 12000, M), "salary_months": 14}, (8000, 12000)),   # the paid months are not part of the monthly figure
+])
+def test_monthly_converts_every_unit_to_yuan_per_month(fields, want):
+    assert tuple(monthly(fields).values()) == want
+    assert list(monthly(fields)) == ["salary_month_min", "salary_month_max"]
+
+
+@pytest.mark.parametrize("fields", [
+    {}, {"salary_unit": M}, {"salary_min": 1, "salary_max": 2}, pay(1, None, M), pay(None, 2, M), pay("1", "2", M),
+    pay(1.5, 2.5, M), pay(1, 2, "元/周"), pay(1, 2, None)])
+def test_monthly_is_empty_without_a_whole_number_range_in_a_known_unit(fields):
+    assert monthly(fields) == {"salary_month_min": None, "salary_month_max": None}
+
+
+def test_every_unit_of_the_contract_converts():
+    for unit in UNITS:   # a unit added to the contract must not silently lose its monthly figure
+        assert monthly(pay(100, 100, unit))["salary_month_min"] is not None
+
+
+# ---- the fingerprint that marks one job on several sites
+def fp(company, title, city):
+    return fingerprint({"company": company, "title": title, "city": city})
+
+
+SAME_JOB = [   # every spelling in a group is one job
+    [("某某科技有限公司", "Python后端开发工程师", "杭州"),
+     ("某某科技（杭州）有限公司", "【14-16薪】Python 后端开发工程师", "杭州市"),   # a bracketed city, a tag, a space, a 市
+     ("某某科技股份有限公司", "PYTHON 后端开发工程师 [急聘]", "杭州·滨江区"),     # legal form, case, tag, district
+     ("某某集团", "python后端开发工程师", "杭州、上海"),                         # the first place of several
+     ("某某 科技 有限公司", "Python-后端，开发工程师", "杭州 ")],                 # spaces and punctuation
+    [("阿里巴巴（中国）有限公司", "Java开发", "杭州"), ("阿里巴巴(中国)有限公司", "Java 开发", "杭州"),
+     ("阿里巴巴集团", "java开发", "杭州-西湖区")],
+    [("ＡＢＣ科技股份有限公司", "Ｃ++开发", "上海"), ("abc科技", "c++开发", "上海市")],   # full-width letters
+]
+DIFFERENT_JOBS = [
+    (("某某科技有限公司", "Python后端", "杭州"), ("某某科技有限公司", "Python前端", "杭州")),   # another job
+    (("某某科技有限公司", "Python后端", "杭州"), ("某某科技有限公司", "Python后端", "上海")),   # another city
+    (("某某科技有限公司", "Python后端", "杭州"), ("某某网络有限公司", "Python后端", "杭州")),   # another company
+    (("某某", "C++开发", "杭州"), ("某某", "C#开发", "杭州")),                                  # the signs of C++ and C# stay
+    (("某某", "Java开发(后端)", "杭州"), ("某某", "Java开发(前端)", "杭州")),                   # a round bracket is not a tag
+]
+NOT_ENOUGH = [(None, "x", "杭州"), ("科技有限公司", "x", "杭州"), ("某某", "", "杭州"), ("某某", "x", None),
+              ("某某", "【急聘】", "杭州"), ("某某", "x", " · "), ("某某", None, None)]
+
+
+@pytest.mark.parametrize("group", SAME_JOB)
+def test_one_job_posted_in_different_spellings_has_one_fingerprint(group):
+    assert len({fp(*spelling) for spelling in group}) == 1 and fp(*group[0]) is not None
+
+
+@pytest.mark.parametrize("one, other", DIFFERENT_JOBS)
+def test_different_jobs_keep_different_fingerprints(one, other):
+    assert fp(*one) != fp(*other)
+
+
+@pytest.mark.parametrize("company, title, city", NOT_ENOUGH)
+def test_no_fingerprint_unless_company_title_and_city_are_all_known(company, title, city):
+    assert fp(company, title, city) is None
+
+
+def test_the_fingerprint_reads_like_its_parts():
+    assert fp("杭州某某科技有限公司", "【14-16薪】Python 后端开发工程师", "杭州市") == "杭州某某|python后端开发工程师|杭州"

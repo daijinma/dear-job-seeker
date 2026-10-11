@@ -317,3 +317,15 @@ def test_anonymous_jobs_lack_only_the_salary_and_logged_in_ones_are_complete():
     full = derive(b, listed[0], detail)
     assert missing(full) == [] and (full["salary_min"], full["salary_max"], full["salary_unit"]) == (20000, 30000, "元/月")
     assert (full["city"], full["district"], full["education"], full["experience"]) == ("北京", "海淀区", "本科", "3-5年")
+
+
+def test_an_anonymous_detail_cannot_complete_a_job_that_lacks_a_salary():
+    b = Boss()
+    # anonymous: the detail has everything but the salary, so a job without one stays incomplete whatever is fetched
+    assert b.detail_can_fill(["salary"], False) is False
+    assert b.detail_can_fill(["salary", "description"], False) is False
+    assert b.detail_can_fill(["description"], False) is True    # a job that lacks only its JD is worth the request
+    assert b.detail_can_fill([], False) is True
+    # logged in, the detail carries the salary as well
+    assert b.detail_can_fill(["salary"], True) is True
+    assert b.detail_can_fill(["salary", "description"], True) is True

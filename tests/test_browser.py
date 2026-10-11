@@ -292,7 +292,7 @@ def test_old_provider_settings_table_gains_the_transport_column(home):
     assert pacer.effective(conn, "nowcoder") == (1.5, 0.2, 4)  # the user's old override survived
     assert pacer.transport(conn, "nowcoder") == "http"
     assert [r["name"] for r in conn.execute("PRAGMA table_info(provider_settings)")][-1] == "transport"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_adding_a_column_survives_a_concurrent_migrator(home):
@@ -547,7 +547,7 @@ def test_crawl_start_refuses_early_when_a_browser_platform_cannot_run(env, monke
 def test_job_detail_over_the_browser_warms_up_and_explains_what_is_missing(env, fake_browser):
     pacer.set_transport(env.conn, "dual", "browser")
     run(env, "dual")
-    job_id = service.jobs_get(env.conn, complete_only=False)[0]["id"]
+    job_id = service.jobs_get(env.conn, complete_only=False)["jobs"][0]["id"]
     fake_browser.client.gotos.clear()
     assert service.job_detail(env.conn, job_id)["description"] == "jd3"
     assert fake_browser.client.gotos == ["https://dual.test/"]

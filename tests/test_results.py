@@ -3,6 +3,7 @@ third-party descriptions, friendly error wording."""
 import pytest
 
 from djs import db, normalize, results, service, taskqueue
+from provider_fakes import job, task
 
 
 @pytest.fixture
@@ -11,23 +12,6 @@ def conn(tmp_path, monkeypatch):
     c = db.connect()
     yield c
     c.close()
-
-
-def task(conn, provider, keyword, city=None, status="done"):
-    tid = taskqueue.create(conn, provider, {"keyword": keyword, **({"city": city} if city else {})})
-    conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
-    return tid
-
-
-def job(conn, provider, sid, tasks, seen=1000.0, **cols):
-    """A stored job; `complete=1` unless the test says otherwise (the page lists complete jobs by default)."""
-    cols = {"title": sid, "company": None, "city": None, "salary_text": None, "description": None,
-            "source_url": f"https://x.test/{sid}", "complete": 1, "missing": "", **cols}
-    cur = conn.execute(
-        f"INSERT INTO jobs(provider, source_job_id, first_seen_at, {', '.join(cols)}) VALUES (?,?,?,{','.join('?' * len(cols))})",
-        (provider, sid, seen, *cols.values()))
-    conn.executemany("INSERT OR IGNORE INTO task_jobs VALUES (?,?)", [(t, cur.lastrowid) for t in tasks])
-    return cur.lastrowid
 
 
 @pytest.fixture
@@ -76,8 +60,8 @@ def test_a_search_without_city_is_its_own_group(conn, seeded):
     assert titles(results.search_jobs(conn, "py", "上海")) == ["SH"]
     assert titles(results.search_jobs(conn, "go", "杭州")) == ["GO"]
     empty = results.search_jobs(conn, "nothing", "杭州")
-    assert empty == {"jobs": [], "total": 0, "per_site": [], "incomplete": {"count": 0, "reasons": []},
-                     "searching": False, "task_ids": []}
+    assert empty == {"jobs": [], "total": 0, "all_total": 0, "merged": 0, "per_site": [],
+                     "incomplete": {"count": 0, "reasons": []}, "searching": False, "task_ids": []}
 
 
 def test_pagination_keeps_total_and_never_repeats_or_skips(conn, seeded):
@@ -114,10 +98,6 @@ def test_jobs_found_in_the_same_second_keep_the_sites_own_order(conn, seeded):
     assert titles(results.search_jobs(conn, "py", "杭州", provider="chinahr")) == ["T0", "T1", "T2", "C"]
 
 
-def test_every_salary_unit_of_the_contract_has_its_monthly_factor():
-    assert set(results._PER_MONTH) == set(normalize.UNITS)   # a unit added there must not silently sort last
-
-
 def test_salary_order_compares_day_hour_and_year_rates_as_months_and_puts_unknown_last(conn):
     t = task(conn, "nowcoder", "py")
     pay = [("month", 30000, "元/月"), ("day", 1000, "元/天"), ("hour", 100, "元/时"), ("year", 480000, "元/年"),
@@ -128,6 +108,59 @@ def test_salary_order_compares_day_hour_and_year_rates_as_months_and_puts_unknow
     # 30000 | 480000/12 = 40000 | 1000*21.75 = 21750 | 100*174 = 17400 | 25000 | 8000 | no salary
     assert titles(results.search_jobs(conn, "py", None, sort="salary")) == ["year", "month", "other", "day", "hour", "low", "none"]
     assert titles(results.search_jobs(conn, "py", None, sort="salary", provider="nowcoder"))[-1] == "none"
+
+
+# ---- the same job on several sites, and the pay filter
+@pytest.fixture
+def twice(conn):
+    """Search ('py', '杭州'): one job on both platforms (chinahr has more of its columns), one on nowcoder only."""
+    nc, ch = task(conn, "nowcoder", "py", "杭州"), task(conn, "chinahr", "py", "杭州")
+    both = {"title": "Python 后端", "company": "甲科技有限公司", "city": "杭州"}
+    return {"n": job(conn, "nowcoder", "n", [nc], seen=100, **both, salary_min=15000, salary_max=20000, salary_unit="元/月"),
+            "c": job(conn, "chinahr", "c", [ch], seen=100, **both, district="西湖区", salary_min=200, salary_max=300, salary_unit="元/天"),
+            "o": job(conn, "nowcoder", "o", [nc], seen=50, title="Other", company="乙公司", city="杭州", salary_min=1, salary_max=1,
+                     salary_unit="元/时")}
+
+
+def test_the_same_job_on_two_sites_is_one_card_that_names_the_other_site(conn, twice):
+    page = results.search_jobs(conn, "py", "杭州")
+    by_title = {j["title"]: j for j in page["jobs"]}
+    assert sorted(by_title) == ["Other", "Python 后端"]
+    best = by_title["Python 后端"]
+    assert (best["id"], best["label"]) == (twice["c"], "新华英才")   # the record with more of its columns filled
+    assert best["also_on"] == [{"provider": "nowcoder", "label": "牛客网", "id": twice["n"], "source_url": "https://x.test/n"}]
+    assert by_title["Other"]["also_on"] == []
+    assert (page["total"], page["all_total"], page["merged"]) == (2, 2, 1)   # the heading counts jobs, not records
+    assert page["per_site"] == [{"provider": "nowcoder", "label": "牛客网", "count": 2},
+                                {"provider": "chinahr", "label": "新华英才", "count": 1}]
+
+
+def test_a_site_filter_lists_every_job_of_that_site_and_folds_nothing(conn, twice):
+    page = results.search_jobs(conn, "py", "杭州", provider="nowcoder")
+    by_title = {j["title"]: j for j in page["jobs"]}
+    assert sorted(by_title) == ["Other", "Python 后端"] and page["total"] == 2
+    assert by_title["Python 后端"]["id"] == twice["n"]          # the site's own record, though chinahr's stands for the job elsewhere
+    assert all(j["also_on"] == [] for j in page["jobs"])       # the other site's record is outside this view
+    assert (page["all_total"], page["merged"]) == (2, 1)       # the whole search counts two jobs, one record folded
+    assert [s["count"] for s in page["per_site"]] == [2, 1]    # and every chip counts what clicking it lists
+
+
+def test_dedupe_off_lists_every_record(conn, twice):
+    page = results.search_jobs(conn, "py", "杭州", dedupe=False)
+    assert (page["total"], page["all_total"], page["merged"]) == (3, 3, 0)
+    assert all(j["also_on"] == [] for j in page["jobs"])
+
+
+def test_the_pay_filter_works_on_the_pay_per_month_and_keeps_every_chip(conn, twice):
+    # 15-20K a month | 200-300 a day = 4350-6525 a month | 1 an hour = 174 a month
+    page = results.search_jobs(conn, "py", "杭州", min_month_salary=10000)
+    assert [j["title"] for j in page["jobs"]] == ["Python 后端"] and page["jobs"][0]["provider"] == "nowcoder"   # the day-rate record no longer qualifies
+    assert page["jobs"][0]["also_on"] == []   # the day-rate record is out of the running: nothing is folded into this one
+    assert (page["total"], page["all_total"], page["merged"]) == (1, 1, 0)   # nothing to fold when only one record is in the running
+    assert page["per_site"] == [{"provider": "nowcoder", "label": "牛客网", "count": 1},
+                                {"provider": "chinahr", "label": "新华英才", "count": 0}]   # chinahr found jobs, none that pay this
+    assert results.search_jobs(conn, "py", "杭州", min_month_salary=40000)["jobs"] == []
+    assert [j["title"] for j in results.search_jobs(conn, "py", "杭州", min_month_salary=None)["jobs"]].count("Other") == 1
 
 
 # ---- the data contract: what is listed, what is held back, and why
@@ -194,8 +227,9 @@ def test_job_rows_carry_the_figures_the_page_shows_but_not_the_description_text(
     assert all("description" not in j for j in rows)
     assert (by_title["x"]["label"], by_title["z"]["label"]) == ("牛客网", "gone")
     assert set(by_title["x"]) == {"id", "provider", "label", "title", "company", "city", "district", "education", "experience",
-                                  "salary_text", "salary_min", "salary_max", "salary_unit", "salary_months", "source_url",
-                                  "published_at", "first_seen_at", "has_description", "missing", "complete", "incomplete_reason"}
+                                  "salary_text", "salary_min", "salary_max", "salary_unit", "salary_months", "salary_month_min",
+                                  "salary_month_max", "source_url", "published_at", "first_seen_at", "has_description", "missing",
+                                  "complete", "incomplete_reason", "also_on"}
     assert (by_title["x"]["salary_min"], by_title["x"]["salary_unit"], by_title["x"]["salary_months"]) == (20000, "元/月", 14)
 
 

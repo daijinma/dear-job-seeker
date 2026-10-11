@@ -23,6 +23,11 @@ def _login_expired(prov, exc) -> bool:
     return isinstance(exc, LoginRequired) and prov.auth == "login"
 
 
+def _session(prov) -> bool:
+    """A platform with a login, and the user is logged in to it."""
+    return prov.login is not None and auth.logged_in(prov.name)
+
+
 def transport_for(conn, prov, session: bool) -> str:
     """How the platform is captured: the user's own choice (set_transport) if there is one, else, while a session
     exists, the transport logged-in crawling needs (login_transport), else the platform's first."""
@@ -49,7 +54,7 @@ def leased_client(conn, prov, key: str, payload: dict):
     its session on every transport (saved cookies on http, the shared profile in a browser); a 'login' platform
     needs one first, an 'optional' one never waits for it. Reports the exit's health afterwards. A dead session is
     the session's fault, not the exit's, so it only invalidates the saved login."""
-    session = prov.login is not None and auth.logged_in(prov.name)
+    session = _session(prov)
     if prov.auth == "login" and not session:
         raise LoginRequired(f"no login for {prov.name}")
     transport = transport_for(conn, prov, session)
@@ -102,13 +107,27 @@ def _progress(conn, task_id, stats) -> None:
     taskqueue.progress(conn, task_id, {**stats, **jobs.tally(conn, task_id)})
 
 
+def _awaiting(conn, task_id, prov, mode: str) -> list:
+    """The jobs the completion pass asks a detail for: with 'always' every job that has none, with 'auto' the incomplete
+    ones whose detail could supply what they lack (see Provider.detail_can_fill)."""
+    rows = jobs.awaiting_detail(conn, task_id, everything=mode == "always")
+    if mode == "always" or not rows:
+        return rows
+    logged_in = _session(prov)
+    return [r for r in rows if prov.detail_can_fill(jobs.gaps(r["missing"]), logged_in)]
+
+
 def _complete(conn, task_id, prov, client, mode: str, stats) -> None:
-    """The second pass: the detail request, for the task's jobs that still miss a core element ('auto') or for all of
-    them ('always'). Skipped when the list item already is the detail. Blocked ends the task (it is retried and
-    carries on with what is still missing); any other failure is kept on the job."""
+    """The second pass: the detail request, for the task's jobs that still miss a core element ('auto', skipping those
+    a detail cannot complete) or for all of them ('always'). Skipped when the list item already is the detail. Blocked
+    ends the task (it is retried and carries on with what is still missing); any other failure is kept on the job.
+    stats['details_total'] says how many requests the pass will make: readers show the progress with it."""
     if mode == "never" or not prov.has_detail:
         return
-    for row in jobs.awaiting_detail(conn, task_id, everything=mode == "always"):
+    rows = _awaiting(conn, task_id, prov, mode)
+    stats["details_total"] = len(rows)
+    _progress(conn, task_id, stats)
+    for row in rows:
         item = json.loads(row["payload"])
         detail, err = fetch_detail(client, prov, item)
         if err:
