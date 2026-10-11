@@ -7,6 +7,7 @@ import http
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -114,21 +115,31 @@ def script(path: Path) -> Path:
     return path
 
 
+HELPER = "import signal, time\n{ignore}time.sleep(120)\n"   # ends by itself after two minutes, whatever a test leaves behind
+
+
 def main(argv: list[str]) -> None:
     """The "browser" of the process tests: Chrome's flags in, a DevToolsActivePort file out, until Browser.close.
-    FAKE_BROWSER picks a misbehaviour: `exit` quits at once, `silent` never listens, `stuck` ignores Browser.close
-    (SIGTERM ends it), `deaf` ignores SIGTERM too (only SIGKILL ends it)."""
-    mode = os.environ.get("FAKE_BROWSER", "")
+    FAKE_BROWSER is a comma-separated list of misbehaviours: `exit` quits at once, `silent` never listens, `stuck` ignores
+    Browser.close (SIGTERM ends it), `deaf` ignores SIGTERM too (only SIGKILL ends it), `helper` starts a helper process in
+    its group (a real browser has renderers, a GPU process...) which SIGTERM ends and which a browser that quits is not
+    waiting for, `stubborn-helper` the same with a helper that ignores SIGTERM. The helper's pid is written to
+    <profile>/helper-pid."""
+    modes = set(os.environ.get("FAKE_BROWSER", "").split(","))
     profile = Path(next(a.partition("=")[2] for a in argv if a.startswith("--user-data-dir=")))
-    if mode == "exit":
+    if "exit" in modes:
         return
-    if mode == "silent":
+    if "silent" in modes:
         time.sleep(3600)
-    if mode == "deaf":
+    if "deaf" in modes:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    dev = DevTools(argv[-1], deaf=mode in ("stuck", "deaf"))
+    dev = DevTools(argv[-1], deaf=bool(modes & {"stuck", "deaf"}))
     profile.mkdir(parents=True, exist_ok=True)
     (profile / "pid").write_text(str(os.getpid()))
+    for kind in modes & {"helper", "stubborn-helper"}:
+        ignore = "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if kind == "stubborn-helper" else ""
+        helper = subprocess.Popen([sys.executable, "-c", HELPER.format(ignore=ignore)])   # same group as this process
+        (profile / "helper-pid").write_text(str(helper.pid))
     (profile / "DevToolsActivePort").write_text(f"{dev.port}\n{dev.path}\n")
     dev.gone.wait()
     (profile / "DevToolsActivePort").unlink(missing_ok=True)

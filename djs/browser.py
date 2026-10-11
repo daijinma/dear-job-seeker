@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -44,7 +45,7 @@ INSTALLED = {
 # which the last flag undoes, as in launch_context.
 WINDOW_FLAGS = ("--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic",
                 "--lang=zh-CN", "--disable-blink-features=AutomationControlled")
-QUIT_SECONDS = 5     # how long a browser of ours gets to leave after Browser.close, and again after terminate()
+QUIT_SECONDS = 5     # what a browser of ours gets at each of the three steps of closing it (Browser.close, terminate, kill)
 START_SECONDS = 20   # how long a browser of ours gets to listen and show its first page
 CDP_HINT = ("Cannot reach a browser at {url}. Start Chrome with --remote-debugging-port=9222 "
             "--user-data-dir=<a new empty folder> and set DJS_CDP_URL=http://127.0.0.1:9222")
@@ -146,12 +147,15 @@ def launch_context(pw, provider_name: str, headless: bool, proxy: str | None = N
 
 @contextmanager
 def profile_lock(provider_name: str, wait: float = 3.0):
-    """A Chromium profile belongs to one process at a time: login and browser crawls take turns."""
+    """A Chromium profile belongs to one process at a time: login and browser crawls take turns. It is not free either
+    while a browser of ours that could not be closed (see _Browser.close) still runs on it."""
     with open(db.profile_dir(provider_name, create=True) / ".lock", "a+") as f, ExitStack() as held:
         try:
             held.enter_context(filelock.locked(f, wait))
         except filelock.LockTimeout:
             raise BrowserBusy("正在使用浏览器，请稍后再试") from None
+        if _stuck(db.profile_dir(provider_name) / "browser"):
+            raise BrowserBusy("正在使用浏览器，请稍后再试")
         yield
 
 
@@ -258,8 +262,9 @@ class _Cdp:
     def __init__(self, address: str):
         self._ids, self._connection = count(1), ExitStack()  # websockets wants its connection used as a context manager
         try:
-            # no size limit: a cookie jar can pass the default 1 MiB
-            self._ws = self._connection.enter_context(connect(address, max_size=None, open_timeout=10))
+            # no size limit: a cookie jar can pass the default 1 MiB; a browser that does not say goodbye back (it is
+            # frozen) is let go after 2 s, not the 10 s that would eat into the deadline of _Browser.close
+            self._ws = self._connection.enter_context(connect(address, max_size=None, open_timeout=10, close_timeout=2))
         except (OSError, WebSocketException) as e:
             raise BrowserUnavailable(f"Cannot talk to the browser at {address}") from e
 
@@ -324,6 +329,26 @@ class Window:
             self._ask("Storage.setCookies", cookies=dead)
 
 
+def _own_group() -> dict:
+    """Popen arguments that make the browser lead a group of its own, which is how it and everything it starts (renderers,
+    GPU and utility processes) are reached at once: a session on POSIX (killpg), a process group on Windows (taskkill /T)."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _group_alive(pgid: int) -> bool:
+    """Some process of the group `pgid` is alive. A group only zombies are left in does not count (macOS answers
+    PermissionError for it): they hold nothing. POSIX only: on Windows nothing tells once the browser itself has gone."""
+    if sys.platform == "win32":
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 def _exited(proc: subprocess.Popen, seconds: float) -> bool:
     try:
         proc.wait(seconds)
@@ -332,40 +357,125 @@ def _exited(proc: subprocess.Popen, seconds: float) -> bool:
     return True
 
 
-_alive: set[_Browser] = set()  # the browsers of ours that run; what is left at interpreter exit is closed there
+def _gone(proc: subprocess.Popen, seconds: float) -> bool:
+    """Wait up to `seconds` until the browser has exited and every process it started has followed. The browser is reaped
+    before its group is looked at: the id of a group that still has a member cannot be anyone else's."""
+    until = time.monotonic() + seconds
+    if not _exited(proc, seconds):
+        return False
+    while _group_alive(proc.pid):
+        if time.monotonic() >= until:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _signal_tree(proc: subprocess.Popen, kill: bool, timeout: float) -> None:
+    """SIGTERM (kill: SIGKILL) to the browser and everything it started: the group it leads, which also holds the children
+    left behind when the browser itself has quit. Windows knows no soft signal that reaches a browser without a window, so
+    taskkill /T /F ends the tree both times (giving up on taskkill after `timeout`), and kill() the browser alone when
+    taskkill cannot."""
+    if sys.platform != "win32":
+        with suppress(ProcessLookupError, PermissionError):  # nothing left in the group, or only zombies
+            os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+        return
+    try:
+        done = subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=timeout,
+                              creationflags=subprocess.CREATE_NO_WINDOW).returncode == 0  # no console window flashing up
+    except (OSError, subprocess.SubprocessError):  # no taskkill, or it hung
+        done = False
+    if not done and proc.poll() is None:
+        proc.kill()
+
+
+def _left(until: float) -> float:
+    """Seconds left until the monotonic time `until`."""
+    return max(until - time.monotonic(), 0)
+
+
+def _within(deadline: float, seconds: float) -> float:
+    """`seconds`, or what is left until `deadline` if that is less."""
+    return min(seconds, _left(deadline))
+
+
+_alive: set[_Browser] = set()  # the browsers of ours that run (or could not be closed); what is left at exit is closed there
 
 
 class _Browser:
-    """A browser process of ours and its DevTools socket. Whatever happens, close() leaves no process behind."""
+    """A browser process of ours with everything it starts, and its DevTools socket. Whatever happens, close() leaves no
+    process behind, or says that it could not."""
 
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], profile: Path):
         self.cdp: _Cdp | None = None
+        self.profile, self.ended = profile, False
         self._closing = threading.Lock()
         try:
             self.proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
+                                         stderr=subprocess.DEVNULL, **_own_group())
         except OSError as e:
             raise BrowserUnavailable(f"Cannot start the browser {command[0]}: {e}") from e
         _alive.add(self)
 
-    def close(self) -> None:
-        """Ask the browser to quit and give it QUIT_SECONDS, else terminate it, else kill it. Safe to call twice and from
-        two threads (the owner and the exit handler)."""
+    def running(self) -> bool:
+        """The browser, or a process it started, is alive. Never waits."""
+        return not self.ended and (self.proc.poll() is None or _group_alive(self.proc.pid))
+
+    def _quit(self, deadline: float) -> bool:
+        """Ask the browser to quit over its socket and wait for it to leave, together QUIT_SECONDS. A browser that never
+        listened has no socket and nobody to ask."""
+        if self.cdp is None:
+            return False
+        until = time.monotonic() + _within(deadline, QUIT_SECONDS)
+        with suppress(BrowserUnavailable):  # already gone is as good; one that does not answer is dealt with below
+            self.cdp.call("Browser.close", timeout=_left(until))
+        return _gone(self.proc, _left(until))
+
+    def _end(self, deadline: float, kill: bool) -> bool:
+        """Signal what is left of the browser's tree (SIGKILL when `kill`, else SIGTERM) and give it QUIT_SECONDS to go,
+        signalling included."""
+        until = time.monotonic() + _within(deadline, QUIT_SECONDS)
+        if not _gone(self.proc, 0):
+            _signal_tree(self.proc, kill, _left(until))
+        return _gone(self.proc, _left(until))
+
+    def close(self) -> bool:
+        """Leave no process of this browser behind, in one deadline of three QUIT_SECONDS: ask it to quit (Browser.close),
+        else terminate its whole tree, else kill it, waiting each time until the last process is reaped. True when it and
+        everything it started are gone. False, said on stderr, when something outlived the deadline: the browser then
+        stays in `_alive`, its profile counts as busy (see profile_lock) and the next close() tries again. Safe to call
+        twice and from two threads (the owner and the exit handler)."""
         with self._closing:
-            _alive.discard(self)
+            if self.ended:
+                return True
+            deadline = time.monotonic() + 3 * QUIT_SECONDS
             try:
-                if self.cdp is not None:
-                    with suppress(BrowserUnavailable):  # already gone is as good
-                        self.cdp.call("Browser.close", timeout=QUIT_SECONDS)
-                    self.cdp.close()
-                    if _exited(self.proc, QUIT_SECONDS):
-                        return
-                self.proc.terminate()
-                _exited(self.proc, QUIT_SECONDS)
+                self.ended = self._quit(deadline) or self._end(deadline, kill=False)
             finally:  # also when interrupted above
-                if self.proc.poll() is None:
-                    self.proc.kill()
-                self.proc.wait()
+                self.ended = self.ended or self._end(deadline, kill=True)
+                self._settle()
+            return self.ended
+
+    def _settle(self) -> None:
+        """After the last step: forget the browser when it is gone and say so when it is not. The socket is closed last,
+        when a frozen browser's goodbye is the only thing left to wait for."""
+        if self.ended:
+            _alive.discard(self)
+            with suppress(OSError):  # the port file names a browser that no longer exists
+                (self.profile / "DevToolsActivePort").unlink(missing_ok=True)
+        else:
+            print(f"djs: the browser on {self.profile} (pid {self.proc.pid}) was still running {3 * QUIT_SECONDS:g} s after "
+                  "it was asked to quit, terminated and killed; its profile stays busy until it is gone", file=sys.stderr)
+        if self.cdp is not None:
+            self.cdp.close()
+
+
+def _stuck(profile: Path) -> bool:
+    """A browser of ours that close() could not end still runs on `profile`. Those that have gone since are settled."""
+    for leftover in [b for b in list(_alive) if b.profile == profile]:  # (a copy: other threads add and remove browsers)
+        if leftover.running():
+            return True
+        leftover.close()  # nothing is left to wait for: this only records that it went
+    return False
 
 
 def _close_all() -> None:
@@ -445,7 +555,7 @@ def _own_window(provider_name: str, url: str, headless: bool):
         profile = db.profile_dir(provider_name, create=True) / "browser"
         _clear_leftovers(profile)
         started = _Browser([str(exe), f"--user-data-dir={profile}", "--remote-debugging-port=0", *WINDOW_FLAGS,
-                            *(["--headless=new"] if headless else []), url])
+                            *(["--headless=new"] if headless else []), url], profile)
         try:
             deadline = time.monotonic() + START_SECONDS
             started.cdp = _Cdp(_listening(profile, started.proc, deadline))
@@ -483,8 +593,10 @@ def plain_window(provider_name: str, url: str, headless: bool = False):
     Sites blank a page that Playwright drives, even one we never call, so this is an ordinary browser process with a
     debugging port of which only the browser-level socket is used: nothing is attached to the page, no script is
     injected. It runs on the profile that crawling shares (cookies set here are read there), under the profile lock, and
-    the process is gone when the block ends however it ends. With DJS_CDP_URL it is a new tab of the user's own browser
-    instead, which is left alone apart from that tab. `headless` is for tests."""
+    the process, with everything it started, is gone when the block ends however it ends. (Should one outlive the deadline
+    of _Browser.close, that is said on stderr and the profile stays busy, BrowserBusy, until it is gone: the block's own
+    result is not thrown away for it.) With DJS_CDP_URL it is a new tab of the user's own browser instead, which is left
+    alone apart from that tab. `headless` is for tests."""
     address = cdp_url()
     with (_users_window(address, url) if address else _own_window(provider_name, url, headless)) as window:
         yield window

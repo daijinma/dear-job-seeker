@@ -1,13 +1,16 @@
 """The login window of djs.browser against a stand-in for the browser's DevTools endpoint (tests/fake_devtools.py): the
 commands it sends, what it does when the browser quits or does not answer, the user's own browser (DJS_CDP_URL), a browser
-left over by a crashed run, and a browser process that must be gone whatever it does or whatever happens to the caller.
-No real browser; test_auth_browser.py has one."""
+left over by a crashed run, and a browser process, with the processes it started, that must be gone within one deadline
+whatever it does or whatever happens to the caller (and the Windows way of ending the tree). No real browser;
+test_auth_browser.py and test_plain_window_real.py have one."""
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,7 @@ from djs import browser, db
 from fake_devtools import DevTools
 
 process = pytest.mark.skipif(sys.platform == "win32", reason="the fake browser is a script")
+SIGKILL = getattr(signal, "SIGKILL", 9)   # the parametrize lists below are read on Windows too, for its own tests
 URL = "https://x.test/login"
 
 
@@ -45,6 +49,31 @@ def cookie(name, value="v", domain=".site.test", path="/", **more):
 def lock_is_free(name="boss"):
     with browser.profile_lock(name, wait=0):   # BrowserBusy while someone holds it
         return True
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def goes_away(pid, seconds=10):
+    """The process is gone, zombie included: one whose parent died first is reaped by init a moment later."""
+    deadline = time.monotonic() + seconds
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not alive(pid)
+
+
+def helper():
+    """Pid of the helper process the fake browser started (FAKE_BROWSER=helper)."""
+    return int((profile() / "helper-pid").read_text())
+
+
+def refuse(*args, **kwargs):
+    raise AssertionError("nothing is started or signalled here")
 
 
 # ============================================================ the protocol helper
@@ -112,6 +141,17 @@ def test_in_the_users_browser_the_window_is_one_new_tab_and_only_that_tab_is_clo
         assert not (home / "profiles").exists()   # no profile of ours, so no lock either
     assert dev.pages == {"page-1": "https://site.test/login"}
     assert "Browser.close" not in dev.methods() and ("Target.closeTarget", {"targetId": "page-2"}) in dev.calls
+
+
+def test_in_the_users_browser_no_process_is_started_or_signalled(dev, monkeypatch):
+    monkeypatch.setenv("DJS_CDP_URL", dev.http_url)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    monkeypatch.setattr(browser, "_Browser", refuse)
+    monkeypatch.setattr(browser, "_signal_tree", refuse)
+    monkeypatch.setattr(os, "killpg", refuse, raising=False)
+    with browser.plain_window("boss", URL) as window:
+        assert window.url() == URL
+    assert dev.pages == {"page-1": "https://site.test/login"} and not dev.gone.is_set() and not browser._alive
 
 
 def test_the_users_browser_stays_when_the_user_already_closed_the_tab(dev, monkeypatch):
@@ -205,7 +245,11 @@ def fake_chrome(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", spy)
     monkeypatch.setattr(browser, "QUIT_SECONDS", 0.5)
     started.script = chrome
-    return started
+    yield started
+    for proc in started:   # a failed test must not leave a browser (or its helper) running on the developer's machine
+        if browser._group_alive(proc.pid):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(10)
 
 
 @process
@@ -227,12 +271,13 @@ def test_a_window_for_a_person_is_not_headless(fake_chrome):
 
 
 @process
-@pytest.mark.parametrize("mode, ended_by", [("stuck", signal.SIGTERM), ("deaf", signal.SIGKILL)])
+@pytest.mark.parametrize("mode, ended_by", [("stuck", signal.SIGTERM), ("deaf", SIGKILL)])
 def test_a_browser_that_does_not_quit_when_asked_is_terminated_and_then_killed(fake_chrome, monkeypatch, mode, ended_by):
     monkeypatch.setenv("FAKE_BROWSER", mode)
     with browser.plain_window("boss", URL, headless=True):
         pass
     assert fake_chrome[0].returncode == -ended_by and lock_is_free() and not browser._alive
+    assert not (profile() / "DevToolsActivePort").exists()   # a killed browser cannot remove its port file; the window does
 
 
 @process
@@ -309,3 +354,225 @@ print(next(iter(browser._alive)).proc.pid, flush=True)
     assert out.returncode == 0, out.stderr
     with pytest.raises(ProcessLookupError):
         os.kill(int(out.stdout.split()[-1]), 0)   # the browser went with the interpreter
+
+
+# ============================================================ the whole tree, within one deadline
+def start_browser(fake_chrome):
+    """A `_Browser` on the fake browser with its DevTools socket, as _own_window builds one."""
+    command = [str(fake_chrome.script), f"--user-data-dir={profile()}", "--remote-debugging-port=0", URL]
+    started = browser._Browser(command, profile())
+    deadline = time.monotonic() + 15
+    while (address := browser._devtools_address(profile())) is None:
+        assert time.monotonic() < deadline, "the fake browser did not start"
+        time.sleep(0.05)
+    started.cdp = browser._Cdp(address)
+    return started
+
+
+def nothing_reaches_it(monkeypatch):
+    """No signal gets to the browser from now on, as if it sat in an uninterruptible sleep; returns the real sender, for the
+    test to clean up with."""
+    real = browser._signal_tree
+    monkeypatch.setattr(browser, "_signal_tree", lambda *args: None)
+    return real
+
+
+@process
+def test_the_browser_leads_a_group_of_its_own(fake_chrome):
+    with browser.plain_window("boss", URL, headless=True):
+        pid = fake_chrome[0].pid
+        assert os.getpgid(pid) == os.getsid(pid) == pid != os.getpgrp()   # signalling it never reaches this process
+
+
+@process
+@pytest.mark.parametrize("modes, main_ended_by", [
+    ("stuck,helper", -signal.SIGTERM),           # ignores Browser.close: SIGTERM to the group ends it and its helper
+    ("deaf,stubborn-helper", -SIGKILL),          # ignores SIGTERM too, and so does the helper: only the kill ends them
+    ("helper", 0),                               # quits when asked; its helper stays, with the main process already gone
+    ("stubborn-helper", 0)])                     # ... one that ignores SIGTERM
+def test_what_the_browser_started_goes_with_it(fake_chrome, monkeypatch, modes, main_ended_by):
+    monkeypatch.setenv("FAKE_BROWSER", modes)
+    with browser.plain_window("boss", URL, headless=True):
+        child = helper()
+        assert alive(child) and os.getpgid(child) == fake_chrome[0].pid   # in the browser's group
+        begun = time.monotonic()
+    assert time.monotonic() - begun < 3 * browser.QUIT_SECONDS + 1
+    assert fake_chrome[0].returncode == main_ended_by
+    assert goes_away(child) and lock_is_free() and not browser._alive
+
+
+@process
+def test_a_browser_that_ignores_browser_close_and_sigterm_is_killed_within_the_deadline(fake_chrome, monkeypatch):
+    monkeypatch.setenv("FAKE_BROWSER", "deaf")
+    with browser.plain_window("boss", URL, headless=True):
+        begun = time.monotonic()
+    assert time.monotonic() - begun < 3 * browser.QUIT_SECONDS + 1   # one deadline for the three steps
+    assert fake_chrome[0].returncode == -signal.SIGKILL and lock_is_free() and not browser._alive
+
+
+@process
+def test_a_frozen_browser_that_never_answers_is_ended_within_the_deadline_too(fake_chrome, monkeypatch):
+    monkeypatch.setenv("FAKE_BROWSER", "deaf")   # (BSD wakes a stopped process for SIGTERM, Linux does not: be deaf to it)
+    with browser.plain_window("boss", URL, headless=True):
+        os.kill(fake_chrome[0].pid, signal.SIGSTOP)   # no answer to Browser.close, none to the socket's goodbye
+        begun = time.monotonic()
+    assert time.monotonic() - begun < 3 * browser.QUIT_SECONDS + 1
+    assert fake_chrome[0].returncode == -signal.SIGKILL and lock_is_free() and not browser._alive
+
+
+@process
+def test_close_is_safe_to_call_twice_and_from_two_threads(fake_chrome, monkeypatch):
+    started = start_browser(fake_chrome)
+    answers = []
+    threads = [threading.Thread(target=lambda: answers.append(started.close())) for _ in range(2)]   # owner and exit handler
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert answers == [True, True] and fake_chrome[0].returncode == 0 and not browser._alive
+    monkeypatch.setattr(browser, "_signal_tree", refuse)   # what has gone is not signalled again: its ids may be reused
+    assert started.close() is True
+
+
+@process
+def test_close_says_so_when_a_process_outlives_the_deadline(fake_chrome, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BROWSER", "deaf")
+    started = start_browser(fake_chrome)
+    real_signal = nothing_reaches_it(monkeypatch)
+    begun = time.monotonic()
+    try:
+        assert started.close() is False and started.running() and started in browser._alive
+        assert time.monotonic() - begun < 3 * browser.QUIT_SECONDS + 1   # it gave up on time instead of waiting for ever
+        said = capsys.readouterr().err
+        assert f"pid {started.proc.pid}" in said and "still running" in said
+    finally:
+        real_signal(started.proc, True, 1)
+    assert started.close() is True and not browser._alive   # once it has really gone, the next close() settles it
+
+
+@process
+def test_a_profile_whose_browser_could_not_be_ended_stays_busy_until_it_has_gone(fake_chrome, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BROWSER", "deaf")
+    real_signal = nothing_reaches_it(monkeypatch)
+    with browser.plain_window("boss", URL, headless=True):
+        pass   # the block itself ends normally: a login made in it is not thrown away over this
+    proc = fake_chrome[0]
+    try:
+        assert "still running" in capsys.readouterr().err
+        with pytest.raises(browser.BrowserBusy):
+            lock_is_free()   # not free for a crawl in a browser either
+        with pytest.raises(browser.BrowserBusy):
+            with browser.plain_window("boss", URL, headless=True):
+                pass   # and no second browser is started on it
+        assert len(fake_chrome) == 1 and browser.profiles_in_use() == ["boss"]
+    finally:
+        real_signal(proc, True, 1)
+        proc.wait(10)
+    monkeypatch.delenv("FAKE_BROWSER")
+    assert lock_is_free() and not browser._alive   # gone: free again, and the leftover is forgotten
+    monkeypatch.setattr(browser, "_signal_tree", real_signal)
+    with browser.plain_window("boss", URL, headless=True) as window:
+        assert window.url() == URL
+
+
+@process
+def test_the_goodbye_to_a_frozen_browser_that_cannot_be_ended_is_bounded_too(fake_chrome, monkeypatch):
+    started = start_browser(fake_chrome)
+    os.kill(fake_chrome[0].pid, signal.SIGSTOP)
+    real_signal = nothing_reaches_it(monkeypatch)
+    begun = time.monotonic()
+    try:
+        assert started.close() is False
+        assert time.monotonic() - begun < 3 * browser.QUIT_SECONDS + 4   # the socket's goodbye waits 2 s, not its default 10
+    finally:
+        real_signal(started.proc, True, 1)
+    assert started.close() is True
+
+
+# ============================================================ Windows: its own group, ended with taskkill
+class WindowsProc:
+    """The browser process as the Windows path sees it: alive until a kill reaches it."""
+    pid = 4242
+
+    def __init__(self, unkillable=False):
+        self.returncode, self.killed, self.unkillable = None, False, unkillable
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("chrome.exe", timeout)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        if not self.unkillable:
+            self.returncode = 1
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """The Windows code path on any machine: the platform, subprocess's Windows constants, and a subprocess that only
+    records what is started and what taskkill is asked. `outcome` is what taskkill does: works, fails, missing, hangs."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(browser, "QUIT_SECONDS", 0.2)
+    world = SimpleNamespace(proc=WindowsProc(), started=[], taskkill=[], outcome="works")
+
+    def popen(command, **kwargs):
+        world.started.append((command, kwargs))
+        return world.proc
+
+    def run(command, **kwargs):
+        world.taskkill.append((command, kwargs))
+        if world.outcome == "missing":
+            raise FileNotFoundError("taskkill")
+        if world.outcome == "hangs":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if world.outcome == "works":
+            world.proc.returncode = 1   # the tree is gone
+        return subprocess.CompletedProcess(command, 0 if world.outcome == "works" else 1)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(subprocess, "run", run)
+    yield world
+    browser._alive.clear()
+
+
+def test_on_windows_the_browser_starts_in_a_process_group_of_its_own(windows, tmp_path):
+    browser._Browser(["chrome.exe", "--x"], tmp_path)
+    [(command, kwargs)] = windows.started
+    assert command == ["chrome.exe", "--x"]
+    assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP and "start_new_session" not in kwargs
+
+
+def test_on_windows_the_whole_tree_is_ended_with_taskkill(windows, tmp_path):
+    started = browser._Browser(["chrome.exe"], tmp_path)
+    assert started.close() is True and not browser._alive
+    [(command, kwargs)] = windows.taskkill
+    assert command == ["taskkill", "/T", "/F", "/PID", "4242"]   # /T: the children too
+    assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW   # no console window flashing up in the app
+    assert kwargs["timeout"] <= browser.QUIT_SECONDS   # a hung taskkill cannot eat the steps that follow
+    assert windows.proc.killed is False
+
+
+@pytest.mark.parametrize("outcome", ["fails", "missing", "hangs"])
+def test_on_windows_the_browser_itself_is_killed_when_taskkill_cannot(windows, tmp_path, outcome):
+    windows.outcome = outcome
+    assert browser._Browser(["chrome.exe"], tmp_path).close() is True
+    assert len(windows.taskkill) == 1 and windows.proc.killed is True
+
+
+def test_on_windows_a_browser_that_nothing_ends_is_reported(windows, tmp_path, capsys):
+    windows.outcome, windows.proc = "fails", WindowsProc(unkillable=True)
+    started = browser._Browser(["chrome.exe"], profile())
+    begun = time.monotonic()
+    assert started.close() is False and started.running() and started in browser._alive
+    assert time.monotonic() - begun < 3 * browser.QUIT_SECONDS + 1
+    assert len(windows.taskkill) == 2   # the terminate step and the kill step
+    assert "pid 4242" in capsys.readouterr().err
+    with pytest.raises(browser.BrowserBusy):
+        with browser.profile_lock("boss", wait=0):   # the profile of the stuck browser is not free
+            pass

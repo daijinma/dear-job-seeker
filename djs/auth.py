@@ -262,10 +262,11 @@ def pending_logins() -> list[dict]:
     return [{"provider": name, "since": p.since} for name, p in list(_pending.items())]
 
 
-def cancel_all(wait: float = 10) -> None:
+def cancel_all(wait: float = 3 * browser.QUIT_SECONDS + 2) -> None:
     """Cancel every login that is waiting for the user and give their windows up to `wait` seconds to close (a login
     drops out of the list once its window is gone). For the end of the app or server: those windows are browsers of this
-    process, and nothing else would close them."""
+    process, and nothing else would close them. The default outlasts a browser's whole close (three QUIT_SECONDS steps),
+    so even one that ignores the polite steps is killed before the process exits."""
     for pending in list(_pending.values()):
         pending.cancel.set()
     deadline = time.monotonic() + wait

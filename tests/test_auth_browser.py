@@ -31,15 +31,15 @@ def browser_works(tmp_path_factory):
 
 
 class Site(BaseHTTPRequestHandler):
-    """/login sets cookie `tok` after 300 ms to the value of ?v= (never, with ?v=none) and `wd` to what the page saw in
-    navigator.webdriver; `loads` is set by the first page load."""
+    """/login sets cookie `wd` after 300 ms to what the page saw in navigator.webdriver, and then `tok` to the value of ?v=
+    (never, with ?v=none): a login that sees `tok` is sure to see `wd` too. `loads` is set by the first page load."""
     loads = threading.Event()
 
     def do_GET(self):
         Site.loads.set()
         value = self.path.partition("v=")[2] or "SECRET"
         login = "" if value == "none" else f"document.cookie = 'tok={value}; max-age=3600; path=/';"
-        script = f"setTimeout(() => {{ {login} document.cookie = 'wd=' + navigator.webdriver + '; path=/'; }}, 300)"
+        script = f"setTimeout(() => {{ document.cookie = 'wd=' + navigator.webdriver + '; path=/'; {login} }}, 300)"
         body = f"<html><body>log in here<script>{script}</script></body></html>".encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -127,7 +127,7 @@ def second_connection():
 
 
 def page_is_up(cdp):
-    """The page has loaded and its script has run (it sets the `wd` cookie last)."""
+    """The page has loaded and its script has run (it sets the `wd` cookie first)."""
     return any(c["name"] == "wd" for c in cdp.call("Storage.getCookies")["cookies"])
 
 
