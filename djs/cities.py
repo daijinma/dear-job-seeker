@@ -98,9 +98,14 @@ _BY_GB = {city[:4]: name for name, (city, _) in GB.items()}
 
 
 def norm(name: str | None) -> str:
-    """'杭州市' -> '杭州': drop whitespace and one 市/省/区 suffix (never from a 2-character name)."""
+    """'杭州市' -> '杭州': drop whitespace and one 市/省/区 suffix (never from a 2-character name). A text that is not a
+    known city but holds one is that city ('浙江杭州', '杭州市西湖区'): the one that appears first, the longest on a tie
+    (so an exact name always wins). Any other text stays as typed, for the sites that take plain names ('义乌')."""
     n = re.sub(r"\s+", "", name or "")
-    return n[:-1] if len(n) > 2 and n[-1] in "市省区" else n
+    if len(n) > 2 and n[-1] in "市省区":
+        n = n[:-1]
+    held = [(n.find(city), -len(city), city) for city in GB if city in n]
+    return min(held)[2] if held else n
 
 
 def gb_city(name: str) -> str | None:

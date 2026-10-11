@@ -20,10 +20,12 @@ COLS = ("id provider title company city district education experience salary_tex
         "detail_error fingerprint").split()
 _ROW = (", ".join(f"j.{c}" for c in COLS)
         + f", {DUE}, (j.description IS NOT NULL AND j.description <> '') AS has_description")
-SORTS = {  # newest: the latest found first | mixed: the platforms in turn, each one's newest first | salary: highest
-           # monthly pay first, none last | company
+# How many of the search's words (:words, a JSON list) a job's title holds, in any case
+_TITLE_HITS = "(SELECT COUNT(*) FROM json_each(:words) WHERE instr(lower(j.title), lower(value)) > 0)"
+SORTS = {  # newest: the latest found first | mixed: the jobs whose title holds more of the search's words first, then the
+           # platforms in turn, each one's newest first | salary: highest monthly pay first, none last | company
     "newest": "shown.first_seen_at DESC, shown.id DESC",
-    "mixed": "shown.turn, shown.site, shown.id",
+    "mixed": f"{_TITLE_HITS} DESC, shown.turn, shown.site, shown.id",
     "salary": "shown.salary_month_max IS NULL, shown.salary_month_max DESC, shown.salary_month_min DESC, "
               "shown.turn, shown.site, shown.id",
     "company": "(shown.company IS NULL OR shown.company = ''), shown.company, shown.id",
@@ -44,19 +46,20 @@ _SHOWN = ("shown AS (SELECT best.*, ROW_NUMBER() OVER (PARTITION BY provider ORD
           "WHERE NOT :dedupe OR dup = 1)")
 
 
-def _words(text) -> list[str]:
+def _words(text, name: str) -> list[str]:
     words = (text or "").split()
     if len(words) > MAX_WORDS:
-        raise ValueError(f"text takes at most {MAX_WORDS} words")
+        raise ValueError(f"{name} takes at most {MAX_WORDS} words")
     return words
 
 
 def where(*, search=None, task_id=None, provider=None, city=None, min_month_salary=None, max_month_salary=None,
-          text=None, complete_only=True) -> tuple[str, dict]:
+          title=None, text=None, complete_only=True) -> tuple[str, dict]:
     """(WHERE clause for `jobs j`, named parameters). The jobs of a search (keyword, city: what its tasks saw), of a
     task and/or of a platform; located in `city`; whose pay per month can reach `min_month_salary` and start at or
-    below `max_month_salary` (the job's range overlaps the asked one); whose title or description holds every word of
-    `text`, in any case. By default only complete jobs."""
+    below `max_month_salary` (the job's range overlaps the asked one); whose title holds every word of `title` (the
+    role), and whose title or description holds every word of `text` (skills that may sit anywhere), in any case. By
+    default only complete jobs."""
     conds, args = [], {}
 
     def add(cond: str, **params) -> None:
@@ -76,9 +79,10 @@ def where(*, search=None, task_id=None, provider=None, city=None, min_month_sala
         add("j.salary_month_max >= :min_month", min_month=min_month_salary)
     if max_month_salary is not None:
         add("j.salary_month_min <= :max_month", max_month=max_month_salary)
-    for i, word in enumerate(_words(text)):
-        add(f"(instr(lower(j.title), lower(:w{i})) > 0 OR instr(lower(j.description), lower(:w{i})) > 0)",
-            **{f"w{i}": word})
+    for name, words, columns in (("title", title, ("title",)), ("text", text, ("title", "description"))):
+        for i, word in enumerate(_words(words, name)):
+            hit = " OR ".join(f"instr(lower(j.{column}), lower(:{name}{i})) > 0" for column in columns)
+            add(f"({hit})", **{f"{name}{i}": word})
     if complete_only:
         add("j.complete = 1")
     return " AND ".join(conds) or "1", args
@@ -123,13 +127,16 @@ def _folded(conn, wh: tuple[str, dict], jobs: list[dict]) -> dict[tuple, list[di
 
 
 def find(conn, wh: tuple[str, dict], *, sort: str = "newest", limit: int = 20, offset: int = 0, dedupe: bool = True,
-         description: bool = False) -> tuple[list[dict], int]:
+         description: bool = False, keyword: str | None = None) -> tuple[list[dict], int]:
     """(one page of the jobs matching `wh` in the order SORTS[sort], how many match in all). With `dedupe`, a job posted
     on several platforms appears once, as its best record (complete first, then more columns filled, then the newest);
     its `also_on` holds the records of the other platforms folded into it ({provider, label, id, source_url}), and
-    every record stays on its own platform's page. `description` adds the full text."""
+    every record stays on its own platform's page. `description` adds the full text. `keyword`: what the jobs were
+    searched by; the order 'mixed' puts the jobs whose title holds more of its words first."""
     where_sql, args = wh
-    args = {**args, "dedupe": int(dedupe), "order": json.dumps(providers.names()), "limit": limit, "offset": offset}
+    words = json.dumps(list(dict.fromkeys((keyword or "").lower().split())))
+    args = {**args, "dedupe": int(dedupe), "order": json.dumps(providers.names()), "limit": limit, "offset": offset,
+            "words": words}
     cols = _ROW + ", shown.nth" + (", j.description" if description else "")
     rows = conn.execute(
         f"WITH {_hit(where_sql)}, {_RANKED}, {_BEST}, {_SHOWN} SELECT {cols} FROM shown JOIN jobs j ON j.id = shown.id "

@@ -106,6 +106,7 @@ def test_search_starts_every_platform_that_is_usable_right_now(env):
     started = call("search", keyword="py")
     assert started["providers"] == ["a", "b", "opt", "nocodes"]   # not: login (needs the user), window, keyed, city, bro (no browser)
     assert (started["keyword"], started["city"], started["task_ids"]) == ("py", None, [1, 2, 3, 4])
+    assert started["skipped"] == []
     payload = {"keyword": "py", "max_pages": 1, "detail": "auto"}   # what is missing is completed
     assert [(t["provider"], t["payload"]) for t in taskqueue.list_(env.conn)][::-1] == [
         ("a", payload), ("b", payload), ("opt", payload), ("nocodes", payload)]
@@ -119,9 +120,37 @@ def test_a_city_adds_the_platforms_that_need_one_and_drops_those_that_cannot_sea
     assert call("search", keyword="rust")["providers"] == ["a", "b", "opt", "keyed", "nocodes", "bro"]   # nationwide: no city to refuse
 
 
-def test_named_platforms_are_not_filtered_so_a_city_they_cannot_search_is_an_error(env):
-    assert "壬站暂不支持城市「杭州」" in call("search", keyword="py", city="杭州", providers=["a", "nocodes"])["error"]
-    assert taskqueue.list_(env.conn) == []
+def test_a_named_platform_that_cannot_search_the_city_is_skipped_and_the_others_start(env):
+    started = call("search", keyword="py", city="杭州", providers=["a", "nocodes", "city"])
+    assert (started["providers"], started["task_ids"]) == (["a", "city"], [1, 2])   # what was started, task for task
+    [skipped] = started["skipped"]
+    assert (skipped["provider"], skipped["label"]) == ("nocodes", "壬站") and "壬站暂不支持城市「杭州」" in skipped["reason"]
+    assert [t["provider"] for t in taskqueue.list_(env.conn)][::-1] == ["a", "city"]   # nothing was queued for the skipped one
+
+
+def test_every_kind_of_refusal_skips_only_its_platform_and_says_why(env):
+    started = call("search", keyword="py", providers=["a", "keyed", "city", "bro", "nocodes"])   # nationwide
+    assert (started["providers"], started["task_ids"]) == (["a", "nocodes"], [1, 2])
+    reasons = {s["provider"]: s["reason"] for s in started["skipped"]}
+    assert list(reasons) == ["keyed", "city", "bro"]   # in the order they were named
+    assert "DJS_FAKE_TOOLS_KEY" in reasons["keyed"] and "庚站必须指定城市" in reasons["city"] and "Playwright" in reasons["bro"]
+    assert [s["label"] for s in started["skipped"]] == ["己站", "庚站", "辛站"]
+
+
+def test_a_search_with_nothing_skipped_says_so(env):
+    assert call("search", keyword="py", providers=["a"])["skipped"] == []
+
+
+def test_the_platforms_that_refuse_write_nothing_before_they_refuse(env):
+    """The refusals are ValueErrors raised before the INSERT, so the platforms that can start are not held back by
+    them: the one transaction holds exactly their inserts."""
+    statements = []
+    env.conn.set_trace_callback(statements.append)
+    started = service.crawl_many(env.conn, ["a", "keyed", "nocodes", "city", "b"], "py", "杭州")
+    env.conn.set_trace_callback(None)
+    assert started["task_ids"] == [1, 2, 3] and [s["provider"] for s in started["skipped"]] == ["keyed", "nocodes"]
+    assert sum(s.startswith("INSERT INTO tasks") for s in statements) == 3
+    assert [s for s in statements if s.split()[0] in ("BEGIN", "COMMIT", "ROLLBACK")] == ["BEGIN IMMEDIATE", "COMMIT"]
 
 
 def test_named_platforms_are_used_as_they_are_even_one_that_opens_a_window(env):
@@ -130,8 +159,15 @@ def test_named_platforms_are_used_as_they_are_even_one_that_opens_a_window(env):
     assert [t["payload"]["max_pages"] for t in taskqueue.list_(env.conn)] == [2, 2]
 
 
-def test_a_search_that_cannot_start_everywhere_starts_nowhere_and_says_why(env):
-    assert "DJS_FAKE_TOOLS_KEY" in call("search", keyword="py", providers=["a", "keyed"])["error"]
+def test_a_search_no_platform_can_take_starts_nowhere_and_says_why_of_each(env):
+    error = call("search", keyword="py", providers=["keyed", "city", "bro"])["error"]
+    for why in ("己站", "DJS_FAKE_TOOLS_KEY", "庚站: 庚站必须指定城市", "辛站", "Playwright"):
+        assert why in error
+    assert "壬站暂不支持城市「杭州」" in call("search", keyword="py", city="杭州", providers=["nocodes"])["error"]
+    assert taskqueue.list_(env.conn) == []
+
+
+def test_an_unknown_platform_or_a_missing_keyword_cancels_the_whole_search(env):
     assert "KeyError" in call("search", keyword="py", providers=["a", "nope"])["error"]
     assert "keyword is required" in call("search", keyword="  ")["error"]
     assert taskqueue.list_(env.conn) == []   # the rollback took the first task back too
@@ -356,6 +392,18 @@ def test_jobs_get_filters_by_pay_text_city_platform_and_task(stocked):
     assert len(titles()) == 9   # no scope at all: everything stored (complete jobs, each once)
 
 
+def test_title_asks_for_the_role_and_text_for_skills_that_may_sit_anywhere(stocked):
+    titles = lambda **kw: sorted(j["title"] for j in call("jobs_get", keyword="py", city="杭州", limit=100, **kw)["jobs"])   # noqa: E731
+    assert len(titles(text="后端")) == 8 and titles(title="后端") == []     # the work is in eight descriptions, in no title
+    assert titles(text="django") == ["python工程师", "工程师 1", "工程师 3", "工程师 5", "工程师 7"] and titles(title="django") == []
+    assert titles(title="python") == ["python工程师"]                       # "Python 工程师" on the other site is the same job
+    assert titles(title="PYTHON 工程师") == ["python工程师"]                 # every word, any case
+    assert titles(title="工程师", text="django") == ["python工程师", "工程师 1", "工程师 3", "工程师 5", "工程师 7"]
+    assert titles(title="工程师", text="django", min_month_salary=16000) == ["工程师 1", "工程师 3", "工程师 5", "工程师 7"]   # the filters stack
+    assert "title takes at most" in call("jobs_get", title=" ".join("w" * 11))["error"]
+    assert call("jobs_get", keyword="py", city="杭州", title="工程师", limit=1)["total"] == 9   # all the engineers; paging counts the filter
+
+
 def test_incomplete_jobs_come_on_request_with_what_is_missing_and_why(stocked):
     got = call("jobs_get", keyword="py", city="杭州", complete_only=False, limit=100)
     row = next(j for j in got["jobs"] if j["title"] == "缺薪资")
@@ -390,6 +438,7 @@ def test_the_server_teaches_the_recommended_flow():
     assert steps == sorted(steps)   # in the order a client should use them
     for word in ("no_results", "waiting_login", "salary_month_min", "min_month_salary", "next_offset"):
         assert word in text
+    assert 'title="Python 后端"' in text and 'text="Django"' in text   # the role goes in the title, a skill in the text
 
 
 def test_the_new_and_changed_tools_come_with_an_example_each():

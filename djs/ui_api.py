@@ -92,7 +92,8 @@ def provider_rows(conn, a) -> dict:
 
 
 def crawl(conn, a) -> dict:
-    """One task per chosen site; the engine completes each job that still lacks a core element (detail 'auto')."""
+    """One task per chosen site that can take the search; the engine completes each job that still lacks a core
+    element (detail 'auto'). `skipped`: the sites that could not, each with its reason in plain Chinese."""
     keyword, city = service.search_key(a.get("keyword"), a.get("city"))
     sites = a.get("providers") or []
     if not keyword:
@@ -100,9 +101,11 @@ def crawl(conn, a) -> dict:
     if not sites:
         raise ValueError("请至少选择一个网站")
     try:
-        return {"task_ids": service.crawl_many(conn, sites, keyword, city or None)}
+        started = service.crawl_many(conn, sites, keyword, city or None)
     except Exception as e:  # the service words its refusals in English; the page shows Chinese only
         raise ValueError(results.friendly_error(str(e))) from e
+    return {"task_ids": started["task_ids"],
+            "skipped": [{**s, "reason": results.skip_reason(s["reason"], city)} for s in started["skipped"]]}
 
 
 def searches(conn, a) -> dict:

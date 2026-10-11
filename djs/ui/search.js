@@ -10,7 +10,8 @@ const SITE_ICON = { done: ["check", "ok"], running: ["spin", "run"], pending: ["
 const usable = (p) => p.configured !== false && (p.auth !== "login" || p.logged_in);
 
 /* Where a site is listed follows what it asks of the user. The common sites ask nothing: they work as they are (a login
-   only adds to what an optional one finds). Every other site says what it needs first. */
+   only adds to what an optional one finds). Every other site says what it needs first. The first search ticks the
+   common sites and the ones that only need a city: those are searched whenever a city is typed. */
 function groupOf(p) {
   if (p.configured === false) return "keys";
   if (p.auth === "login") return "login";
@@ -133,7 +134,8 @@ const searchPage = () => `<section class="narrow search">
   <div id="newest"></div><div id="login-hint"></div><div id="sites"></div><div id="recent"></div></section>`;
 
 async function viewSearch(params, e) {
-  S.picked ||= new Set(siteGroups().common.map((p) => p.name));
+  const g = siteGroups();
+  S.picked ||= new Set([...g.common, ...g.city].map((p) => p.name));
   const { searches } = await api("GET /api/searches", { limit: 6 });
   if (e !== epoch) return;
   $("#view").innerHTML = searchPage();
@@ -144,18 +146,31 @@ async function viewSearch(params, e) {
   if (paintSearches(searches)) pollWhile(refreshSearches);
 }
 
-function searchProblem(keyword, city, sites) {
+/* Without a city the sites that cannot search the whole country are left out of the request, quietly: the search card
+   lists the sites that were searched. */
+const searchable = (picked, city) => (city ? picked : picked.filter((p) => !p.requires_city));
+
+/* the city message only comes when no site is left to search */
+function searchProblem(keyword, picked, sites) {
   if (!keyword) return "请先填写岗位关键词";
-  if (!sites.length) return "请至少选择一个网站";
-  const needCity = sites.filter((p) => p.requires_city);
-  return !city && needCity.length ? `${needCity.map((p) => p.label).join("、")}需要先填写城市` : "";
+  if (!picked.length) return "请至少选择一个网站";
+  return sites.length ? "" : `${picked.map((p) => p.label).join("、")}需要先填写城市`;
+}
+
+/* "58同城、赶集网不支持“三亚”；鱼泡直聘还没配置密钥，这次没有找它们": the sites the search left out, grouped by why */
+function skippedNote(skipped) {
+  const byReason = new Map();
+  for (const { label, reason } of skipped) byReason.set(reason, [...(byReason.get(reason) || []), label]);
+  const why = [...byReason].map(([reason, labels]) => `${labels.join("、")}${reason}`);
+  return `${why.join("；")}，这次没有找${skipped.length > 1 ? "它们" : "它"}`;
 }
 
 async function startSearch(form) {
   const keyword = $("#kw").value.trim();
   const city = $("#city").value.trim();
-  const sites = S.providers.filter((p) => S.picked.has(p.name) && usable(p));
-  const problem = searchProblem(keyword, city, sites);
+  const picked = S.providers.filter((p) => S.picked.has(p.name) && usable(p));
+  const sites = searchable(picked, city);
+  const problem = searchProblem(keyword, picked, sites);
   $("#msg").textContent = problem;
   if (problem) {
     if (!keyword) $("#kw").focus();
@@ -164,7 +179,8 @@ async function startSearch(form) {
   const go = form.querySelector("[type=submit]");
   go.disabled = true;
   try {
-    await api("POST /api/crawl", { keyword, city, providers: sites.map((p) => p.name) });
+    const { skipped } = await api("POST /api/crawl", { keyword, city, providers: sites.map((p) => p.name) });
+    if (skipped.length) toast(skippedNote(skipped));
     if (await refreshSearches(epoch)) pollWhile(refreshSearches);
   } finally {
     go.disabled = false;

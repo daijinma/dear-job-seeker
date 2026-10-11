@@ -15,6 +15,31 @@ def test_norm_leaves_two_character_names_alone():
     assert cities.norm("东区") == "东区"
 
 
+@pytest.mark.parametrize("typed, want", [
+    ("浙江杭州", "杭州"), ("杭州市西湖区", "杭州"), ("北京市朝阳区", "北京"), ("江苏省苏州市", "苏州"), (" 杭州 ", "杭州"),
+    ("杭 州", "杭州"), ("大连市中山区", "大连"),                 # the city written first, not the district named after another
+    ("杭州上海", "杭州"), ("上海杭州", "上海"),                  # two cities: the first one written
+    ("义乌", "义乌"), ("义乌市", "义乌"), ("浙江省", "浙江"), ("火星", "火星"),   # no known city in it: as typed, minus the suffix
+    ("", ""), ("  ", ""), (None, "")])
+def test_norm_resolves_a_text_that_holds_a_known_city_and_leaves_any_other_as_typed(typed, want):
+    assert cities.norm(typed) == want
+
+
+def test_norm_takes_the_earliest_city_and_the_longest_on_a_tie(monkeypatch):
+    monkeypatch.setattr(cities, "GB", dict.fromkeys(["大", "大连", "连云港"]))
+    assert cities.norm("大连") == "大连"          # an exact name beats the shorter one inside it
+    assert cities.norm("连云港大连") == "连云港"    # the earliest
+    assert cities.norm("大连港") == "大连"         # 大 and 大连 start together: the longer one
+
+
+def test_a_loosely_written_city_reaches_every_platform_as_the_city_it_holds():
+    assert {p: cities.code(p, "浙江杭州") for p in ("zhaopin", "boss", "mohrss", "iguopin", "nowcoder")} == {
+        "zhaopin": "653", "boss": "101210100", "mohrss": "330100", "iguopin": "000000.330000.330100", "nowcoder": "杭州"}
+    assert cities.gb_city("杭州市西湖区") == "330100" and cities.gb_province("江苏省苏州市") == "320000"
+    assert providers.get("zhaopin").city_code("杭州市西湖区") == "653"
+    assert cities.code("nowcoder", "义乌") == "义乌" and cities.code("zhaopin", "义乌") is None   # plain names pass, coded ones refuse
+
+
 def test_gb_codes():
     assert (cities.gb_city("杭州市"), cities.gb_province("杭州")) == ("330100", "330000")
     assert (cities.gb_city("北京"), cities.gb_province("北京")) == ("110100", "110000")

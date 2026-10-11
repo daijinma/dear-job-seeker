@@ -48,11 +48,13 @@ def search_jobs(conn, keyword, city, provider=None, sort="mixed", limit=30, offs
     element, in the rows and in every count; `incomplete` always describes those jobs, so the page can say what it is
     not showing. `min_month_salary` keeps the jobs whose pay per month can reach it. `total` follows the provider
     filter; `all_total` (what the heading says: each job once), `merged` (records folded into another site's) and
-    `per_site` (each site's own jobs) count the whole search, so the filter chips do not shrink while one is selected."""
+    `per_site` (each site's own jobs) count the whole search, so the filter chips do not shrink while one is selected.
+    The default order, 'mixed', puts the jobs whose title holds more of the keyword's words first; among equals the
+    sites take turns."""
     if sort not in SORTS:
         raise ValueError("未知的排序方式")
     base = {"search": (keyword, city), "complete_only": complete_only, "min_month_salary": min_month_salary}
-    rows, total = query.find(conn, query.where(**base, provider=provider), sort=sort, dedupe=dedupe,
+    rows, total = query.find(conn, query.where(**base, provider=provider), sort=sort, dedupe=dedupe, keyword=keyword,
                              limit=max(1, min(int(limit), PAGE_MAX)), offset=max(0, int(offset)))
     found = service.explain([_job(r) for r in rows])
     for job in found:
@@ -104,6 +106,15 @@ def classify(raw) -> tuple[str, str]:
 
 def friendly_error(raw) -> str:
     return classify(raw)[1]
+
+
+def skip_reason(raw, city: str) -> str:
+    """Why a site was left out of a search, worded to follow its name ('不支持“三亚”', '还没配置密钥'), for the error
+    `raw` the service gave and the city the user typed (no city: the site needs one)."""
+    kind = classify(raw)[0]
+    if kind == "city":
+        return f"不支持“{city}”" if city else "需要先填城市"
+    return {"env": "还没配置密钥", "browser": "需要先安装浏览器组件"}.get(kind, "暂时不能用")
 
 
 def _shared_reason(conn, task_ids: list[int], provider: str, logged_in) -> str | None:

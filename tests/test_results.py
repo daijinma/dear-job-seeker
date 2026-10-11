@@ -79,6 +79,23 @@ def test_the_default_order_gives_each_site_a_turn_and_each_sites_newest_comes_fi
     assert results.search_jobs(conn, "py", "杭州", sort="mixed")["jobs"] == results.search_jobs(conn, "py", "杭州")["jobs"]
 
 
+def test_the_default_order_puts_the_titles_holding_more_of_the_searchs_words_first(conn):
+    n, c = task(conn, "nowcoder", "Python 后端", "杭州"), task(conn, "chinahr", "Python 后端", "杭州")
+    # per platform the newest job is the one that holds none of the words; the sites take turns among equals
+    for sid, seen, title in (("n_new", 300, "风电结构仿真分析工程师"), ("n_two", 200, "Python后端开发工程师"), ("n_one", 100, "后端开发")):
+        job(conn, "nowcoder", sid, [n], seen=seen, title=title, city="杭州")
+    for sid, seen, title in (("c_new", 250, "软件工程师"), ("c_two", 150, "后端 PYTHON"), ("c_one", 50, "python 数据分析")):
+        job(conn, "chinahr", sid, [c], seen=seen, title=title, city="杭州")
+    by_relevance = ["Python后端开发工程师", "后端 PYTHON", "后端开发", "python 数据分析", "风电结构仿真分析工程师", "软件工程师"]
+    assert titles(results.search_jobs(conn, "Python 后端", "杭州")) == by_relevance
+    assert titles(results.search_jobs(conn, "Python 后端", "杭州", limit=2, offset=2)) == by_relevance[2:4]   # pages continue it
+    assert titles(results.search_jobs(conn, "Python 后端", "杭州", provider="chinahr")) == ["后端 PYTHON", "python 数据分析", "软件工程师"]
+    assert titles(results.search_jobs(conn, "Python 后端", "杭州", sort="salary")) == [
+        "风电结构仿真分析工程师", "软件工程师", "Python后端开发工程师", "后端 PYTHON", "后端开发", "python 数据分析"]   # no pay: the plain turns
+    assert [j["title"] for j in service.jobs_get(conn, keyword="Python 后端", city="杭州", limit=6)["jobs"]] == [
+        "风电结构仿真分析工程师", "软件工程师", "Python后端开发工程师", "后端 PYTHON", "后端开发", "python 数据分析"]   # the tool stays newest first
+
+
 def test_sites_alternate_even_when_one_of_them_found_everything_last(conn):
     t1, t2, t3 = task(conn, "nowcoder", "py"), task(conn, "chinahr", "py"), task(conn, "iguopin", "py")
     for i in range(3):
@@ -161,6 +178,16 @@ def test_the_pay_filter_works_on_the_pay_per_month_and_keeps_every_chip(conn, tw
                                 {"provider": "chinahr", "label": "新华英才", "count": 0}]   # chinahr found jobs, none that pay this
     assert results.search_jobs(conn, "py", "杭州", min_month_salary=40000)["jobs"] == []
     assert [j["title"] for j in results.search_jobs(conn, "py", "杭州", min_month_salary=None)["jobs"]].count("Other") == 1
+
+
+def test_a_search_counts_its_whole_jobs_each_job_once_as_the_results_page_does(conn, twice):
+    """The search card, the strip of searches and the heading say one number: complete jobs, a job on two sites once."""
+    job(conn, "nowcoder", "bad", [taskqueue.of_search(conn, "py", "杭州")[0]["id"]], complete=0, missing="salary")
+    [search] = service.searches(conn)
+    assert (search["jobs_total"], search["whole"]) == (4, 2)    # four records; three are complete, two of those are one job
+    assert [(s["provider"], s["jobs"], s["complete"]) for s in search["per_site"]] == [("nowcoder", 3, 2), ("chinahr", 1, 1)]   # each site keeps its own
+    assert search["whole"] == service.search_status(conn, "py", "杭州")["whole"] == results.search_jobs(conn, "py", "杭州")["all_total"]
+    assert results.search_jobs(conn, "py", "杭州", complete_only=False)["all_total"] == 3   # the heading follows its filters, the count does not
 
 
 # ---- the data contract: what is listed, what is held back, and why
@@ -312,6 +339,19 @@ def test_friendly_error_table(raw, kind, text):
 
 def test_friendly_text_never_leaks_the_raw_error():
     assert "403" not in results.friendly_error("Blocked: HTTP 403 at https://secret.test/?token=abc")
+
+
+@pytest.mark.parametrize("raw, city, text", [
+    ("58同城暂不支持城市「三亚」，可选：北京、上海等", "三亚", "不支持“三亚”"),
+    ("58同城暂不支持城市「浙江义乌」，可选：北京、上海等", "浙江义乌", "不支持“浙江义乌”"),   # the city as the user wrote it
+    ("58同城必须指定城市", "", "需要先填城市"),
+    ("yupao needs environment variable(s) DJS_YUPAO_NONCE_KEY; set them in the MCP client config env block (see README)",
+     "杭州", "还没配置密钥"),
+    ("Playwright/Chromium missing. Run: pip install playwright && playwright install chromium", "杭州", "需要先安装浏览器组件"),
+    ("max_pages must be an integer >= 1", "杭州", "暂时不能用"),
+    ("", "", "暂时不能用")])
+def test_skip_reason_is_plain_chinese_that_follows_the_name_of_the_site(raw, city, text):
+    assert results.skip_reason(raw, city) == text
 
 
 # ---- annotate_searches / requeue ----

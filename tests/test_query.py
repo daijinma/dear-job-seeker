@@ -80,6 +80,23 @@ def test_text_needs_every_word_in_the_title_or_the_description_in_any_case(conn)
         where(text=" ".join("w" * 11))
 
 
+def test_title_needs_every_word_in_the_title_alone_in_any_case(conn):
+    t = task(conn, "nowcoder", "x")
+    job(conn, "nowcoder", "a", [t], title="Python 后端工程师", description="使用 Django 和 Redis")
+    job(conn, "nowcoder", "b", [t], title="Java 后端", description="熟悉 python，使用 Django")   # python only in the description
+    job(conn, "nowcoder", "c", [t], title="Python 数据", description=None)
+    got = lambda **kw: sorted(titles(where(**kw), conn))   # noqa: E731
+    assert got(title="python") == ["Python 后端工程师", "Python 数据"]                      # the description of "Java 后端" does not count
+    assert got(text="python") == ["Java 后端", "Python 后端工程师", "Python 数据"]           # text reads the description too
+    assert got(title="PYTHON  后端") == ["Python 后端工程师"]                               # every word, any case, any amount of space
+    assert got(title="django") == [] and got(text="django") == ["Java 后端", "Python 后端工程师"]   # a skill that sits in descriptions only
+    assert got(title="python", text="django") == ["Python 后端工程师"]                      # the role in the title, the skill anywhere
+    assert got(title="") == got(title=None) == got() == ["Java 后端", "Python 后端工程师", "Python 数据"]   # no words: no filter
+    for field in ("title", "text"):
+        with pytest.raises(ValueError, match=f"{field} takes at most"):
+            where(**{field: " ".join("w" * 11)})
+
+
 def test_city_filter_matches_the_jobs_place_and_ignores_a_shi_suffix(conn):
     t = task(conn, "nowcoder", "x")
     for sid, city in (("a", "杭州"), ("b", "杭州·滨江区"), ("c", "上海、杭州"), ("d", "上海"), ("e", None)):
@@ -229,6 +246,36 @@ def test_sorts_newest_mixed_salary_and_company(conn):
     assert order("company") == ["a", "b", "c"]    # 乙 < 甲 as characters, unknown last
     with pytest.raises(KeyError):
         order("bogus")
+
+
+def relevant_search(conn):
+    """The search 'Python 后端' on two platforms; per platform the newest job is the one that holds none of its words."""
+    n, c = task(conn, "nowcoder", "Python 后端"), task(conn, "chinahr", "Python 后端")
+    for sid, seen, title in (("n_new", 300, "风电结构仿真分析工程师"), ("n_two", 200, "Python后端开发工程师"), ("n_one", 100, "后端开发")):
+        job(conn, "nowcoder", sid, [n], seen=seen, title=title)
+    for sid, seen, title in (("c_new", 250, "软件工程师"), ("c_two", 150, "后端 PYTHON"), ("c_one", 50, "python 数据分析")):
+        job(conn, "chinahr", sid, [c], seen=seen, title=title)
+    return {r["source_job_id"]: r["id"] for r in conn.execute("SELECT id, source_job_id FROM jobs")}
+
+
+def test_mixed_puts_the_titles_holding_more_of_the_keywords_words_first_then_the_sites_take_turns(conn):
+    ids = relevant_search(conn)
+    order = lambda keyword, sort="mixed": [r["id"] for r in query.find(conn, where(), sort=sort, keyword=keyword, limit=100)[0]]   # noqa: E731
+    by_words = [ids[k] for k in ("n_two", "c_two", "n_one", "c_one", "n_new", "c_new")]   # both words | one word | none; the sites in turn
+    plain = [ids[k] for k in ("n_new", "c_new", "n_two", "c_two", "n_one", "c_one")]      # the turns alone: each site's newest first
+    assert order("Python 后端") == by_words
+    assert order("  PYTHON   后端 ") == order("后端 python") == order("Python Python 后端") == by_words   # any case, space, order
+    assert order(None) == order("") == order("Java") == plain          # no word in any title: nothing to rank by
+    assert order("Python 后端", "newest") == plain                     # only 'mixed' ranks
+    assert query.find(conn, where(), sort="mixed", keyword="Python 后端", limit=2, offset=2)[0][0]["id"] == ids["n_one"]   # pages continue
+
+
+def test_a_word_counts_when_the_title_holds_it_anywhere_and_wildcards_are_only_themselves(conn):
+    t = task(conn, "nowcoder", "前端")
+    job(conn, "nowcoder", "a", [t], seen=200, title="产品经理")
+    job(conn, "nowcoder", "b", [t], seen=100, title="资深前端开发（含 100% 远程）")
+    assert titles(where(), conn, sort="mixed", keyword="前端 100%") == ["资深前端开发（含 100% 远程）", "产品经理"]   # % is only itself
+    assert titles(where(), conn, sort="mixed", keyword="前端 _ %") == ["资深前端开发（含 100% 远程）", "产品经理"]
 
 
 # ---- what is still to be completed

@@ -50,7 +50,7 @@ function disclosure(id, title, body, hint = "") {
 }
 
 const searchTitle = (s) => `${s.keyword} · ${s.city || "全国"}`;
-const wholeJobs = (s) => s.per_site.reduce((n, x) => n + x.complete, 0);   // the jobs of a search that have every core element
+const wholeJobs = (s) => s.whole;   // the jobs of a search that have every core element, each one once: the heading counts the same
 const resultsHref = (s) => `#/results?${new URLSearchParams({ k: s.keyword, c: s.city || "" })}`;
 
 /* What to say about one site of a search, or null when there is nothing to say. Tone "none" is a plain fact (the

@@ -76,18 +76,28 @@ def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=
     return {"task_id": taskqueue.create(conn, provider, payload)}
 
 
-def crawl_many(conn, sites: list[str], keyword: str, city: str | None, max_pages=None) -> list[int]:
-    """One crawl task per site, all or none: a site that cannot start (no key, no such city) cancels the others.
+def crawl_many(conn, sites: list[str], keyword: str, city: str | None, max_pages=None) -> dict:
+    """One crawl task on each site that can take the search, as {task_ids, skipped}. A site that cannot (no such city, no
+    city where one is needed, keys or browser missing) refuses with a ValueError before it writes anything: it is named
+    in `skipped` with {provider, label, reason} and the others start. Raises only when no site can start, with every
+    reason (an unknown site is a KeyError and cancels the whole search).
     IMMEDIATE: a transaction that reads first and writes later fails at once with 'database is locked' whenever a
     worker commits in between (the busy timeout does not help it), so the write lock is taken up front."""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        ids = [crawl_start(conn, site, keyword=keyword, city=city, max_pages=max_pages)["task_id"] for site in sites]
+        ids, skipped = [], []
+        for site in sites:
+            try:
+                ids.append(crawl_start(conn, site, keyword=keyword, city=city, max_pages=max_pages)["task_id"])
+            except ValueError as e:
+                skipped.append({"provider": site, "label": providers.label(site), "reason": str(e)})
+        if not ids:
+            raise ValueError("no platform can take this search: " + "; ".join(f"{s['label']}: {s['reason']}" for s in skipped))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    return ids
+    return {"task_ids": ids, "skipped": skipped}
 
 
 def _takes_city(name: str, city: str) -> bool:
@@ -112,15 +122,17 @@ def default_sites(conn, city: str) -> list[str]:
 
 
 def search(conn, keyword, city=None, sites=None, max_pages=1) -> dict:
-    """Start a search: one crawl task on each of `sites`, or on every platform usable right now. Returns at once."""
+    """Start a search: one crawl task on each of `sites`, or on every platform usable right now. Returns at once, with
+    the platforms it started on and, in `skipped`, the named ones that could not take it (see crawl_many)."""
     keyword, city = search_key(keyword, city)
     if not keyword:
         raise ValueError("keyword is required")
     chosen = list(sites) if sites else default_sites(conn, city)
     if not chosen:
         raise ValueError("no platform is usable right now (see provider_list)")
-    return {"keyword": keyword, "city": city or None, "providers": chosen,
-            "task_ids": crawl_many(conn, chosen, keyword, city or None, max_pages)}
+    started = crawl_many(conn, chosen, keyword, city or None, max_pages)
+    left_out = {s["provider"] for s in started["skipped"]}
+    return {"keyword": keyword, "city": city or None, "providers": [p for p in chosen if p not in left_out], **started}
 
 
 def task_list(conn, status=None, limit=20) -> list[dict]:
@@ -232,11 +244,12 @@ def _tasks_of(conn, keyword: str, city: str) -> list[dict]:
 
 
 def jobs_get(conn, keyword=None, city=None, task_id=None, provider=None, min_month_salary=None, max_month_salary=None,
-             text=None, complete_only=True, dedupe=True, fields="summary", limit=20, offset=0) -> dict:
+             title=None, text=None, complete_only=True, dedupe=True, fields="summary", limit=20, offset=0) -> dict:
     """One page of stored jobs, as {jobs, total, returned, next_offset} (next_offset None on the last page). Where from:
     the search (keyword and city as given to `search`), a task and/or a platform; none = every stored job. Filters: the
-    job's city, the pay per month overlapping min_month_salary..max_month_salary, `text` (every word in the title or the
-    description). By default only complete jobs, each job once (`also_on` lists the other platforms that carry it).
+    job's city, the pay per month overlapping min_month_salary..max_month_salary, `title` (every word in the job title:
+    the role, e.g. "Python 后端"), `text` (every word in the title or the description: skills that may sit anywhere,
+    e.g. "Django"). By default only complete jobs, each job once (`also_on` lists the other platforms that carry it).
     With a search, `searching` says whether its tasks still run."""
     if fields not in ("summary", "full"):
         raise ValueError(f"fields must be 'summary' or 'full', not {fields!r}")
@@ -244,7 +257,7 @@ def jobs_get(conn, keyword=None, city=None, task_id=None, provider=None, min_mon
     tasks = _tasks_of(conn, keyword, city) if keyword else None
     limit, offset = max(1, min(int(limit), MAX_LIMIT)), max(0, int(offset))
     wh = query.where(search=(keyword, city) if keyword else None, task_id=task_id, provider=provider, city=city,
-                     min_month_salary=min_month_salary, max_month_salary=max_month_salary, text=text,
+                     min_month_salary=min_month_salary, max_month_salary=max_month_salary, title=title, text=text,
                      complete_only=complete_only)
     rows, total = query.find(conn, wh, sort="newest", limit=limit, offset=offset, dedupe=dedupe, description=True)
     for job in rows:
@@ -312,6 +325,8 @@ def _site(name: str, task: dict, found: dict) -> dict:
 
 
 def _search(conn, keyword, city, tasks: list[dict]) -> dict:
+    """One search: `jobs_total` adds up each platform's own records, `whole` counts the complete jobs, each job once
+    (a job on two platforms counts once, as in the results page and in jobs_get)."""
     ids = [t["id"] for t in tasks]
     found = {r["provider"]: (r["jobs"], r["complete"]) for r in conn.execute(
         "SELECT t.provider, COUNT(DISTINCT tj.job_id) AS jobs, "
@@ -323,6 +338,7 @@ def _search(conn, keyword, city, tasks: list[dict]) -> dict:
             "created_at": max(t["created_at"] for t in tasks),
             "status": _search_status({t["status"] for t in tasks}),
             "jobs_total": sum(n for n, _ in found.values()),
+            "whole": query.count(conn, query.where(search=(keyword, city))),
             "per_site": [_site(name, t, found) for name, t in newest.items()]}
 
 

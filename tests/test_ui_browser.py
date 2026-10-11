@@ -364,6 +364,10 @@ def test_first_run_search_page(page, app):
     page.get_by_role("button", name="智联招聘").click()
     page.get_by_role("button", name="中智招聘").click()
     page.get_by_role("button", name="开始查找").click()
+    expect(page.locator("#msg")).to_have_text("58同城需要先填写城市")   # the site that needs a city is ticked too: it alone cannot search the country
+    page.get_by_role("button", name="更多网站").click()
+    page.locator(".item", has_text="58同城").get_by_role("button", name="58同城").click()
+    page.get_by_role("button", name="开始查找").click()
     expect(page.locator("#msg")).to_have_text("请至少选择一个网站")
     assert page.evaluate(NAMELESS) == []
 
@@ -387,13 +391,9 @@ def test_more_sites_are_grouped_explained_and_gated(page, app):
     expect(keyed.locator("button[aria-pressed]")).to_have_count(0)
     assert page.evaluate(NAMELESS) == []
 
-    city_site = page.locator(".item", has_text="58同城")   # needs a city: refuses without one, starts with one
-    city_site.get_by_role("button", name="58同城").click()
+    city_site = page.locator(".item", has_text="58同城")   # needs a city: ticked for you, searched whenever a city is typed
     expect(city_site.get_by_role("button", name="58同城")).to_have_attribute("aria-pressed", "true")
     page.get_by_label("岗位或关键词", exact=True).fill(KEYWORD)
-    page.get_by_role("button", name="开始查找").click()
-    expect(page.locator("#msg")).to_have_text("58同城需要先填写城市")
-    assert taskqueue.list_(db.connect()) == []
     page.get_by_label("城市", exact=True).fill(CITY)
     page.get_by_role("button", name="开始查找").click()
     expect(page.locator(".search-card")).to_have_count(1)
@@ -455,11 +455,67 @@ def test_the_common_sites_work_as_they_are_and_every_other_site_names_what_it_ne
         row = page.locator(".item", has_text=name)
         expect(row.locator(".pill")).to_have_text("已登录")
         expect(row.get_by_role("button", name=name)).to_have_attribute("aria-pressed", "false")
-    start_search(page)   # the first search uses exactly the common sites
+    start_search(page)   # the first search uses the common sites, and the one that only needs the city that was typed
     expect(page.locator(".search-card")).to_have_count(1)
-    assert {t["provider"] for t in taskqueue.list_(db.connect())} == {"nc", "gp", "xh", "zl", "zz", "jb"}
+    assert {t["provider"] for t in taskqueue.list_(db.connect())} == {"nc", "gp", "xh", "zl", "zz", "tc", "jb"}
     assert page.evaluate(NAMELESS) == []
     page.context.close()
+
+
+def sites_of(card):
+    """The names a search card lists, in its order (a label is the one span of a site without a class)."""
+    return card.locator(".dot > span:not([class])")
+
+
+def test_a_site_that_needs_a_city_is_ticked_and_left_out_quietly_while_no_city_is_typed(page, app):
+    city_site = page.locator(".item", has_text="58同城")
+    page.get_by_role("button", name="更多网站").click()
+    expect(city_site.get_by_role("button", name="58同城")).to_have_attribute("aria-pressed", "true")   # ticked, like the common sites
+    page.get_by_label("岗位或关键词", exact=True).fill(KEYWORD)
+    for name in ("牛客网", "国聘", "新华英才", "智联招聘", "中智招聘"):
+        page.get_by_role("button", name=name).click()
+    page.get_by_role("button", name="开始查找").click()   # only the city site is left, and there is no city: that is the one message
+    expect(page.locator("#msg")).to_have_text("58同城需要先填写城市")
+    assert taskqueue.list_(db.connect()) == []
+    page.get_by_role("button", name="牛客网").click()
+    page.get_by_role("button", name="开始查找").click()   # another site is picked: no city, no 58同城, no message
+    expect(page.locator("#msg")).to_be_empty()
+    expect(page.locator(".search-card")).to_have_count(1)
+    expect(sites_of(newest_card(page))).to_have_text(["牛客网"])
+    assert [t["provider"] for t in taskqueue.list_(db.connect())] == ["nc"]
+
+    page.get_by_label("城市", exact=True).fill(CITY)
+    page.get_by_role("button", name="开始查找").click()   # with a city the same picks include it
+    expect(page.locator("#newest h3")).to_have_text("前端工程师 · 杭州")
+    expect(sites_of(newest_card(page))).to_have_text(["牛客网", "58同城"])
+    assert sorted((t["provider"], t["payload"].get("city", "")) for t in taskqueue.list_(db.connect())) == [("nc", ""), ("nc", CITY), ("tc", CITY)]
+    expect(page.locator("#msg")).to_be_empty()
+    assert page.evaluate(NAMELESS) == []
+
+
+def test_the_sites_a_search_had_to_leave_out_are_named_once_in_plain_chinese(page, app):
+    page.evaluate("""() => { window.said = []; const say = toast; toast = (text, ...rest) => { said.push(text); return say(text, ...rest); }; }""")
+    app.provs["tc"].city_filter = app.provs["zz"].city_filter = "server"   # these two have no code for any city
+    start_search(page)
+    expect(page.locator("#toast")).to_have_text("中智招聘、58同城不支持“杭州”，这次没有找它们")   # one message, the sites grouped by why
+    expect(sites_of(newest_card(page))).to_have_text(["牛客网", "国聘", "新华英才", "智联招聘"])   # the card lists what was searched
+    expect(newest_card(page).locator(".pill")).to_have_text("已完成")
+    app.provs["zz"].city_filter = "none"
+    start_search(page, keyword="数据分析")
+    expect(page.locator("#toast")).to_have_text("58同城不支持“杭州”，这次没有找它")
+    expect(sites_of(newest_card(page))).to_have_text(["牛客网", "国聘", "新华英才", "智联招聘", "中智招聘"])
+    start_search(page, keyword="运营", city="")   # nothing is left out: nothing is said
+    expect(newest_card(page).locator("h3")).to_have_text("运营 · 全国")
+    expect(newest_card(page).locator(".pill")).to_have_text("已完成")
+    assert page.evaluate("said") == ["中智招聘、58同城不支持“杭州”，这次没有找它们", "58同城不支持“杭州”，这次没有找它"]
+
+
+def test_the_note_about_left_out_sites_groups_them_by_the_reason(page, app):
+    note = lambda skipped: page.evaluate("skipped => skippedNote(skipped)", skipped)   # noqa: E731
+    got = note([{"label": "58同城", "reason": "不支持“三亚”"}, {"label": "赶集网", "reason": "不支持“三亚”"},
+                {"label": "鱼泡直聘", "reason": "还没配置密钥"}])
+    assert got == "58同城、赶集网不支持“三亚”；鱼泡直聘还没配置密钥，这次没有找它们"
+    assert note([{"label": "BOSS 直聘", "reason": "需要先安装浏览器组件"}]) == "BOSS 直聘需要先安装浏览器组件，这次没有找它"
 
 
 def test_search_shows_progress_then_the_finished_card(page, app):
@@ -470,16 +526,16 @@ def test_search_shows_progress_then_the_finished_card(page, app):
     expect(card.locator(".pill")).to_have_text("查找中")
     expect(card.locator(".dot.ok")).to_have_count(2)
     expect(card.locator(".dot.run")).to_have_count(2)
-    expect(card.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "3")
-    expect(card.get_by_role("progressbar")).to_have_attribute("aria-valuemax", "5")
-    expect(card).to_contain_text("已完成 3 / 5 个网站 · 已找到 85 个岗位")
+    expect(card.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "4")   # nc, gp, xh and 58同城 (the city was typed)
+    expect(card.get_by_role("progressbar")).to_have_attribute("aria-valuemax", "6")
+    expect(card).to_contain_text("已完成 4 / 6 个网站 · 已找到 85 个岗位")
     nothing = card.locator(".dot", has_text="新华英才")   # zero results are a plain fact, never an alarm
     expect(nothing).to_contain_text("没有找到")
     expect(nothing).not_to_have_class(re.compile(r"warn|bad"))
     assert all(t["payload"]["detail"] == "auto" for t in taskqueue.list_(db.connect()))   # what is missing is completed
     release(app, "zl", "zz")
     expect(card.locator(".pill")).to_have_text("已完成")
-    expect(card).to_contain_text("已完成 5 / 5 个网站 · 已找到 128 个岗位")
+    expect(card).to_contain_text("已完成 6 / 6 个网站 · 已找到 128 个岗位")
     expect(card.locator(".dot.run")).to_have_count(0)
     assert sum(p.endswith("/detail") for p in app.requests) == 60   # only the platform whose list lacks the JD was asked for details
     page.get_by_role("link", name="查看结果：前端工程师 · 杭州").click()
@@ -541,16 +597,16 @@ def test_the_site_picker_is_one_line_once_a_search_exists_and_opens_on_a_click(p
     expect(page.locator("#sites .chips")).to_be_visible()   # first time: all of it
     finish_search(page)
     summary = picker_summary(page)
-    expect(summary).to_have_text("已选 5 个网站 · 修改")
+    expect(summary).to_have_text("已选 6 个网站 · 修改")   # the five common sites and the one that needs a city
     expect(summary).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#sites .chips")).to_be_hidden()
     summary.click()
     expect(summary).to_have_attribute("aria-expanded", "true")
     page.get_by_role("button", name="国聘").click()
-    expect(summary).to_have_text("已选 4 个网站 · 修改")   # the line follows the picks
+    expect(summary).to_have_text("已选 5 个网站 · 修改")   # the line follows the picks
     page.get_by_role("link", name="设置").click()   # it is remembered across pages, like the picks
     page.get_by_role("link", name="查找", exact=True).click()
-    expect(picker_summary(page)).to_have_text("已选 4 个网站 · 修改")
+    expect(picker_summary(page)).to_have_text("已选 5 个网站 · 修改")
     assert page.evaluate(NAMELESS) == []
 
 
@@ -624,6 +680,21 @@ def test_the_default_order_gives_each_site_a_turn_and_the_salary_sort_puts_the_b
     expect(page.locator(JOBS).first.locator(".sub")).to_have_text("智联公司 0")
     page.get_by_role("button", name="综合").click()
     expect(sites).to_have_text(["牛客网", "智联招聘"] * 3)
+
+
+def test_the_default_order_puts_the_titles_holding_the_keywords_first(page, app):
+    pick = lambda i, title: {"id": 3000 + i, "title": title, "company": f"示例{i}有限公司", "city": "杭州", "salary": "15-25K", "jd": "说明"}   # noqa: E731
+    app.data["nc"]["Python 后端"] = [pick(0, "风电结构仿真分析工程师"), pick(1, "Python后端开发"), pick(2, "后端运维")]
+    app.data["zl"]["Python 后端"] = [pick(3, "软件测试工程师"), pick(4, "后端 python 工程师")]
+    open_results(page, keyword="Python 后端")
+    expect(page.locator(JOBS)).to_have_count(5)
+    titles = only_text(page.locator(JOBS).locator("h3"))
+    # both words first (the sites take turns), then one word, then none: the newest card of a site is not the first any more
+    assert titles == ["Python后端开发", "后端 python 工程师", "后端运维", "风电结构仿真分析工程师", "软件测试工程师"]
+    page.get_by_role("button", name="公司", exact=True).click()   # the other orders do not read the keyword
+    expect(page.locator(JOBS).first.locator(".sub")).to_have_text("示例0有限公司")
+    page.get_by_role("button", name="综合").click()
+    expect(page.locator(JOBS).first.locator("h3")).to_have_text("Python后端开发")
 
 
 @pytest.mark.parametrize("job, label", [
@@ -748,6 +819,20 @@ def test_the_same_job_on_two_sites_is_one_card_with_a_badge_and_a_way_to_the_oth
     expect(page.locator("#list .tags .pill.gray", has_text="也在")).to_have_count(0)
     expect(page.locator("#what")).to_have_text("重复 · 杭州 · 已合并 1 个重复岗位")   # the search as a whole still folded one record
     expect(page.locator("#more")).to_contain_text("已显示 2 / 2 个")                 # and the chip said 2: clicking it lists 2
+
+
+def test_the_search_card_the_strip_and_the_heading_count_the_same_jobs(page, app):
+    twin_jobs(app)   # three records, two jobs: the site numbers add up to more than the jobs there are
+    card = finish_search(page, keyword="重复")
+    expect(card).to_contain_text("已找到 2 个岗位")
+    expect(card.locator(".dot", has_text="牛客网")).to_have_text("牛客网1")           # a site's own number stays its own
+    expect(card.locator(".dot", has_text="智联招聘")).to_have_text("智联招聘2")
+    page.get_by_role("link", name="我的结果").click()
+    expect(page.locator("#found")).to_have_text("找到 2 个岗位")
+    expect(page.locator("#strip a.chip.on")).to_have_text("重复 · 杭州 · 2 个")
+    expect(page.locator("#filters .chip")).to_have_text(["全部 2", "牛客网 1", "智联招聘 2"])
+    page.get_by_role("link", name="查找", exact=True).click()
+    expect(newest_card(page)).to_contain_text("已找到 2 个岗位")
 
 
 def test_a_job_that_is_only_on_one_site_has_no_badge_and_no_list_of_sites(page, app):
@@ -997,7 +1082,7 @@ def test_the_search_card_counts_the_whole_jobs_per_site_and_explains_a_site_that
     lacking(app)
     finish_search(page, keyword=INCOMPLETE)
     card = newest_card(page)
-    expect(card).to_contain_text("已完成 5 / 5 个网站 · 已找到 6 个岗位")
+    expect(card).to_contain_text("已完成 6 / 6 个网站 · 已找到 6 个岗位")
     dot = lambda name: card.locator(".dot", has_text=name)
     expect(dot("牛客网")).to_have_text("牛客网4")
     expect(dot("国聘")).to_have_text("国聘2")

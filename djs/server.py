@@ -18,8 +18,10 @@ Recommended flow:
    found, no_results (the site had nothing: not an error), failed, waiting_login (needs the user: login tool) or
    running. If it timed out, call it again, or read what is there and check `searching`.
 3. jobs_get(keyword, city, ...): reads the results, complete jobs only and each job once (`also_on` names the other
-   sites that carry it). Narrow it with min_month_salary / max_month_salary (yuan per month, all units converted),
-   text (every word must be in the title or description) and city; page with limit and next_offset.
+   sites that carry it). Narrow it with title (every word must be in the job title: use it for the role, e.g.
+   title="Python 后端"), text (every word in the title or description: use it for skills that may sit anywhere, e.g.
+   text="Django"), min_month_salary / max_month_salary (yuan per month, all units converted) and city; page with
+   limit and next_offset.
 4. job_detail(job_id): the full description of the few jobs you shortlist. jobs_get returns only short summaries.
 Compare pay only through salary_month_min / salary_month_max: salary_text is the site's own wording (per day, per
 hour, per year) and the figures behind it are in salary_unit."""
@@ -59,18 +61,22 @@ def crawl_start(provider: str, keyword: str | None = None, city: str | None = No
 @mcp.tool()
 async def search(keyword: str, city: str | None = None, providers: list[str] | None = None, max_pages: int = 1) -> dict:
     """Start a search on every platform usable right now (no login required, no browser window, keys set, and a city
-    where the platform needs one) and return at once with the search key and the task ids. `providers` names the
-    platforms instead (BOSS 直聘 opens a browser window and is used only when named). max_pages: result pages per
-    platform. Then call wait_for_search. Example: search(keyword="Python 后端", city="杭州")."""
+    where the platform needs one) and return at once with the search key, the platforms started, their task ids and
+    `skipped`: the platforms that could not take this search (no code for the city, keys or browser missing), each
+    with its reason, while the others go on. `providers` names the platforms instead (BOSS 直聘 opens a browser window
+    and is used only when named); it is an error only when none of them can start. A city may be written as people
+    write it: "浙江杭州" and "杭州市西湖区" count as 杭州. max_pages: result pages per platform. Then call
+    wait_for_search. Example: search(keyword="Python 后端", city="杭州")."""
     return await asyncio.to_thread(_run, service.search, keyword, city, providers, max_pages)  # reads the login state
 
 
 @mcp.tool()
 async def wait_for_search(keyword: str, city: str | None = None, timeout: float = 120) -> dict:
     """Wait until every platform of a search has finished (at most `timeout` seconds, up to 600) and return its
-    status: per platform the outcome (found | no_results | failed | waiting_login | running), job counts and, while a
-    platform fetches details, completing {done, total}. `timed_out: true` means it was still running. Give the same
-    keyword and city as to search. Example: wait_for_search(keyword="Python 后端", city="杭州", timeout=120)."""
+    status: per platform the outcome (found | no_results | failed | waiting_login | running), job counts (`whole`: the
+    complete jobs of the whole search, each job once) and, while a platform fetches details, completing {done,
+    total}. `timed_out: true` means it was still running. Give the same keyword and city as to search. Example:
+    wait_for_search(keyword="Python 后端", city="杭州", timeout=120)."""
     deadline = time.monotonic() + max(0.0, min(timeout, MAX_WAIT))
     while True:
         status = await asyncio.to_thread(_run, service.search_status, keyword, city)
@@ -92,17 +98,18 @@ def task_list(status: str | None = None, limit: int = 20) -> dict:
 @mcp.tool()
 def jobs_get(keyword: str | None = None, city: str | None = None, task_id: int | None = None,
              provider: str | None = None, min_month_salary: int | None = None, max_month_salary: int | None = None,
-             text: str | None = None, complete_only: bool = True, dedupe: bool = True, fields: str = "summary",
-             limit: int = 20, offset: int = 0) -> dict:
+             title: str | None = None, text: str | None = None, complete_only: bool = True, dedupe: bool = True,
+             fields: str = "summary", limit: int = 20, offset: int = 0) -> dict:
     """Read stored jobs as {jobs, total, returned, next_offset}. Where from: a search (the keyword and city given to
     search), a task_id and/or a provider; none = everything stored. Filters: city (the job's city), min_month_salary /
-    max_month_salary (yuan per month: the job's pay range must overlap), text (every word in the title or description,
-    any case). By default only complete jobs and each job once; incomplete ones come with complete_only=false and say
-    what is `missing`; dedupe=false lists every record. fields='summary' returns short rows (salary_month_min/max are
-    comparable across sites, description_snippet is 120 characters), 'full' the whole description. A search also says
-    whether it is still `searching`. Example: jobs_get(keyword="Python 后端", city="杭州", min_month_salary=15000,
-    text="Django", limit=10)."""
-    return _run(service.jobs_get, keyword, city, task_id, provider, min_month_salary, max_month_salary, text,
+    max_month_salary (yuan per month: the job's pay range must overlap), title (every word in the job TITLE, any case:
+    the role, e.g. "Python 后端"), text (every word in the title or description, any case: skills that may sit anywhere,
+    e.g. "Django"). By default only complete jobs and each job once; incomplete ones come with complete_only=false and
+    say what is `missing`; dedupe=false lists every record. fields='summary' returns short rows
+    (salary_month_min/max are comparable across sites, description_snippet is 120 characters), 'full' the whole
+    description. A search also says whether it is still `searching`. Example: jobs_get(keyword="Python 后端",
+    city="杭州", title="Python 后端", min_month_salary=15000, text="Django", limit=10)."""
+    return _run(service.jobs_get, keyword, city, task_id, provider, min_month_salary, max_month_salary, title, text,
                 complete_only, dedupe, fields, limit, offset)
 
 
@@ -115,9 +122,9 @@ async def job_detail(job_id: int) -> dict:
 
 @mcp.tool()
 def search_list(limit: int = 20) -> dict:
-    """Recent searches (same keyword + city) with status, job counts and per-platform progress: outcome, how many of
-    each platform's jobs are complete / incomplete, completing {done, total} while it fetches details. Example:
-    search_list(limit=5)."""
+    """Recent searches (same keyword + city) with status, job counts (`whole`: complete jobs, each job once) and
+    per-platform progress: outcome, how many of each platform's jobs are complete / incomplete, completing {done,
+    total} while it fetches details. Example: search_list(limit=5)."""
     return _run(service.searches, limit)
 
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from djs import auth, db, egress, providers, service, taskqueue, ui_api, ui_app
+from djs import auth, browser, db, egress, providers, service, taskqueue, ui_api, ui_app
 from provider_fakes import job
 
 
@@ -75,20 +75,43 @@ def test_crawl_starts_a_completing_task_for_every_site(call):
     assert call("POST /api/crawl", {"keyword": " ", "providers": ["nowcoder"]}) == {"error": "请先填写岗位关键词"}
     assert call("POST /api/crawl", {"keyword": "x", "providers": []}) == {"error": "请至少选择一个网站"}
     body = call("POST /api/crawl", {"keyword": "前端", "city": "杭州", "providers": ["nowcoder", "chinahr"]})
-    assert body == {"task_ids": [1, 2]}
+    assert body == {"task_ids": [1, 2], "skipped": []}
     tasks = taskqueue.list_(db.connect())
     assert {t["provider"]: (t["status"], t["payload"]) for t in tasks} == {   # detail 'auto': what is missing is completed
         "nowcoder": ("pending", {"keyword": "前端", "city": "杭州", "detail": "auto"}),
         "chinahr": ("pending", {"keyword": "前端", "city": "杭州", "detail": "auto"})}
 
 
-def test_crawl_is_all_or_nothing_and_refuses_in_plain_chinese(call):
-    body = call("POST /api/crawl", {"keyword": "x", "providers": ["nowcoder", "job58"]})   # job58: no key, needs a city
+def test_crawl_starts_the_sites_that_can_and_names_the_ones_that_cannot_in_plain_chinese(call, monkeypatch):
+    monkeypatch.setattr(browser, "ready", lambda: False)
+    asked = {"keyword": "x", "city": "义乌", "providers": ["nowcoder", "zhaopin", "ganji", "job58", "boss"]}
+    body = call("POST /api/crawl", asked)   # a town: nowcoder takes any name, the coded sites do not know it
+    assert body["task_ids"] == [1]
+    assert [(s["provider"], s["label"], s["reason"]) for s in body["skipped"]] == [
+        ("zhaopin", "智联招聘", "不支持“义乌”"), ("ganji", "赶集网", "不支持“义乌”"), ("job58", "58同城", "还没配置密钥"),
+        ("boss", "BOSS 直聘", "需要先安装浏览器组件")]
+    assert not re.search(r"[A-Za-z]", "".join(s["reason"] for s in body["skipped"]))   # the service's English never reaches the page
+    assert [t["provider"] for t in taskqueue.list_(db.connect())] == ["nowcoder"]
+    nationwide = call("POST /api/crawl", {**asked, "city": "", "providers": ["zhaopin", "ganji"]})
+    assert [(s["provider"], s["reason"]) for s in nationwide["skipped"]] == [("ganji", "需要先填城市")]
+    assert nationwide["task_ids"] == [2]
+
+
+def test_crawl_refuses_in_plain_chinese_when_no_site_can_start(call):
+    body = call("POST /api/crawl", {"keyword": "x", "providers": ["job58"]})   # no key, and it needs a city
     assert body == {"error": "还没配置这个网站需要的密钥"} and taskqueue.list_(db.connect()) == []
     assert call("POST /api/crawl", {"keyword": "x", "providers": ["ganji"]}) == {"error": "这个网站需要先填写城市"}
-    assert call("POST /api/crawl", {"keyword": "x", "providers": ["no-such-site"]}) == {"error": "没成功，可以稍后重试"}
-    assert taskqueue.list_(db.connect()) == []
-    assert call("POST /api/crawl", {"keyword": "x", "providers": ["nowcoder"]}) == {"task_ids": [1]}   # the rollback took the ids back too
+    assert call("POST /api/crawl", {"keyword": "x", "city": "义乌", "providers": ["zhaopin", "ganji"]}) == {
+        "error": "这个网站暂时不支持这个城市"}
+    assert call("POST /api/crawl", {"keyword": "x", "providers": ["nowcoder", "no-such-site"]}) == {"error": "没成功，可以稍后重试"}
+    assert taskqueue.list_(db.connect()) == []   # an unknown site cancels the search: the first task was taken back too
+    assert call("POST /api/crawl", {"keyword": "x", "providers": ["nowcoder"]}) == {"task_ids": [1], "skipped": []}   # the rollback took the ids back too
+
+
+def test_a_city_written_loosely_starts_the_sites_that_know_the_city_it_holds(call):
+    body = call("POST /api/crawl", {"keyword": "前端", "city": " 浙江杭州 ", "providers": ["zhaopin", "ganji", "nowcoder"]})
+    assert body == {"task_ids": [1, 2, 3], "skipped": []}
+    assert {t["payload"]["city"] for t in taskqueue.list_(db.connect())} == {"浙江杭州"}   # the search is told as typed
 
 
 def test_searches_route_adds_plain_reasons_and_the_task_to_retry(call):
