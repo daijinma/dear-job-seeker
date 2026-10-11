@@ -61,7 +61,7 @@ The server tells the client the intended flow:
 3. `jobs_get(keyword, city, title="Python 后端", min_month_salary=15000, text="Django")` reads short summaries of complete jobs, each job once, filtered in the database (`title`: words of the role, in the job title; `text`: skills anywhere in the title or description).
 4. `job_detail(job_id)` returns the full description of the few jobs worth reading.
 
-Then ask, for example: *"杭州的 Python 后端，月薪 1.5 万以上，挑 5 个最合适的"*. Keys for the key-signed platforms go in the client's `env` block or in `$DJS_HOME/.env` (see below). Verified end to end with a headless MCP host on 2026-10-11.
+When results look wrong or a search does not move, `status()` says why. Then ask, for example: *"杭州的 Python 后端，月薪 1.5 万以上，挑 5 个最合适的"*. Keys for the key-signed platforms go in the client's `env` block or in `$DJS_HOME/.env` (see below). Verified end to end with a headless MCP host on 2026-10-11.
 
 ## Platforms
 
@@ -111,12 +111,12 @@ Five platforms have a login. It is optional on four of them; the login gives mor
 | Platform | How you log in | What the login adds |
 |---|---|---|
 | BOSS 直聘 | scan the QR code with the BOSS app | salaries: without a login BOSS shows every field but the pay, so its jobs stay incomplete |
-| 智联招聘 | scan with WeChat | the desktop-site search, whose list carries the full job description (not yet verified with a real account) |
-| 前程无忧 | account and password | the desktop-site search, with more results (not yet verified with a real account) |
+| 智联招聘 | scan with WeChat | the desktop-site search, which returns a different set of jobs, not more of them (measured: 60 vs 60, 21 shared) |
+| 前程无忧 | account and password | nothing measurable yet: the anonymous search is already complete, and the desktop-site search stayed blocked when logged in, so the login does not change how it searches |
 | 猎聘 | scan with the 猎聘 app | possibly more jobs (not yet verified with a real account) |
 | 康强医疗网 | account and password, or SMS code | searching at all: the site lists nothing without a login |
 
-Click **去登录** in the app (page 平台登录) or call the `login` tool: a browser window opens on the site's own login page, you log in as you always do, and the window closes by itself once the login is detected. The session is saved on your machine only (file mode 0600) with its expiry (7 days; 前程无忧 30), and searches that were waiting for it continue. `login_check` asks the site whether a saved login still works; the app runs the same check at start and marks dead logins as expired.
+Click **去登录** in the app (page 平台登录) or call the `login` tool: an ordinary Chrome or Edge window opens on the site's own login page, you log in as you always do, and the window closes by itself once the login is detected. Nothing automates that window (BOSS 直聘 and 猎聘 blank any page an automation tool drives); the program only asks the browser for its cookies. The session is saved on your machine only (file mode 0600) with its expiry (7 days; 前程无忧 30), and searches that were waiting for it continue. `login_check` asks the site whether a saved login still works; the app runs the same check at start and marks dead logins as expired.
 
 **BOSS 直聘** answers plain HTTP and headless browsers with `code 37` ("environment abnormal"), so it runs in a real browser window, which is why it is not preselected. It is paced at 8 s per request: its risk control can restrict an account and an IP for hours. `code 37` is treated as a temporary block (cooldown and retry), never as an expired login.
 
@@ -124,6 +124,7 @@ Click **去登录** in the app (page 平台登录) or call the `login` tool: a b
 
 | Tool | Purpose |
 |---|---|
+| `status()` | what is going on, in one call and without network: version, data folder, workers and the task each platform runs now (pages, details done / total), the queue by status, the browser a login window would use, open login windows, profiles in use, every login's state and end, missing keys (names only), cooling-down exits and each platform's latest problem in plain words. The first call when results look wrong |
 | `search(keyword, city?, providers?, max_pages=1)` | start a search on every platform usable right now (or on `providers`); returns at once with the task ids, and in `skipped` the platforms that could not take it and why (a city they do not cover, keys missing); the search fails only when no platform can take it |
 | `wait_for_search(keyword, city?, timeout=120)` | block until the search is done (one call waits at most 600 s, then answers `timed_out: true`): per platform the outcome, job counts and `completing {done, total}` while job details are still being fetched |
 | `jobs_get(keyword?, city?, task_id?, provider?, min_month_salary?, max_month_salary?, title?, text?, complete_only=true, dedupe=true, fields="summary", limit=20, offset=0)` | stored jobs as `{jobs, total, returned, next_offset}`, newest first. From a search (keyword + city), a task and/or a platform. Filters run in SQL: pay per month overlapping the range, every word of `title` in the job title, every word of `text` in the title or description, the job's city. `summary` rows carry a 120-character `description_snippet` (20 jobs ≈ 16 KB; `full` ≈ 41 KB). Complete jobs only and each job once by default: `also_on` names the other platforms carrying it; incomplete jobs (`complete_only=false`) say what is `missing` and why |
@@ -200,7 +201,7 @@ djs call search_list
 
 ## Data and privacy
 
-Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite), `.env` (optional keys, see above), `profiles/<platform>/` (saved login 0600, browser profile), `pace/` (rate-limit locks), `ui_prefs.json`. Cookie values are never written to the database, logs, tool results or error messages, and nothing is sent anywhere but to the job sites themselves.
+Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite), `.env` (optional keys, see above), `profiles/<platform>/` (saved login 0600, browser profile), `pace/` (rate-limit locks), `ui_prefs.json`. Cookie values are never written to the database, logs, tool results or error messages, and nothing is sent anywhere but to the job sites themselves. While a login window is open, that browser listens on a local debugging port (127.0.0.1 only) through which the program reads the cookies; the port closes with the window.
 
 ## Development
 

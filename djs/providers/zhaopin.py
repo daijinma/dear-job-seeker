@@ -58,7 +58,7 @@ class Zhaopin(Provider):
     note = ("cgate: x-zp-* headers required, hard cap 60 results (3 pages), city slices have separate quota; "
             "logged in, the PC search runs in a browser instead")
     login = Login(url=HOME, method="wechat", domain="zhaopin.com", cookies_all=("at", "rt"),
-                  unlocks="改用电脑版搜索，列表直接带职位描述（效果待实测）")
+                  unlocks="能搜到另一批岗位（数量和不登录时相近）")
 
     BASE = "https://cgate.zhaopin.com/positionbusiness"
 
