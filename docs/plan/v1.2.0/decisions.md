@@ -12,6 +12,8 @@ Decisions taken without a round-trip are marked `assumed:` and can be reversed.
 | A5 | assumed: CSV export writes to the Downloads folder instead of a save dialog | the native save dialog appeared as a blank modal window and froze the app (see F3) |
 | A6 | assumed: 字节跳动招聘 stays in the list although it never publishes salaries; its jobs count as incomplete and the UI explains why | removing a working site would hide real jobs; the explanation keeps the contract honest |
 | A7 | assumed: release v1.2.0 is tagged only after logins are verified with real accounts | logins are the remaining unverified surface |
+| A8 | assumed: 猎聘 paced at 4 s (not 12 s) | at 12 s the ~80 detail hops of one search take ~20 min; 4 s was clean in live runs |
+| A9 | assumed: platforms usable without any user action (public or optional login, keys present, no city needed, no browser window) are preselected; BOSS (opens a window) and login-required sites live under "更多网站" | the default search must not silently lose 智联 / 前程无忧 after they gained an optional login |
 
 ## Findings from driving the real app (Peekaboo on the native window, fresh data folder)
 | # | Finding | Status |
@@ -34,3 +36,13 @@ The client produced 5 sound recommendations, and reported these tool problems:
 | F11 | The same job appears on several sites (智联 + 前程无忧) | cross-site duplicate grouping (company + title + city fingerprint) with `also_on` |
 | F12 | "0 jobs" does not say whether the site had none or blocked us | per-site outcome: found / no_results / failed / waiting_login |
 | F13 | The client fetched while details were still being completed (51job 3/96) and incomplete jobs were hidden | completion progress in task/search status + a blocking `wait_for_search` tool |
+
+## Findings from live BOSS runs (real browser transport, anonymous)
+| # | Finding | Status |
+|---|---|---|
+| F14 | A passed security check leaves `?_security_check=...` in the URL; treating any such URL as blocked put BOSS into a 30-min cooldown on every run | fixed (only the verification page path counts) |
+| F15 | BOSS blanks an automated page a few seconds after it loads; a request sent after the 8 s pacing wait always failed ("Failed to fetch", "Failed to parse URL") | fixed (pace → load page → call API at once; one wait per visit) |
+| F16 | Clearing the anti-bot token before every load made every load bounce through the security check and kill the next call | fixed (token cleared once per session; one retry after a late redirect) |
+| F17 | Anonymous BOSS jobs can never be complete (no salary), yet the completion pass fetched a detail for each (8–14 s apiece) | planned: skip details that cannot complete a job |
+| F18 | With 智联 / 前程无忧 now "optional login", the search page moved them out of the default selection | fix in progress (grouping rule A9) |
+| F19 | GUI automation stops while the Mac is locked; flows were continued headless against the real backend (same page, real DB, workers and network) | note |
