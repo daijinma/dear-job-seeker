@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import signal
 import sys
 import time
 
@@ -40,9 +41,16 @@ def _line(t: dict) -> str:
     return f"task {t['id']} {t['provider']} {t['status']} {tail}".rstrip()
 
 
+def _on_sigterm(signum, frame) -> None:
+    """A supervisor (or `timeout`) stops `djs work` with SIGTERM: leave the way Ctrl-C does, so that the tasks it runs go
+    back to pending instead of staying locked until LOCK_TTL."""
+    raise KeyboardInterrupt
+
+
 def _work(until_idle: bool, timeout: float | None) -> int:
     conn = db.connect()
     active = taskqueue.active_ids(conn)  # taken before the workers start, so a fast task is still reported
+    previous = signal.signal(signal.SIGTERM, _on_sigterm)
     engine.start_worker()
     deadline = None if timeout is None else time.monotonic() + timeout
     try:
@@ -60,6 +68,7 @@ def _work(until_idle: bool, timeout: float | None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        signal.signal(signal.SIGTERM, previous or signal.SIG_DFL)  # a second SIGTERM during the hand-back ends it at once
         engine.stop_worker()
         conn.close()
 

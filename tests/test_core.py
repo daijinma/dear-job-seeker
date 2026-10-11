@@ -1,12 +1,13 @@
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from djs import db, egress, engine, pacer, providers, server, service, taskqueue
+from djs import browser, cli, db, egress, engine, pacer, providers, server, service, taskqueue
 from djs.providers.base import Blocked, Delisted, Login, LoginRequired, Provider, StructureError, get_json, need
 from provider_fakes import stored_jobs
 
@@ -65,7 +66,11 @@ class FakeAuth:
         return self.cookies is not None
 
     def status(self, p):
-        return {"logged_in": self.logged_in(p)}
+        return {"logged_in": self.logged_in(p), "state": "logged_in" if self.logged_in(p) else "not_logged_in",
+                "expires_at": None}
+
+    def pending_logins(self):
+        return []
 
     def login(self, p, timeout=180):
         self.cookies = {"s": "1"}
@@ -174,12 +179,17 @@ def test_claim_atomic_with_provider_filter(env):
     assert {n: sorted(ids) for n, ids in got.items()} == want  # each task exactly once, only by its own platform
 
 
-def test_claim_reclaims_stale_running(env):
+def test_a_running_task_is_taken_over_only_when_its_heartbeat_is_older_than_the_lock_ttl(env):
+    assert taskqueue.LOCK_TTL == 180   # the task of a process that died is picked up again within three minutes
     t = task(env)
     taskqueue.claim(env.conn)
-    assert taskqueue.claim(env.conn) is None
-    env.conn.execute("UPDATE tasks SET locked_at=? WHERE id=?", (time.time() - 16 * 60, t["id"]))
-    assert taskqueue.claim(env.conn)["id"] == t["id"]
+    other_process = db.connect()
+    assert taskqueue.claim(other_process) is None
+    env.conn.execute("UPDATE tasks SET locked_at=? WHERE id=?", (time.time() - taskqueue.LOCK_TTL + 30, t["id"]))
+    assert taskqueue.claim(other_process) is None   # a fresh heartbeat: leave it alone
+    env.conn.execute("UPDATE tasks SET locked_at=? WHERE id=?", (time.time() - taskqueue.LOCK_TTL - 30, t["id"]))
+    assert taskqueue.claim(other_process)["id"] == t["id"]
+    other_process.close()
 
 
 def test_retry_backoff_then_dead(env):
@@ -522,3 +532,278 @@ def test_create_rejects_bad_max_pages(env):
     for bad in (0, -1, "3", True):
         with pytest.raises(ValueError):
             taskqueue.create(env.conn, "fake", {"keyword": "k", "max_pages": bad})
+
+
+# ---- the lock of a running task: heartbeat, hand-back on a stop, no late writes ----
+def test_progress_refreshes_the_lock_of_a_running_task_and_only_of_a_running_one(env):
+    t = task(env)
+    taskqueue.progress(env.conn, t["id"], {"pages": 1})   # still queued: the stats are kept, no lock appears
+    row = status(env, t["id"])
+    assert row["locked_at"] is None and json.loads(row["stats"]) == {"pages": 1}
+    taskqueue.claim(env.conn)
+    env.conn.execute("UPDATE tasks SET locked_at=? WHERE id=?", (time.time() - 100, t["id"]))
+    taskqueue.progress(env.conn, t["id"], {"pages": 2})
+    assert status(env, t["id"])["locked_at"] == pytest.approx(time.time(), abs=2)
+    taskqueue.done(env.conn, t["id"], {"pages": 2})
+    taskqueue.progress(env.conn, t["id"], {"pages": 3})
+    assert status(env, t["id"])["locked_at"] is None   # a finished task keeps no lock
+
+
+def test_every_page_and_every_detail_of_a_crawl_is_a_heartbeat(env):
+    other_process, seen = db.connect(), []
+
+    def lock():
+        return other_process.execute("SELECT locked_at FROM tasks WHERE id=1").fetchone()[0]
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        if page > 1:
+            seen.append(lock())   # what the pages before it reported
+        items = {1: [{"id": 1}, {"id": 2}], 2: [{"id": 3}, {"id": 4}], 3: [{"id": 5}]}
+        return httpx.Response(200, json={"items": items[page]})
+
+    mock_client(env, handler)
+    prov = env.provs["fake"]
+    real_detail = prov.detail
+    env.mp.setattr(prov, "detail", lambda client, job: seen.append(lock()) or real_detail(client, job))
+    task(env)
+    claimed = taskqueue.claim(env.conn)
+    engine.run_task(env.conn, claimed)
+    assert len(seen) == 2 + 5   # the requests of pages 2 and 3, then the five details
+    beats = [claimed["locked_at"], *seen]
+    assert beats == sorted(beats) and len(set(beats)) == len(beats)   # every report moved the lock on
+    assert status(env, 1)["status"] == "done" and status(env, 1)["locked_at"] is None
+    other_process.close()
+
+
+def test_a_handed_back_task_keeps_its_stats_and_attempts_and_is_claimable_at_once(env):
+    t = task(env)
+    holder = taskqueue.Claim(taskqueue.claim(env.conn))
+    taskqueue.progress(env.conn, holder, {"pages": 2})
+    taskqueue.hand_back(env.conn, holder)
+    row = status(env, t["id"])
+    assert (row["status"], row["locked_at"], row["attempts"], row["last_error"]) == ("pending", None, 0, None)
+    assert json.loads(row["stats"]) == {"pages": 2}
+    assert taskqueue.claim(env.conn)["id"] == t["id"]   # due at once, not after a backoff or the lock
+
+
+@pytest.mark.parametrize("how", ["handed back", "went silent"])
+def test_the_old_holders_late_writes_never_touch_a_task_another_claim_took(env, how):
+    t = task(env)
+    old = taskqueue.Claim(taskqueue.claim(env.conn))
+    if how == "handed back":
+        taskqueue.hand_back(env.conn, old)
+    else:   # its process stopped writing for longer than the lock lasts
+        env.conn.execute("UPDATE tasks SET locked_at=? WHERE id=?", (time.time() - taskqueue.LOCK_TTL - 5, t["id"]))
+    other_process = db.connect()
+    new = taskqueue.Claim(taskqueue.claim(other_process))
+    assert new.id == t["id"]
+    before = dict(status(env, t["id"]))
+    with pytest.raises(taskqueue.Lost):
+        taskqueue.progress(env.conn, old, {"pages": 99})
+    with pytest.raises(taskqueue.Lost):
+        taskqueue.beat(env.conn, old)
+    taskqueue.done(env.conn, old, {"pages": 99})
+    taskqueue.dead(env.conn, old, "late")
+    taskqueue.waiting_login(env.conn, old)
+    taskqueue.release(env.conn, old, "late", 0)
+    taskqueue.retry(env.conn, old, "late")
+    taskqueue.hand_back(env.conn, old)
+    assert dict(status(env, t["id"])) == before   # still running, still the new holder's lock
+    taskqueue.progress(other_process, new, {"pages": 1})   # and the new holder writes as ever
+    taskqueue.done(other_process, new, {"pages": 1})
+    assert status(env, t["id"])["status"] == "done"
+    other_process.close()
+
+
+def test_a_claim_ends_with_the_write_that_lets_go_of_the_task(env):
+    t = task(env)
+    holder = taskqueue.Claim(taskqueue.claim(env.conn))
+    taskqueue.done(env.conn, holder, {"pages": 1})
+    taskqueue.retry(env.conn, holder, "late")   # would have burned an attempt and queued it again
+    with pytest.raises(taskqueue.Lost):
+        taskqueue.beat(env.conn, holder)
+    row = status(env, t["id"])
+    assert (row["status"], row["attempts"], row["last_error"]) == ("done", 0, None)
+
+
+# ---- pacing waits are signs of life too ----
+def test_pacing_waits_give_signs_of_life_also_while_queued_behind_another_holder(env, monkeypatch):
+    assert pacer.BEAT_SECONDS * 3 <= taskqueue.LOCK_TTL   # several chances to be seen alive per lock
+    monkeypatch.setattr(pacer, "BEAT_SECONDS", 0.05)
+    pacer.wait("fake", "direct", 0, 0)   # stamps the time of a request
+    beats = []
+    begun = time.monotonic()
+    with pacer.heartbeat(lambda: beats.append(1)):
+        pacer.wait("fake", "direct", 0.4, 0)
+    assert time.monotonic() - begun >= 0.38 and len(beats) >= 5   # the wait itself is unchanged, with a beat per slice
+    holder = threading.Thread(target=pacer.wait, args=("fake", "direct", 0.5, 0))
+    holder.start()
+    time.sleep(0.1)   # it has the turn and sleeps with the lock held
+    beats.clear()
+    with pacer.heartbeat(lambda: beats.append(1)):
+        pacer.wait("fake", "direct", 0, 0)
+    holder.join()
+    assert len(beats) >= 4
+
+
+def test_a_lost_task_ends_the_wait_that_notices_it(env):
+    def lost():
+        raise taskqueue.Lost("handed back")
+
+    with pytest.raises(taskqueue.Lost), pacer.heartbeat(lost):
+        pacer.wait("fake", "direct", 0, 0)
+    pacer.wait("fake", "direct", 0, 0)   # the pace lock was let go on the way out
+
+
+def test_a_pacing_wait_longer_than_the_lock_ttl_keeps_the_task_alive(env, monkeypatch):
+    monkeypatch.setattr(taskqueue, "LOCK_TTL", 1.0)
+    monkeypatch.setattr(pacer, "BEAT_SECONDS", 0.1)
+    pacer.set_frequency(env.conn, "fake", interval=1.6, force=True)   # the wait before page 2 outlasts the lock
+    stolen, polling = [], threading.Event()
+
+    def poll():   # the other processes: whatever they claim while the first one waits for its turn is stolen
+        conn = db.connect()
+        while not polling.is_set():
+            if (row := taskqueue.claim(conn)) is not None:
+                stolen.append(row["id"])
+            time.sleep(0.02)
+        conn.close()
+
+    poller = threading.Thread(target=poll)
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        if page == 1:
+            poller.start()   # the task is running by now
+        return httpx.Response(200, json={"items": {1: [{"id": 1}, {"id": 2}], 2: [{"id": 3}]}[page]})
+
+    mock_client(env, handler)
+    task(env)
+    try:
+        assert engine.tick(env.conn) is True
+    finally:
+        polling.set()
+        if poller.ident:
+            poller.join()
+    assert stolen == [] and status(env, 1)["status"] == "done"
+    assert pacer._hook.beat is None   # the worker's hook does not outlive its task
+
+
+# ---- a stop hands the tasks back ----
+@pytest.fixture
+def chrome(env):
+    """A machine with Chrome, so that status does not look for a browser."""
+    env.mp.setattr(browser, "find_browser", lambda: ("chrome", Path("/apps/chrome")))
+
+
+def stuck_crawl(env, start_workers):
+    """Queue a crawl on 'fake' and start the workers; returns once the worker is inside the request for page 2, which
+    does not answer until `gate` is set."""
+    gate, entered = threading.Event(), threading.Event()
+    items = {1: [{"id": 1}, {"id": 2}], 2: [{"id": 3}]}
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        if page == 2 and not gate.is_set():
+            entered.set()
+            assert gate.wait(10)
+        return httpx.Response(200, json={"items": items[page]})
+
+    mock_client(env, handler)
+    tid = task(env)["id"]
+    start_workers()
+    assert entered.wait(10)
+    return SimpleNamespace(tid=tid, gate=gate)
+
+
+def test_stop_worker_hands_back_a_task_its_worker_is_stuck_in_and_a_new_worker_resumes_it(env, chrome, start_workers):
+    held = stuck_crawl(env, start_workers)
+    got = service.status(env.conn)
+    assert got["queue"]["running"] == 1 and got["workers"]["fake"]["running"]["task_id"] == held.tid
+    begun = time.monotonic()
+    engine.stop_worker(0.3)   # the worker is inside a request and cannot leave
+    assert time.monotonic() - begun < 3
+    row = status(env, held.tid)
+    assert (row["status"], row["locked_at"], row["attempts"], row["last_error"]) == ("pending", None, 0, None)
+    assert taskqueue.as_dict(row)["stats"]["pages"] == 1   # what the worker had done stays
+    got = service.status(env.conn)
+    assert got["queue"]["running"] == 0 and got["queue"]["pending"] == 1 and got["workers"]["fake"]["running"] is None
+    held.gate.set()   # the old worker wakes up: every write it still makes is refused
+    engine._threads["fake"].join(5)
+    assert not engine._threads["fake"].is_alive() and engine._held == {}
+    assert status(env, held.tid)["status"] == "pending"   # its late finish did not mark the handed-back task done
+    start_workers()   # a new worker takes it up again
+    assert wait_for(lambda: status(env, held.tid)["status"] == "done")
+    assert status(env, held.tid)["attempts"] == 0
+
+
+@pytest.mark.parametrize("how", ["handed back by a stop", "lock ran out"])
+def test_a_worker_that_wakes_up_late_leaves_the_next_holders_task_alone(env, start_workers, how):
+    held = stuck_crawl(env, start_workers)
+    if how == "handed back by a stop":
+        engine.stop_worker(0.2)
+    else:   # nothing was written to the task for longer than the lock lasts
+        env.conn.execute("UPDATE tasks SET locked_at=? WHERE id=?", (time.time() - taskqueue.LOCK_TTL - 5, held.tid))
+    other_process = db.connect()
+    assert taskqueue.claim(other_process)["id"] == held.tid   # up for grabs again, and someone takes it
+    before = dict(status(env, held.tid))
+    held.gate.set()
+    assert wait_for(lambda: engine._held == {})   # the old worker's run is over: its next write was refused
+    assert dict(status(env, held.tid)) == before   # the late page, progress and finish changed nothing
+    other_process.close()
+
+
+def test_workers_notice_a_stop_between_requests_and_hand_their_task_back_themselves(env, start_workers):
+    mock_client(env, pages({1: [{"id": 1}, {"id": 2}], 2: [{"id": 3}, {"id": 4}], 3: [{"id": 5}, {"id": 6}]}))
+    prov, asked, second_detail = env.provs["fake"], [], threading.Event()
+    real_detail = prov.detail
+
+    def slow_detail(client, job):
+        asked.append(job["id"])
+        if len(asked) == 2:
+            second_detail.set()
+        time.sleep(0.2)
+        return real_detail(client, job)
+
+    env.mp.setattr(prov, "detail", slow_detail)
+    tid = task(env)["id"]
+    start_workers()
+    assert second_detail.wait(10)
+    begun = time.monotonic()
+    engine.stop_worker(5)
+    assert time.monotonic() - begun < 1.5   # it did not wait for the rest of the pass
+    row = status(env, tid)
+    assert (row["status"], row["locked_at"], row["attempts"], row["last_error"]) == ("pending", None, 0, None)
+    stats = taskqueue.as_dict(row)["stats"]
+    assert stats["details_total"] == 6 and 2 <= stats["details_ok"] < 6   # it left between two details
+    assert not any(engine.workers().values())
+    start_workers()
+    assert wait_for(lambda: status(env, tid)["status"] == "done")
+    assert sorted(asked) == [1, 2, 3, 4, 5, 6]   # over both runs each detail was requested once
+
+
+def test_stop_worker_does_not_open_the_database_when_it_holds_nothing(env, monkeypatch):
+    monkeypatch.setattr(db, "connect", boom(AssertionError("nothing to hand back")))
+    engine.stop_worker(0)
+
+
+def test_djs_work_that_times_out_hands_its_task_back_and_the_next_one_resumes_it(env, capsys):
+    slow = [True]
+
+    def handler(request):
+        if slow[0]:
+            time.sleep(0.5)
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json={"items": [{"id": page * 10}, {"id": page * 10 + 1}]})
+
+    mock_client(env, handler)
+    tid = task(env)["id"]
+    assert cli.main(["work", "--until-idle", "--timeout", "0.6"]) == 2
+    assert "timeout: 1 task(s) still active" in capsys.readouterr().err
+    row = status(env, tid)
+    assert (row["status"], row["locked_at"], row["attempts"]) == ("pending", None, 0)   # not left for the lock to expire
+    assert taskqueue.as_dict(row)["stats"]["pages"] >= 1
+    slow[0] = False
+    assert cli.main(["work", "--until-idle", "--timeout", "30"]) == 0   # the next start takes it up at once
+    assert f"task {tid} fake done" in capsys.readouterr().out

@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 
 from djs import providers
 
-LOCK_TTL = 15 * 60
+# locked_at is the heartbeat of a running task (progress, beat): one nothing was written to for this long belongs to a
+# process that died, and claim() takes it over.
+LOCK_TTL = 3 * 60
 MAX_ATTEMPTS = 8
 BACKOFF_CAP = 360
 DETAIL_MODES = ("auto", "always", "never")
@@ -46,7 +49,8 @@ def create(conn, provider: str, payload: dict) -> int:
 
 
 def claim(conn, provider: str | None = None):
-    """Atomically take the next runnable task (of `provider`, or of any), or None."""
+    """Atomically take the next runnable task (of `provider`, or of any), or None. A running task whose heartbeat is
+    older than LOCK_TTL counts as runnable: its process is gone."""
     now = time.time()
     return conn.execute(
         """UPDATE tasks SET status='running', locked_at=? WHERE id=(
@@ -57,42 +61,93 @@ def claim(conn, provider: str | None = None):
         (now, now, now - LOCK_TTL, provider, provider)).fetchone()
 
 
-def _set(conn, task_id: int, status: str, error=None, stats=None, delay: float = 0.0, attempts_inc: int = 0):
-    conn.execute(
-        "UPDATE tasks SET status=?, last_error=?, stats=COALESCE(?, stats), next_run_at=?,"
-        " attempts=attempts+?, locked_at=NULL WHERE id=?",
-        (status, error, json.dumps(stats) if stats else None, time.time() + delay, attempts_inc, task_id))
+class Lost(Exception):
+    """A task is not the caller's any more: it was handed back, or another claim took it over."""
 
 
-def progress(conn, task_id: int, stats: dict):
-    """Live stats while the task runs; done() writes the final ones."""
-    conn.execute("UPDATE tasks SET stats=? WHERE id=?", (json.dumps(stats), task_id))
+class Claim:
+    """A task as the process that claimed it knows it. `at` is the locked_at that process wrote last (None once the claim is
+    over): the row is the holder's only while it still carries that value. A task that was handed back, or taken over
+    after LOCK_TTL, does not, so the old holder's late writes are refused instead of landing on someone else's run. The
+    holder's thread and the hand-back of a stopping process write through the same claim, one at a time."""
+
+    def __init__(self, task):
+        self.id, self.at, self.mutex = task["id"], task["locked_at"], threading.Lock()
 
 
-def done(conn, task_id: int, stats: dict):
-    _set(conn, task_id, "done", stats=stats)
+def _id(task) -> int:
+    return task.id if isinstance(task, Claim) else task
 
 
-def dead(conn, task_id: int, error: str):
-    _set(conn, task_id, "dead", error)
+def _write(conn, task, sets: str, params: list) -> bool:
+    """UPDATE one task. `task` is its id (written whatever its state) or the Claim of the process running it (written only
+    while the row still carries the claim's locked_at). The locked_at the UPDATE leaves becomes the claim's, so a write
+    that lets go of the task (locked_at=NULL) ends the claim. False when nothing was written."""
+    if not isinstance(task, Claim):
+        return conn.execute(f"UPDATE tasks SET {sets} WHERE id=?", (*params, task)).rowcount > 0
+    with task.mutex:
+        if task.at is None:
+            return False
+        row = conn.execute(f"UPDATE tasks SET {sets} WHERE id=? AND locked_at=? RETURNING locked_at",
+                           (*params, task.id, task.at)).fetchone()
+        task.at = row[0] if row else None
+        return row is not None
 
 
-def waiting_login(conn, task_id: int):
-    _set(conn, task_id, "waiting_login", "login required")
+def _set(conn, task, status: str, error=None, stats=None, delay: float = 0.0, attempts_inc: int = 0):
+    _write(conn, task,
+           "status=?, last_error=?, stats=COALESCE(?, stats), next_run_at=?, attempts=attempts+?, locked_at=NULL",
+           [status, error, json.dumps(stats) if stats else None, time.time() + delay, attempts_inc])
 
 
-def release(conn, task_id: int, error: str, delay: float):
+# The heartbeat: only a running task has a lock to refresh (a pending or finished one keeps none).
+_ALIVE = "locked_at=CASE WHEN status='running' THEN ? ELSE locked_at END"
+
+
+def progress(conn, task, stats: dict):
+    """Live stats while the task runs; done() writes the final ones. Every progress write is also the task's heartbeat: it
+    refreshes locked_at, so claim() leaves the task alone for another LOCK_TTL. Raises Lost when `task` is a Claim that
+    is not the caller's any more: its work has to stop."""
+    if not _write(conn, task, f"stats=?, {_ALIVE}", [json.dumps(stats), time.time()]):
+        raise Lost(f"task {_id(task)} is not ours any more")
+
+
+def beat(conn, task):
+    """The heartbeat alone, for a worker that waits (see pacer.heartbeat). Raises Lost like progress."""
+    if not _write(conn, task, _ALIVE, [time.time()]):
+        raise Lost(f"task {_id(task)} is not ours any more")
+
+
+def done(conn, task, stats: dict):
+    _set(conn, task, "done", stats=stats)
+
+
+def dead(conn, task, error: str):
+    _set(conn, task, "dead", error)
+
+
+def waiting_login(conn, task):
+    _set(conn, task, "waiting_login", "login required")
+
+
+def release(conn, task, error: str, delay: float):
     """Back to pending without burning an attempt (e.g. no egress available)."""
-    _set(conn, task_id, "pending", error, delay=delay)
+    _set(conn, task, "pending", error, delay=delay)
 
 
-def retry(conn, task_id: int, error: str, retry_after: float | None = None):
-    attempts = conn.execute("SELECT attempts FROM tasks WHERE id=?", (task_id,)).fetchone()["attempts"]
+def hand_back(conn, holder: Claim):
+    """The holder gives a running task back as it stands: pending and due at once, stats and attempts untouched (a task
+    that was interrupted has not failed), so whoever claims next carries on instead of waiting out LOCK_TTL."""
+    _write(conn, holder, "status='pending', locked_at=NULL", [])
+
+
+def retry(conn, task, error: str, retry_after: float | None = None):
+    attempts = conn.execute("SELECT attempts FROM tasks WHERE id=?", (_id(task),)).fetchone()["attempts"]
     if attempts + 1 >= MAX_ATTEMPTS:
-        return _set(conn, task_id, "dead", error, attempts_inc=1)
+        return _set(conn, task, "dead", error, attempts_inc=1)
     backoff = min(2 ** (attempts + 1), BACKOFF_CAP)
     delay = max(backoff * (1 + random.random() * 0.25), retry_after or 0)
-    _set(conn, task_id, "pending", error, delay=delay, attempts_inc=1)
+    _set(conn, task, "pending", error, delay=delay, attempts_inc=1)
 
 
 def resume_login(conn, provider: str) -> int:

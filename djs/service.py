@@ -424,7 +424,8 @@ def egress_list(conn) -> list[dict]:
 
 def shutdown() -> None:
     """The app or the MCP server is ending. A login window is a browser process of this process and nothing else would
-    close it: cancel the pending logins and wait (a few seconds at most) for their windows to go, then stop the workers."""
+    close it: cancel the pending logins and wait (a few seconds at most) for their windows to go, then stop the workers
+    (the tasks they still run go back to pending, so the next start carries on with them at once)."""
     auth.cancel_all()
     engine.stop_worker(5)
 
@@ -440,7 +441,8 @@ def app_version() -> str | None:
 
 def _running(conn) -> dict[str, dict]:
     """Per platform, the task it runs right now, as {task_id, keyword, city, since, pages, completing}; any process of
-    this database may be the one running it."""
+    this database may be the one running it. `since` is the task's last sign of life (locked_at is its heartbeat), not
+    the start of the run."""
     out = {}
     for row in conn.execute("SELECT * FROM tasks WHERE status='running' ORDER BY id"):
         t = taskqueue.as_dict(row)

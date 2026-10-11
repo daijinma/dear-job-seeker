@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import threading
 import time
@@ -78,6 +79,25 @@ def fetch_detail(client, prov, job):
         return None, e
 
 
+class Stopped(Exception):
+    """The worker was asked to stop: the task goes back to pending as it stands."""
+
+
+class _Run:
+    """One task being run. Its writes go through `who`: the Claim of the worker that took it, else the bare id (a task run
+    by hand, written unconditionally). `stop` is the worker's stop signal, looked at between two requests."""
+
+    def __init__(self, task, claim=None, stop=None):
+        self.id, self.who, self.stop = task["id"], claim or task["id"], stop
+
+    def check(self) -> None:
+        if self.stop is not None and self.stop.is_set():
+            raise Stopped
+
+    def progress(self, conn, stats) -> None:
+        taskqueue.progress(conn, self.who, {**stats, **jobs.tally(conn, self.id)})
+
+
 def _store(conn, task_id, prov, job, stats) -> None:
     """One list item: a known job only gets its last-seen time touched, a new one is derived and inserted. Either way
     the task is linked to it."""
@@ -94,10 +114,6 @@ def _store(conn, task_id, prov, job, stats) -> None:
     conn.execute("INSERT OR IGNORE INTO task_jobs(task_id, job_id) VALUES (?,?)", (task_id, job_pk))
 
 
-def _progress(conn, task_id, stats) -> None:
-    taskqueue.progress(conn, task_id, {**stats, **jobs.tally(conn, task_id)})
-
-
 def _awaiting(conn, task_id, prov, mode: str) -> list:
     """The jobs the completion pass asks a detail for: with 'always' every job that has none, with 'auto' the incomplete
     ones whose detail could supply what they lack (see Provider.detail_can_fill)."""
@@ -108,17 +124,19 @@ def _awaiting(conn, task_id, prov, mode: str) -> list:
     return [r for r in rows if prov.detail_can_fill(jobs.gaps(r["missing"]), logged_in)]
 
 
-def _complete(conn, task_id, prov, client, mode: str, stats) -> None:
+def _complete(conn, run, prov, client, mode: str, stats) -> None:
     """The second pass: the detail request, for the task's jobs that still miss a core element ('auto', skipping those
     a detail cannot complete) or for all of them ('always'). Skipped when the list item already is the detail. Blocked
     ends the task (it is retried and carries on with what is still missing); any other failure is kept on the job.
-    stats['details_total'] says how many requests the pass will make: readers show the progress with it."""
+    stats['details_total'] says how many requests the pass will make: readers show the progress with it. A stop request
+    ends the pass between two details."""
     if mode == "never" or not prov.has_detail:
         return
-    rows = _awaiting(conn, task_id, prov, mode)
+    rows = _awaiting(conn, run.id, prov, mode)
     stats["details_total"] = len(rows)
-    _progress(conn, task_id, stats)
+    run.progress(conn, stats)
     for row in rows:
+        run.check()
         item = json.loads(row["payload"])
         detail, err = fetch_detail(client, prov, item)
         if err:
@@ -126,7 +144,7 @@ def _complete(conn, task_id, prov, client, mode: str, stats) -> None:
         else:
             jobs.update(conn, row["id"], prov, item, detail)
         stats["details_failed" if err else "details_ok"] += 1
-        _progress(conn, task_id, stats)
+        run.progress(conn, stats)
 
 
 def _store_page(conn, task_id, prov, items: list, city: str, stats) -> None:
@@ -139,53 +157,94 @@ def _store_page(conn, task_id, prov, items: list, city: str, stats) -> None:
             _store(conn, task_id, prov, job, stats)
 
 
-def _crawl(conn, task_id, prov, client, payload, max_pages) -> dict:
-    """List pages first (stored at once, so results show up early), then the completion pass."""
+def _crawl(conn, run, prov, client, payload, max_pages) -> dict:
+    """List pages first (stored at once, so results show up early), then the completion pass. A stop request ends it
+    between two requests (Stopped)."""
     stats = {"pages": 0, "jobs_new": 0, "jobs_seen": 0, "details_ok": 0, "details_failed": 0}
     city = cities.norm(payload.get("city")) if prov.city_filter == "client" else ""
     if city:
         stats["filtered"] = 0
     limit = max_pages if prov.page_cap is None else min(max_pages, prov.page_cap)
     for page in range(prov.first_page, prov.first_page + limit):
+        run.check()
         items = prov.fetch(client, payload, page)
         stats["pages"] += 1
-        _store_page(conn, task_id, prov, items, city, stats)
-        _progress(conn, task_id, stats)
+        _store_page(conn, run.id, prov, items, city, stats)
+        run.progress(conn, stats)
         if len(items) < prov.page_size:  # empty or short page = last page: the site's own page, not what the filter kept
             break
-    _complete(conn, task_id, prov, client, taskqueue.detail_mode(payload.get("detail", "auto")), stats)
-    return {**stats, **jobs.tally(conn, task_id)}
+    _complete(conn, run, prov, client, taskqueue.detail_mode(payload.get("detail", "auto")), stats)
+    return {**stats, **jobs.tally(conn, run.id)}
 
 
 def run_task(conn, task) -> None:
+    run = _run_of(task)
     prov = providers.get(task["provider"])
     if prov.missing_env():
-        return taskqueue.dead(conn, task["id"], f"missing environment variable(s): {', '.join(prov.missing_env())}")
+        return taskqueue.dead(conn, run.who, f"missing environment variable(s): {', '.join(prov.missing_env())}")
     payload = json.loads(task["payload"])
     max_pages = payload.get("max_pages") or pacer.effective(conn, prov.name)[2]
     try:
-        with leased_client(conn, prov, str(task["id"]), payload) as client:
-            stats = _crawl(conn, task["id"], prov, client, payload, max_pages)
+        with leased_client(conn, prov, str(run.id), payload) as client:
+            stats = _crawl(conn, run, prov, client, payload, max_pages)
+    except Stopped:  # asked to stop: back to pending as it stands, for whoever claims it next
+        return taskqueue.hand_back(conn, run.who)
     except browser.BrowserUnavailable as e:  # retrying cannot install Playwright or start the user's Chrome
-        return taskqueue.dead(conn, task["id"], str(e))
+        return taskqueue.dead(conn, run.who, str(e))
     except egress.NoEgressAvailable as e:  # also a busy browser profile: try again later, attempt not burned
-        return taskqueue.release(conn, task["id"], str(e), NO_EGRESS_DELAY)
+        return taskqueue.release(conn, run.who, str(e), NO_EGRESS_DELAY)
     except (FetchError, httpx.HTTPError) as e:
         if _login_expired(prov, e):
-            return taskqueue.waiting_login(conn, task["id"])
-        return taskqueue.retry(conn, task["id"], f"{type(e).__name__}: {e}", getattr(e, "retry_after", None))
-    taskqueue.done(conn, task["id"], stats)
+            return taskqueue.waiting_login(conn, run.who)
+        return taskqueue.retry(conn, run.who, f"{type(e).__name__}: {e}", getattr(e, "retry_after", None))
+    taskqueue.done(conn, run.who, stats)
 
 
-def tick(conn, provider: str | None = None) -> bool:
-    """Claim and run one task (of `provider`, or of any). False when there was nothing to run."""
+# The tasks this process is running right now, by id: tick registers the one it claimed, so run_task writes through its
+# Claim and stop_worker knows what to hand back. A task run by hand (run_task on a row) is not in here.
+_held: dict[int, _Run] = {}
+_held_lock = threading.Lock()
+
+
+@contextmanager
+def _hold(run: _Run):
+    with _held_lock:
+        _held[run.id] = run
+    try:
+        yield
+    finally:
+        with _held_lock:
+            _held.pop(run.id, None)
+
+
+def _run_of(task) -> _Run:
+    with _held_lock:
+        return _held.get(task["id"]) or _Run(task)
+
+
+def _beat(conn, claim) -> None:
+    """The sign of life pacer.wait gives while the worker sleeps or queues for its turn. A database that cannot take the
+    write right now only costs a missed beat; Lost (the task is someone else's now) has to reach the caller."""
+    try:
+        taskqueue.beat(conn, claim)
+    except sqlite3.Error:
+        pass
+
+
+def tick(conn, provider: str | None = None, stop: threading.Event | None = None) -> bool:
+    """Claim and run one task (of `provider`, or of any). False when there was nothing to run. `stop` is the worker's stop
+    signal: it ends the task between two requests, and the task goes back to pending as it stands."""
     task = taskqueue.claim(conn, provider)
     if task is None:
         return False
-    try:
-        run_task(conn, task)
-    except Exception as e:  # never let one bad task kill the worker
-        taskqueue.retry(conn, task["id"], f"{type(e).__name__}: {e}")
+    claim = taskqueue.Claim(task)
+    with _hold(_Run(task, claim, stop)), pacer.heartbeat(lambda: _beat(conn, claim)):
+        try:
+            run_task(conn, task)
+        except taskqueue.Lost:
+            pass  # handed back or taken over while it ran: it is another claim's now, nothing of ours is left to write
+        except Exception as e:  # never let one bad task kill the worker
+            taskqueue.retry(conn, claim, f"{type(e).__name__}: {e}")
     return True
 
 
@@ -201,7 +260,7 @@ def _loop(provider: str) -> None:
     while not _stop.is_set():
         try:
             conn = conn or db.connect()
-            if not tick(conn, provider):
+            if not tick(conn, provider, _stop):
                 _stop.wait(POLL_SECONDS)
         except Exception as e:
             print(f"djs worker {provider}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -232,9 +291,31 @@ def workers() -> dict[str, bool]:
 
 
 def stop_worker(wait: float = 5.0) -> None:
-    """Ask the workers to stop after their current task; give them `wait` seconds in total."""
+    """Ask the workers to stop and give them `wait` seconds in total, then put back to pending whatever tasks this
+    process still holds, so that the next process (or the next start) takes them up at once instead of after LOCK_TTL. A
+    worker notices the request between two requests of its task and hands the task back itself; this is for one that is
+    stuck in a long request."""
     with _lock:
         _stop.set()
         deadline = time.monotonic() + wait
         for t in _threads.values():
             t.join(max(0.0, deadline - time.monotonic()))
+        _hand_back_held()
+
+
+def _hand_back_held() -> None:
+    """Every task this process still runs goes back to pending as it stands. Its worker may wake up later: its writes find
+    the claim over and are refused (taskqueue.Lost), so it cannot disturb the next holder."""
+    with _held_lock:
+        left = [run.who for run in _held.values()]
+    if not left:
+        return
+    try:
+        conn = db.connect()
+        try:
+            for claim in left:
+                taskqueue.hand_back(conn, claim)
+        finally:
+            conn.close()
+    except Exception as e:  # the process is ending: what is not handed back is taken over after LOCK_TTL
+        print(f"djs: could not hand back the running tasks: {type(e).__name__}: {e}", file=sys.stderr)
