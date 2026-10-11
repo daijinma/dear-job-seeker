@@ -1,4 +1,4 @@
-"""Regressions found by driving the real MCP server from Claude Code: a platform silently stopped working."""
+"""Regressions found by an end-to-end MCP test: a platform silently stopped working."""
 import threading
 import time
 

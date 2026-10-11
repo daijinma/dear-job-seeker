@@ -10,9 +10,6 @@ cookies*.json
 .pytest_cache/
 .DS_Store
 
-.trellis/
-.claude/
-AGENTS.md
-.gitattributes
 untitled.pen
 !.env.example
+*.bkp

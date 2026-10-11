@@ -2,7 +2,7 @@
 <diagram id="arch" name="1-架构（单客户端）">
 <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" page="1" pageWidth="1400" pageHeight="900"><root>
 <mxCell id="0"/><mxCell id="1" parent="0"/>
-<mxCell id="ai" value="AI 客户端&#xa;Claude / Cursor" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1"><mxGeometry x="40" y="90" width="140" height="70" as="geometry"/></mxCell>
+<mxCell id="ai" value="AI 客户端&#xa;（MCP）" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1"><mxGeometry x="40" y="90" width="140" height="70" as="geometry"/></mxCell>
 <mxCell id="app" value="dear-job-seeker 客户端（单进程 Python · 用户本机）" style="swimlane;fillColor=#d5e8d4;strokeColor=#82b366;startSize=30" vertex="1" parent="1"><mxGeometry x="260" y="40" width="760" height="800" as="geometry"/></mxCell>
 <mxCell id="mcp" value="MCP Server (stdio)&#xa;crawl_start · task_list · jobs_get ｜ login · login_status · logout&#xa;set_frequency · egress_add / egress_remove / egress_list" style="rounded=1;fillColor=#fff;strokeColor=#82b366" vertex="1" parent="app"><mxGeometry x="40" y="50" width="680" height="80" as="geometry"/></mxCell>
 <mxCell id="q" value="任务队列（进程内 worker 线程）&#xa;claim → run → done / retry / dead&#xa;未登录 → waiting_login" style="rounded=1;fillColor=#fff;strokeColor=#82b366" vertex="1" parent="app"><mxGeometry x="40" y="170" width="320" height="90" as="geometry"/></mxCell>

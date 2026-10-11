@@ -4,7 +4,7 @@
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="ai" parent="1" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" value="AI 客户端&#xa;Claude / Cursor" vertex="1">
+        <mxCell id="ai" parent="1" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" value="AI 客户端&#xa;（MCP）" vertex="1">
           <mxGeometry height="70" width="140" x="40" y="90" as="geometry" />
         </mxCell>
         <mxCell id="app" parent="1" style="swimlane;fillColor=#d5e8d4;strokeColor=#82b366;startSize=30" value="dear-job-seeker 客户端（单进程 Python · 用户本机）" vertex="1">

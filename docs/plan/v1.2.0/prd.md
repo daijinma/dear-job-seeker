@@ -46,7 +46,7 @@ Consequences: Boss needs a *real browser transport* (headed); anonymous browsing
 ## Verification plan
 - Unit/contract tests (no network) stay green.
 - `scripts`-free live audit per platform: field fill-rates + city-match rate (kept in the final report).
-- Real MCP host: `claude -p` with the project MCP config drives `provider_list → crawl_start → task_list → jobs_get`.
+- Real MCP host (headless) with the project MCP config drives `provider_list → crawl_start → task_list → jobs_get`.
 - Real window: Peekaboo drives the native window page by page; screenshots reviewed.
 - Boss: headed browser transport verified live anonymously; QR login verified with the user present.
 
@@ -55,3 +55,29 @@ Consequences: Boss needs a *real browser transport* (headed); anonymous browsing
 - Detail `GET /wapi/zpgeek/job/detail.json?securityId=<id>&lid=<lid>` → `code 0`, `zpData.jobInfo.{postDescription, address, salaryDesc, experienceName, degreeName, locationName}`, `zpData.brandComInfo`, `zpData.bossInfo`.
 - Salary is hidden for anonymous users in both list and DOM; the job detail page URL is `/job_detail/<encryptJobId>.html`.
 - Page prerequisites: the page JS writes `__zp_stoken__`; the request must run inside a page on `www.zhipin.com` (headed browser or real browser), with header `x-requested-with: XMLHttpRequest`.
+
+## D20 — Login parity with 拓岗宝 (user requirement, 2026-10-11)
+Every platform that has login in 拓岗宝 must have login here too, because logged-in crawling returns better data.
+拓岗宝 (v1.3.33 "platform-login-unify") logs into **BOSS直聘, 智联招聘, 前程无忧, 猎聘, 康强医疗网**; this project so far only had Boss, and has no 猎聘 / 康强 providers.
+Target behaviour (borrowing 拓岗宝 v1.3.33): one login flow for all platforms — click → browser window opens the platform's login page → success detected automatically (cookie / probe) → window closes itself → session saved locally; a login-state check at startup and on demand; login state visible from the main UI (not buried in settings); login stays optional where anonymous crawling works (`auth = "optional"`), required only where the site demands it.
+Per-platform details (login URL, success signal, what login unlocks, endpoint/transport changes) come from the research note `.trellis/tasks/10-11-djs-v1-1-0/research/platform-login.md`.
+
+## D21 — Data completeness contract (user requirement, 2026-10-11)
+A stored job is only "final data" when every CORE element is present; none may be missing.
+Aligned with the jobcrawler schema (`raw_jobs`: title, company, city, district, description, education, experience,
+salary_min/salary_max as integers) and 拓岗宝 `models.Job` (JobTitle, CompanyName, City, District, SalaryText/SalaryRange,
+Education/Experience/MajorRequirement, JobDescription, PublishTimeText, SourceURL).
+
+| Element | Column(s) | Rule |
+|---|---|---|
+| 职位名 | `title` | non-empty |
+| 公司 | `company` | non-empty |
+| 城市 | `city` (+ `district` when known) | non-empty |
+| 薪资范围（数值） | `salary_min`, `salary_max` (integers) + `salary_unit` (元/月 · 元/天 · 元/时 · 元/年) + `salary_months` (e.g. 14) | numbers, never text; parsed from the platform's structured fields first, else from text (jobcrawler `parse_salary` rules: k/千 ×1000, 万 ×10000, each side its own unit, "·14薪" → months, not multiplied); 面议 = no numbers → incomplete |
+| JD | `description` | plain text (HTML stripped), non-empty |
+| Secondary (stored when the site has them) | `education`, `experience`, `source_url`, `published_at` | not gating |
+
+Behaviour:
+- The engine completes records: list pages first (results appear fast), then a detail hop **only for jobs still missing a core element**; a task is done when that pass is over. `detail`: `auto` (default) · `always` · `never`.
+- Every job carries `missing` (list of absent core elements). Default outputs (UI results, CSV export, MCP `jobs_get`) show **complete jobs only**, with a visible count and reason for the incomplete ones (e.g. "12 条缺薪资：面议" / "Boss 未登录看不到薪资"), and an explicit switch to include them.
+- Per-platform completeness % is part of the live audit and of the final report.

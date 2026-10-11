@@ -2,7 +2,7 @@
 <diagram id="arch" name="1-架构">
 <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" page="1" pageWidth="1500" pageHeight="900"><root>
 <mxCell id="0"/><mxCell id="1" parent="0"/>
-<mxCell id="ai" value="AI 客户端&#xa;Claude / Cursor" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1"><mxGeometry x="60" y="75" width="140" height="70" as="geometry"/></mxCell>
+<mxCell id="ai" value="AI 客户端&#xa;（MCP）" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1"><mxGeometry x="60" y="75" width="140" height="70" as="geometry"/></mxCell>
 <mxCell id="srv" value="服务端 server（Python，docker / 本机均可）" style="swimlane;fillColor=#dae8fc;strokeColor=#6c8ebf;startSize=30" vertex="1" parent="1"><mxGeometry x="260" y="60" width="520" height="760" as="geometry"/></mxCell>
 <mxCell id="smcp" value="Server MCP  (Streamable HTTP /mcp)&#xa;create_crawl_task · list_tasks · get_jobs&#xa;set_frequency · set_egress · local_agents" style="rounded=1;fillColor=#fff;strokeColor=#6c8ebf" vertex="1" parent="srv"><mxGeometry x="40" y="50" width="440" height="80" as="geometry"/></mxCell>
 <mxCell id="sched" value="Dispatcher&#xa;provider.needs_local ?&#xa;否→ 入 pending；是→ 入 pending_local" style="rounded=1;fillColor=#fff;strokeColor=#6c8ebf" vertex="1" parent="srv"><mxGeometry x="40" y="170" width="200" height="90" as="geometry"/></mxCell>

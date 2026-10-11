@@ -2,7 +2,7 @@
 
 A **local job-search client** that speaks MCP. One process on your own machine crawls public job sites (and, optionally, sites that need your own login), keeps the results in a local SQLite file, and gives you two ways to use it:
 
-- **MCP server (stdio)** — plug it into Claude Desktop / Claude Code / Cursor and ask for jobs in plain language.
+- **MCP server (stdio)** — plug it into any MCP-capable AI client and ask for jobs in plain language.
 - **Desktop app** — a small native window for people who never touch a terminal. No local web server, no open port.
 
 > 中文简介：本地运行的找岗位客户端。AI 助手通过 MCP 调用，或直接打开桌面窗口使用；可按平台设置抓取频次与代理出口，需要登录的网站用你自己的账号在本机扫码登录，cookie 不上传。
@@ -33,11 +33,10 @@ The MCP server is the `djs` command over stdio. Pick one way to register it:
 | Where | How |
 |---|---|
 | Any MCP client, nothing installed (needs [uv](https://docs.astral.sh/uv/)) | `{"mcpServers": {"dear-job-seeker": {"command": "uvx", "args": ["--from", "git+https://github.com/daijinma/dear-job-seeker", "djs"]}}}` |
-| Claude Code, one line | `claude mcp add dear-job-seeker -- uvx --from git+https://github.com/daijinma/dear-job-seeker djs` |
 | Working in a clone of this repo | nothing to do: the committed [`.mcp.json`](.mcp.json) runs `uv run djs` from the repo root |
 | Your own virtualenv | `{"mcpServers": {"dear-job-seeker": {"command": "/abs/path/to/.venv/bin/djs"}}}` |
 
-Keys for the key-signed platforms go in the client's `env` block or in `$DJS_HOME/.env` (see below). Verified end to end on 2026-10-11 by Claude Code itself (headless `claude -p` with the project `.mcp.json`): `provider_list → crawl_start → task_list → jobs_get → job_detail`.
+Keys for the key-signed platforms go in the client's `env` block or in `$DJS_HOME/.env` (see below). Verified end to end on 2026-10-11 with a headless MCP host using the project `.mcp.json`: `provider_list → crawl_start → task_list → jobs_get → job_detail`.
 
 Then ask: *"Find Python jobs in Hangzhou on nowcoder and zhaopin"*.
 
