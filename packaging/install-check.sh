@@ -29,7 +29,8 @@ else
     "$dir/install.ps1.orig" > "$dir/install.ps1"
   out=$(run) || { mv "$dir/install.ps1.orig" "$dir/install.ps1"; fail "helper failed: $out"; }
   mv "$dir/install.ps1.orig" "$dir/install.ps1"
-  case "$out" in *"Test AV"*"Second AV"*"Microsoft Defender"*"[3/3]"*) ;; *) fail "antivirus branch: $out" ;; esac
+  [[ $out == *"Test AV"* && $out == *"Second AV"* && $out == *"Microsoft Defender"* && $out == *"[3/3]"* ]] ||
+    fail "antivirus branch: $out"
   out=$(run) || fail "helper failed: $out"
   echo "$out"
   case "$out" in *"[1/3]"*"[3/3]"*) ;; *) fail "helper did not run to its end" ;; esac
