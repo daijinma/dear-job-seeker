@@ -20,6 +20,12 @@ else
   win() { cygpath -w "$1"; }
   F=$(win "$exe") powershell -NoProfile -Command \
     'Set-Content -LiteralPath $env:F -Stream Zone.Identifier -Value "[ZoneTransfer]","ZoneId=3"'
+  # The runner has no Security Center, so the "antivirus found" branch runs once against a made-up product
+  sed "s#(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct).displayName#'Test AV','火绒安全软件'#" \
+    "$dir/安装.cmd" > "$dir/安装-test.cmd"
+  out=$(echo n | cmd.exe //c "$(win "$dir/安装-test.cmd")" 2>&1) || fail "helper failed: $out"
+  rm "$dir/安装-test.cmd"
+  case "$out" in *"已检测到：Test AV"*"已检测到：火绒安全软件"*"Microsoft Defender"*) ;; *) fail "antivirus branch: $out" ;; esac
   out=$(echo n | cmd.exe //c "$(win "$dir/安装.cmd")" 2>&1) || fail "helper failed: $out"
   echo "$out"
   case "$out" in *"[1/3]"*"[3/3]"*) ;; *) fail "helper did not run to its end" ;; esac
