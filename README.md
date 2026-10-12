@@ -15,7 +15,7 @@ A **local job-search client** for Chinese job sites that speaks MCP. One program
 
 ## 中文快速上手
 
-1. 在 [Releases](https://github.com/daijinma/dear-job-seeker/releases/latest) 下载对应你电脑的压缩包（苹果芯片 Mac、Intel Mac 或 Windows），解压后打开「找岗位助手」。第一次打开时系统会提示无法验证开发者：Mac 到「系统设置 → 隐私与安全性」点「仍要打开」，Windows 点「更多信息 → 仍要运行」。
+1. 在 [Releases](https://github.com/daijinma/dear-job-seeker/releases/latest) 下载对应你电脑的压缩包（苹果芯片 Mac、Intel Mac 或 Windows），解压后双击文件夹里的安装助手：Mac 是「安装.command」，Windows 是「安装.cmd」。它会解除系统的下载隔离，Windows 上还会检测杀毒软件并告诉你被拦截时怎么放行，最后帮你打开「找岗位助手」。第一次双击安装助手时系统可能提示无法验证开发者（Mac：右键 → 打开，或「系统设置 → 隐私与安全性」点「仍要打开」；Windows：点「更多信息 → 仍要运行」），只这一次。
 2. 填岗位和城市，点「开始查找」。常用网站已经选好，几十秒到几分钟内结果陆续出来，进度在搜索框下面。
 3. 点「查看结果」：可以按网站、按月薪筛选，按综合、薪资或公司排序；点开岗位看完整描述，「打开原页面」去投递；「导出表格」会存进「下载」文件夹。
 4. 想要更全的结果，到「平台登录」用你自己的账号登录：BOSS 直聘登录后能看到薪资，康强医疗网必须登录才能搜。登录只在你自己的电脑上完成，账号信息不会上传。
@@ -35,10 +35,10 @@ Every [release](https://github.com/daijinma/dear-job-seeker/releases/latest) has
 
 Unzip it and double-click **找岗位助手** (`找岗位助手.app` on a Mac, `找岗位助手.exe` in the unzipped folder on Windows). The same download holds the command-line program `djs` for AI clients and scripts; it uses the same data as the window.
 
-**First launch.** The builds are not code-signed, so the system asks once whether to trust them.
+**First launch.** The builds are not code-signed, so the system asks once whether to trust them. The download has a helper for that next to the app: double-click **安装.command** (Mac) or **安装.cmd** (Windows). It lifts the "downloaded from the internet" mark, offers to copy the Mac app to Applications, on Windows detects your antivirus software and says what to allow if it blocks or removes the program, and opens the app. It changes no antivirus settings. The helper itself triggers the same system question once; the manual steps below are the way around it.
 
 - **macOS** — "cannot be opened because Apple cannot check it for malicious software". Right-click the app, choose *Open*, then *Open* again. On macOS 15 and later that shortcut is gone: open System Settings → Privacy & Security, scroll to the message about the app and click *Open Anyway*. Or run `xattr -dr com.apple.quarantine "找岗位助手.app"` once in Terminal.
-- **Windows** — SmartScreen shows "Windows protected your PC": click *More info*, then *Run anyway*. The window needs Microsoft's WebView2 runtime, which comes with Windows 11 and current Windows 10 updates.
+- **Windows** — SmartScreen shows "Windows protected your PC": click *More info*, then *Run anyway*. An antivirus program may also flag or quarantine the program (it is not signed): restore it from the quarantine and choose *Allow* / *Trust*. The window needs Microsoft's WebView2 runtime, which comes with Windows 11 and current Windows 10 updates.
 
 **Browser.** Login windows and BOSS 直聘 use Google Chrome or Microsoft Edge when one is installed. With neither, run `djs install-browser` once: it downloads Chromium (several hundred MB).
 

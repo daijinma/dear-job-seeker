@@ -82,9 +82,26 @@ jobs:
       - name: Smoke test
         run: bash packaging/smoke.sh dist
 
+      # The download carries a one-click installer helper next to the app: it lifts the "downloaded from the internet"
+      # mark (and on Windows says what to do about antivirus), so the user does not have to find the OS's own dialogs.
+      - name: Installer helper (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          mkdir dist/stage
+          ditto "dist/找岗位助手.app" "dist/stage/找岗位助手.app"
+          cp packaging/安装.command dist/stage/
+          chmod +x dist/stage/安装.command
+          bash packaging/install-check.sh dist/stage
+
+      - name: Installer helper (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          sed 's/$/\r/' packaging/安装.cmd > dist/dear-job-seeker/安装.cmd  # cmd wants CRLF line ends
+          bash packaging/install-check.sh dist/dear-job-seeker
+
       - name: Zip (macOS)
         if: ${{ runner.os == 'macOS' }}
-        run: ditto -c -k --keepParent "dist/找岗位助手.app" "dist/${{ steps.asset.outputs.name }}"
+        run: ditto -c -k dist/stage "dist/${{ steps.asset.outputs.name }}"
 
       - name: Zip (Windows)
         if: ${{ runner.os == 'Windows' }}
@@ -123,7 +140,8 @@ jobs:
           - Mac, Intel: dear-job-seeker-$version-macos-x86_64.zip
           - Windows 10/11, 64-bit: dear-job-seeker-$version-windows-x64.zip
 
-          The apps are not code-signed, so the first launch needs one extra step:
+          The apps are not code-signed: double-click 安装.command (Mac) or 安装.cmd (Windows) in the download first.
+          Details:
           https://github.com/$GITHUB_REPOSITORY#download
           EOF
           ls -l assets
