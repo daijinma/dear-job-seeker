@@ -30,8 +30,8 @@ code { background: var(--ground); padding: 1px 6px; border-radius: 6px; font-siz
 /* ---- frame ---- */
 .top { position: sticky; top: 0; z-index: 30; display: flex; justify-content: space-between; align-items: center; padding: 14px 48px; background: var(--ground); }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 18px; font-weight: 700; }
-.logo { width: 32px; height: 32px; border-radius: 10px; background: var(--primary); display: grid; place-items: center; }
-.logo svg { width: 16px; height: 16px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; }
+.logo { width: 32px; height: 32px; display: grid; place-items: center; }
+.logo svg { width: 32px; height: 32px; display: block; }
 .top nav { display: flex; gap: 6px; }
 .top nav a { display: inline-flex; align-items: center; gap: 8px; color: var(--sub); font-weight: 500; padding: 7px 16px; border-radius: 999px; }
 .top nav a:hover { background: rgba(26, 26, 36, .05); }

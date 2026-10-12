@@ -1,16 +1,18 @@
-<!-- App icon: the logo of the app's top bar (djs/ui/index.html) on the macOS icon grid (824 px of 1024).
-     Regenerate icon.icns / icon.ico from it: render at 1024 px with a transparent background, then
-     `sips -z` the iconset sizes + `iconutil -c icns`, and pack PNGs of 16-256 px into icon.ico. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#8F63F2"/>
-      <stop offset="1" stop-color="#6A3BD8"/>
-    </linearGradient>
-  </defs>
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
-  <g transform="translate(512 512) scale(26) translate(-12.5 -12.5)" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round">
-    <circle cx="11" cy="11" r="6"/>
-    <path d="m20 20-4-4"/>
-  </g>
+<!-- App icon: ink-wash mountains under a red sun, signed with a seal (岗 = job post). On the macOS icon grid (824 px of 1024).
+     The glyph is an outline of Noto Serif SC Black (SIL Open Font License 1.1, Google Fonts).
+     Regenerate icon.icns / icon.ico with packaging/make-icons.sh. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><linearGradient id="l1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#AEB8CB"/><stop offset="1" stop-color="#E9E3D6"/></linearGradient><linearGradient id="l2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7C89A6"/><stop offset="1" stop-color="#CED2D8"/></linearGradient><linearGradient id="l3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4A5876"/><stop offset="1" stop-color="#8B96AE"/></linearGradient><linearGradient id="l4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#27304B"/><stop offset="1" stop-color="#1B2238"/></linearGradient><linearGradient id="paper" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FAF3E4"/><stop offset="1" stop-color="#EADDC4"/></linearGradient><radialGradient id="glow"><stop offset="0" stop-color="#E9533B" stop-opacity=".28"/><stop offset="1" stop-color="#E9533B" stop-opacity="0"/></radialGradient><clipPath id="c"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath></defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#paper)"/>
+<rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#B9A98A" stroke-opacity=".55" stroke-width="3"/>
+<g clip-path="url(#c)">
+ <circle cx="630" cy="340" r="230" fill="url(#glow)"/>
+ <circle cx="630" cy="340" r="124" fill="#D8432F"/>
+ <path d="M100 575 C170 520 240 470 300 510 C340 535 370 560 410 500 C440 455 478 440 520 500 C560 555 600 575 650 520 C700 470 760 470 810 530 C850 575 890 580 924 565 V924 H100Z" fill="url(#l1)"/>
+ <path d="M100 665 C160 625 230 600 290 640 C350 680 380 650 430 600 C480 550 530 560 580 620 C620 665 670 670 720 630 C780 585 850 600 924 650 V924 H100Z" fill="url(#l2)"/>
+ <path d="M100 760 C190 700 270 690 340 735 C410 780 450 740 520 690 C590 645 650 670 710 720 C770 765 840 740 924 715 V924 H100Z" fill="url(#l3)"/>
+ <path d="M100 845 C210 790 320 800 410 840 C500 880 560 800 650 795 C740 790 820 840 924 820 V924 H100Z" fill="url(#l4)"/>
+</g>
+<g transform="rotate(-4 752 752)"><rect x="652" y="652" width="200" height="200" rx="20" fill="#C8352A"/>
+ <rect x="662" y="662" width="180" height="180" rx="12" fill="none" stroke="#F6E9D6" stroke-width="4" opacity=".7"/>
+ <path transform="translate(671.10 810.80) scale(0.1551 -0.1551)" fill="#F6E9D6" d="M282 437Q402 413 484.0 377.5Q566 342 616.5 301.0Q667 260 690.0 219.5Q713 179 714.5 145.0Q716 111 700.0 89.0Q684 67 656.0 62.5Q628 58 593 78Q563 133 515.0 196.5Q467 260 406.5 321.0Q346 382 277 428ZM753 408Q750 400 741.5 395.0Q733 390 715 391Q675 315 613.5 242.0Q552 169 466.0 110.0Q380 51 265 15L259 25Q344 82 406.5 158.5Q469 235 510.0 319.0Q551 403 572 482ZM751 510 813 580 943 481Q938 475 928.5 468.5Q919 462 903 459V48Q903 5 892.0 -26.0Q881 -57 845.5 -74.5Q810 -92 737 -98Q736 -66 732.5 -43.5Q729 -21 718 -7Q708 7 693.0 18.0Q678 29 644 35V47Q644 47 656.0 46.5Q668 46 685.0 45.0Q702 44 718.5 43.5Q735 43 743 43Q754 43 757.5 47.5Q761 52 761 61V510ZM251 -46Q251 -53 234.0 -64.5Q217 -76 190.0 -85.0Q163 -94 133 -94H111V510V569L262 510H803V482H251ZM245 770 280 749V609H285L243 548L100 618Q111 632 128.5 646.5Q146 661 160 666L138 629V770ZM317 802Q316 791 308.0 783.5Q300 776 280 773V742H138V802V819ZM905 801Q904 791 896.5 783.5Q889 776 868 773V587Q868 583 850.0 577.0Q832 571 804.0 566.0Q776 561 747 561H723V816ZM611 843Q610 833 602.5 825.5Q595 818 575 814V617H431V856ZM779 637V609H223V637Z"/></g>
 </svg>
