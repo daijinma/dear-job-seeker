@@ -1,9 +1,10 @@
 """Boss Zhipin (zhipin.com): the C-end JSON API, called from inside a real browser page.
 
 Plain HTTP and headless browsers get code 37 ("environment abnormal") even with a valid cookie; a headed browser that
-loaded the search page first (its scripts write a fresh __zp_stoken__) gets code 0, logged in or not. Anonymous visitors
-see every field but the salary, which Boss shows after login only (auth='optional'). Code 37 and every business code but
-"not logged in" map to Blocked (cooldown + retry): a risk-control answer must never send the user into a login loop.
+loaded the search page first (its scripts write a fresh __zp_stoken__) gets code 0 when logged in. Boss is never visited
+signed out (auth='login'): an anonymous page hides the salary, and what it lists and answers is not reliable (user,
+1.3.0 E1). Code 37 and every business code but "not logged in" map to Blocked (cooldown + retry): a risk-control answer
+must never send the user into a login loop; "not logged in" means the saved session died and the task waits for a new one.
 """
 from __future__ import annotations
 
@@ -60,7 +61,7 @@ class Boss(Provider):
     name = "boss"
     label = "BOSS 直聘"
     kind = "keyword"
-    auth = "optional"
+    auth = "login"
     requires_city = False
     city_filter = "server"
     interval = 8.0           # 8-20 s between searches is the range proven in earlier runs; risk control is per account/IP
@@ -71,9 +72,9 @@ class Boss(Provider):
     page_cap = 5
     transports = ("browser",)
     needs_headed = True
-    note = ("Needs a real browser window (plain HTTP gets code 37). The salary shows only after login. List-only for "
-            "now: job descriptions are not fetched by the crawl. Keep the default pace: risk control hits the account "
-            "and the IP for hours.")
+    note = ("Needs a real browser window (plain HTTP gets code 37) and your login: signed out, the salary is hidden and "
+            "the pages are not reliable, so it is never visited without one. List-only for now: job descriptions are "
+            "not fetched by the crawl. Keep the default pace: risk control hits the account and the IP for hours.")
     login = Login(url="https://www.zhipin.com/web/user/?ka=bticket", method="qr", domain="zhipin.com",
                   cookies_any=("wt2", "zp_at"), unlocks="能看到薪资")
 

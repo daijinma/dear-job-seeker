@@ -18,7 +18,7 @@ A **local job-search client** for Chinese job sites that speaks MCP. One program
 1. 在 [Releases](https://github.com/daijinma/dear-job-seeker/releases/latest) 下载对应你电脑的压缩包（苹果芯片 Mac、Intel Mac 或 Windows），解压后双击文件夹里的安装助手：Mac 是「安装.command」，Windows 是「安装.cmd」。它会解除系统的下载隔离，Windows 上还会检测杀毒软件并告诉你被拦截时怎么放行，最后帮你打开「找岗位助手」。第一次双击安装助手时系统可能提示无法验证开发者（Mac：右键 → 打开，或「系统设置 → 隐私与安全性」点「仍要打开」；Windows：点「更多信息 → 仍要运行」），只这一次。
 2. 填岗位和城市，点「开始查找」。常用网站已经选好，几十秒到几分钟内结果陆续出来，进度在搜索框下面。
 3. 点「查看结果」：可以按网站、按月薪筛选，按综合、薪资或公司排序；点开岗位看完整描述，「打开原页面」去投递；「导出表格」会存进「下载」文件夹。
-4. 想要更全的结果，到「平台登录」用你自己的账号登录：BOSS 直聘登录后能看到薪资，康强医疗网必须登录才能搜。登录只在你自己的电脑上完成，账号信息不会上传。
+4. 想要更全的结果，到「平台登录」用你自己的账号登录：BOSS 直聘和康强医疗网必须登录才能搜（BOSS 不登录的页面看不到薪资，列表也不可靠，所以从不在未登录时访问）。登录只在你自己的电脑上完成，账号信息不会上传。
 5. 想让 AI 助手替你找：把下载包里的 `djs` 配成 MCP 服务（见下面 [Use it from an AI client](#use-it-from-an-ai-client-mcp)），然后直接对它说「帮我找杭州的 Python 后端，月薪 1.5 万以上，挑 5 个」。
 
 鱼泡直聘、前程无忧和 58同城需要你自己配置密钥才会参与查找（见 [Platforms that need keys](#platforms-that-need-keys)），不配置也不影响其他网站。
@@ -91,13 +91,13 @@ Each platform declares its own type and pacing; nothing is global.
 | 58同城 | `job58` | — | **required** | 1.5 s (0.75 s) | — | `DJS_JOB58_LUNA_SALT` |
 | 赶集网 | `ganji` | — | **required** | 1.5 s (0.75 s) | 1 | — |
 | 猎聘 | `liepin` | optional | optional (filtered locally) | 4 s (2 s) | 2 | — |
-| BOSS 直聘 | `boss` | optional | optional | 8 s (6 s) | 5 | a browser window |
+| BOSS 直聘 | `boss` | **required** | optional | 8 s (6 s) | 5 | a login, a browser window |
 | 康强医疗网 | `kq36` | **required** | optional | 2.5 s (1 s) | — | a login |
 
 - **login** — `optional`: works without an account and gives more with one (see [Logins](#logins)); **required**: no search before you log in.
 - **city** — the city goes to the site's own search; 猎聘's API takes none, so its results are filtered by city here. A city typed as "杭州市西湖区" or "浙江杭州" counts as 杭州. A platform that has no code for the city (58同城 and 赶集 cover fewer cities; county-level cities such as 义乌 are known to few sites) is skipped and the search says so.
 - **interval (floor)** — default seconds between two requests of that platform, and the lowest value `set_frequency` accepts without `force=true`.
-- **Default selection** — the desktop app and the MCP `search` tool use every platform that needs nothing from you: no required login, no browser window, its keys set, and the city covered. BOSS 直聘 (opens a window) and 康强医疗网 (login first) are used when you pick them.
+- **Default selection** — the desktop app and the MCP `search` tool use every platform that needs nothing from you: no required login, no browser window, its keys set, and the city covered. BOSS 直聘 (login first, opens a window) and 康强医疗网 (login first) are used when you pick them.
 - Verified against the live sites on 2026-10-11. Fixtures in `tests/` are synthetic; layouts and field names can change without notice. 实习僧 (shixiseng) is intentionally not included: its data needs a JavaScript evaluator.
 
 ### Platforms that need keys
@@ -116,11 +116,11 @@ DJS_JOB58_LUNA_SALT=...
 
 ## Logins
 
-Five platforms have a login. It is optional on four of them, and only two measurably gain from it (BOSS 直聘 and 康强医疗网), so the app's reminder (the badge on 平台登录 and the hint on 查找) counts only those, plus any login that has expired:
+Five platforms have a login. It is required on two (BOSS 直聘 and 康强医疗网) and optional on three, so the app's reminder (the badge on 平台登录 and the hint on 查找) counts those two, plus any login that has expired:
 
 | Platform | How you log in | What the login adds |
 |---|---|---|
-| BOSS 直聘 | scan the QR code with the BOSS app | salaries in the list (measured: 15 of 15). Job descriptions are not fetched for now (see below), so BOSS jobs count as incomplete: switch on 显示信息不全的岗位 to see them |
+| BOSS 直聘 | scan the QR code with the BOSS app | required: signed out, BOSS hides the salary and its pages are not reliable, so BOSS is never visited without a login (a search waits for one). Salaries in the list (measured: 15 of 15). Job descriptions are not fetched for now (see below), so BOSS jobs count as incomplete: switch on 显示信息不全的岗位 to see them |
 | 智联招聘 | scan with WeChat | the desktop-site search, which returns a different set of jobs, not more of them (measured: 60 vs 60, 21 shared) |
 | 前程无忧 | account and password | nothing measurable yet: the anonymous search is already complete, and the desktop-site search stayed blocked when logged in, so the login does not change how it searches |
 | 猎聘 | scan with the 猎聘 app | nothing measurable: the same jobs as without a login (its API needs none) |
@@ -128,7 +128,7 @@ Five platforms have a login. It is optional on four of them, and only two measur
 
 Click **去登录** in the app (page 平台登录) or call the `login` tool: an ordinary Chrome or Edge window opens on the site's own login page, you log in as you always do, and the window closes by itself once the login is detected. Nothing automates that window (BOSS 直聘 and 猎聘 blank any page an automation tool drives); the program only asks the browser for its cookies. The session is saved on your machine only (file mode 0600) with its expiry (7 days; 前程无忧 30), and searches that were waiting for it continue. `login_check` asks the site whether a saved login still works; the app runs the same check at start and marks dead logins as expired.
 
-**BOSS 直聘** answers plain HTTP and headless browsers with `code 37` ("environment abnormal"), so it runs in a real browser window, which is why it is not preselected. It is paced at 8 s per request: its risk control can restrict an account and an IP for hours. `code 37` is treated as a temporary block (cooldown and retry), never as an expired login. **Known limitation:** BOSS also blanks a crawling page within a second or two, so the list call (made right after the page loads) works while the per-job detail calls mostly fail. Since 1.2.3 BOSS is crawled list-only: no detail calls, so a search never keeps retrying against your account; its jobs say "BOSS 暂时拿不到职位描述，可打开原页面查看", and a job you open in the app still loads its description on demand. 1.3.0 moves crawling to the same plain browser the login window uses and decides, by experiment, whether descriptions come back.
+**BOSS 直聘** answers plain HTTP and headless browsers with `code 37` ("environment abnormal"), so it runs in a real browser window and needs your login (it is never visited signed out), which is why it is not preselected. It is paced at 8 s per request: its risk control can restrict an account and an IP for hours. `code 37` is treated as a temporary block (cooldown and retry), never as an expired login. **Known limitation:** BOSS also blanks a crawling page within a second or two, so the list call (made right after the page loads) works while the per-job detail calls mostly fail. Since 1.2.3 BOSS is crawled list-only: no detail calls, so a search never keeps retrying against your account; its jobs say "BOSS 暂时拿不到职位描述，可打开原页面查看", and a job you open in the app still loads its description on demand. 1.3.0 moves crawling to the same plain browser the login window uses and decides, by experiment, whether descriptions come back.
 
 ## MCP tools
 

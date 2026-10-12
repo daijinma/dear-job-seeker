@@ -9,7 +9,7 @@ from djs.providers.base import Login
 METHODS = ("qr", "wechat", "password", "sms")
 LOGIN_PROVIDERS = [n for n in providers.names() if providers.get(n).auth != "public"]
 # What the research note (.trellis/tasks/10-11-djs-v1-1-0/research/platform-login.md) found for each platform
-FOUND = {"boss": ("optional", "qr", "zhipin.com", "cookies_any", ("wt2", "zp_at")),
+FOUND = {"boss": ("login", "qr", "zhipin.com", "cookies_any", ("wt2", "zp_at")),
          "zhaopin": ("optional", "wechat", "zhaopin.com", "cookies_all", ("at", "rt")),
          "job51": ("optional", "password", "51job.com", "url_prefix", "https://we.51job.com/pc/my/"),
          "liepin": ("optional", "qr", "liepin.com", "cookies_any", ("lt_auth",)),

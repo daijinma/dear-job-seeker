@@ -21,7 +21,7 @@ New platforms; UI changes; 智联 "both searches when logged in" (waits for the 
 
 ## Acceptance
 - No `playwright` import or dependency left; full test suite green; CI: three builds + smoke green, each zip ≤ 35 MB.
-- Live, at default pacing: 智联's PC search through `set_transport browser` returns complete jobs; BOSS (fresh anonymous profile, then logged in) returns its list and the descriptions of a whole page of jobs, each matched to its job, at the default pace — or R3 is reported as not met.
+- Live, at default pacing: 智联's PC search through `set_transport browser` returns complete jobs; BOSS (logged in only: it is never visited signed out, A24) returns its list and the descriptions of a whole page of jobs, each matched to its job, at the default pace — or R3 is reported as not met.
 - A user without Chrome or Edge (simulated) gets the install hint, and every HTTP platform still works.
 
 ## Risks

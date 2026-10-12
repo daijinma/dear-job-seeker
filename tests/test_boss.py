@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from djs import auth, browser, cities, service
+from djs import auth, browser, cities, db, engine, service
 from djs.jobs import derive
 from djs.normalize import missing
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
@@ -112,9 +112,21 @@ def test_login_without_playwright_gives_hint(monkeypatch):
 
 def test_class_attrs_match_contract():
     b = Boss()
-    assert (b.name, b.kind, b.auth, b.requires_city, b.city_filter) == ("boss", "keyword", "optional", False, "server")
+    assert (b.name, b.kind, b.auth, b.requires_city, b.city_filter) == ("boss", "keyword", "login", False, "server")
     assert (b.interval, b.min_interval, b.page_size, b.first_page, b.page_cap) == (8.0, 6.0, 15, 1, 5)
     assert (b.transports, b.needs_headed, b.login_transport) == (("browser",), True, None)   # plain http gets code 37
+
+
+def test_signed_out_boss_is_never_visited(monkeypatch):
+    """No saved login: the task waits for one, and no browser is opened (an anonymous Boss page hides the salary and what
+    it lists is unreliable)."""
+    opened = []
+    monkeypatch.setattr(browser, "open_browser", lambda *a, **k: opened.append(a))
+    conn = db.connect()
+    with pytest.raises(LoginRequired), engine.leased_client(conn, Boss(), "k", {"keyword": "python"}):
+        pass
+    assert opened == []
+    conn.close()
 
 
 def test_fetch_sends_query_city_and_headers():
