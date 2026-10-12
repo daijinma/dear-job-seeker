@@ -97,6 +97,7 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         run: |
           sed 's/$/\r/' packaging/安装.cmd > dist/dear-job-seeker/安装.cmd  # cmd wants CRLF line ends
+          cp packaging/install.ps1 dist/dear-job-seeker/
           bash packaging/install-check.sh dist/dear-job-seeker
 
       - name: Zip (macOS)
