@@ -138,7 +138,7 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .dot.bad .ic { color: var(--bad); }
 .dot.run .spin { color: var(--primary); }
 .dot .none { color: var(--sub); }
-#newest:not(:empty), #login-hint:not(:empty) { margin-top: 16px; }
+#newest:not(:empty), #login-hint:not(:empty), #connect-ask:not(:empty) { margin-top: 16px; }
 #login-hint .notice { margin-bottom: 0; }
 
 /* ---- 我的结果 ---- */
@@ -230,6 +230,12 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
 .switch.on { background: var(--primary); }
 .switch.on::after { left: 23px; }
 .switch:disabled { opacity: .6; }
+.connect .group .items { grid-template-columns: minmax(0, 1fr); }   /* one assistant per line: the path under the name is long */
+.connect .group + .group { margin-top: 18px; }
+.connect-ask { display: grid; gap: 14px; padding: 22px 24px; }
+.connect-ask h2 { font-size: 20px; }
+.connect-ask .sub { font-size: 13px; }
+.connect-ask .items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .add-proxy { display: flex; gap: 10px; }
 .add-proxy input { flex: 1; min-width: 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--r-ctl); font: inherit; }
 
@@ -252,6 +258,6 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 80px 72px; }
   .hero h1 { font-size: 34px; }
   .searchbar { flex-wrap: wrap; }
   .searchbar .btn { width: 100%; padding: 14px; }
-  .jobs, .grid2, .group .items, .opts { grid-template-columns: minmax(0, 1fr); }
+  .jobs, .grid2, .group .items, .opts, .connect-ask .items { grid-template-columns: minmax(0, 1fr); }
   .drawer { border-radius: 0; }
 }

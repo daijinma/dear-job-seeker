@@ -134,7 +134,7 @@ const searchPage = () => `<section class="narrow search">
     <button type="submit" class="btn primary">开始查找</button></form>
   <div class="examples"><span class="sub">试试：</span>${EXAMPLES.map((v) => chip(v, false, act("example", { v }), { sm: true })).join("")}</div>
   <div class="msg" id="msg" role="alert"></div>
-  <div id="newest"></div><div id="login-hint"></div><div id="sites"></div><div id="recent"></div></section>`;
+  <div id="connect-ask"></div><div id="newest"></div><div id="login-hint"></div><div id="sites"></div><div id="recent"></div></section>`;
 
 async function viewSearch(params, e) {
   const g = siteGroups();
@@ -147,6 +147,7 @@ async function viewSearch(params, e) {
   paint($("#login-hint"), loginHint());
   $("#kw").focus();
   if (paintSearches(searches)) pollWhile(refreshSearches);
+  showConnectAsk(e);
 }
 
 /* Without a city the sites that cannot search the whole country are left out of the request, quietly: the search card

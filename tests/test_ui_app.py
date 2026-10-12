@@ -53,17 +53,19 @@ def test_the_window_bridge_has_no_save_dialog_any_more():
     assert "SAVE_DIALOG" not in Path(ui_app.__file__).read_text() and "create_file_dialog" not in Path(ui_app.__file__).read_text()
 
 
-def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_window_and_shuts_down_after(monkeypatch):
+def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_window_and_shuts_down_after(monkeypatch, tmp_path):
     order = []
     window = SimpleNamespace(create_window=lambda *a, **k: order.append(("window", k["js_api"])), start=lambda: order.append("start"))
+    monkeypatch.setenv("DJS_HOME", str(tmp_path))
     monkeypatch.setitem(sys.modules, "webview", window)
     monkeypatch.setattr(ui_app.envfile, "load", lambda: order.append("env"))
     monkeypatch.setattr(ui_app.engine, "start_worker", lambda: order.append("workers"))
     monkeypatch.setattr(ui_app.service, "start_login_check", lambda: order.append("check"))   # in the background: never held up
+    monkeypatch.setattr(ui_app.connect, "sync", lambda keys: order.append("connect") or {})   # never the real config files
     monkeypatch.setattr(ui_app.service, "shutdown", lambda: order.append("shutdown"))
     ui_app.main([])
-    assert order[:3] == ["env", "workers", "check"] and order[4:] == ["start", "shutdown"]
-    assert order[3][0] == "window" and isinstance(order[3][1], ui_app.Api)
+    assert order[:4] == ["env", "workers", "check", "connect"] and order[5:] == ["start", "shutdown"]
+    assert order[4][0] == "window" and isinstance(order[4][1], ui_app.Api)
 
     def crash():
         raise RuntimeError("the window died")
@@ -438,3 +440,144 @@ def test_open_url_only_http(call, monkeypatch):
     assert "error" in call("POST /api/open_url", {"url": "file:///etc/passwd"})
     assert "error" in call("POST /api/open_url", {"url": "javascript:alert(1)"})
     assert call("POST /api/open_url", {"url": "https://a.test/x"}) == {"ok": True} and opened == ["https://a.test/x"]
+
+
+# ---- connecting the AI assistants on this computer
+@pytest.fixture
+def user(call, tmp_path, monkeypatch):
+    """A home folder of its own, so no real assistant's config is read or written."""
+    folder = tmp_path / "user"
+    folder.mkdir()
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(folder))
+    monkeypatch.setenv("APPDATA", str(folder / "AppData" / "Roaming"))
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+    monkeypatch.setattr(sys, "executable", "/opt/app/bin/python")
+    return folder
+
+
+def states(body):
+    return {t["key"]: t["state"] for t in body["targets"] if t["state"] != "off"}
+
+
+def saved(tmp_path):
+    return json.loads((tmp_path / "ui_prefs.json").read_text())
+
+
+def test_connect_lists_every_assistant_found_or_not_and_the_ones_to_paste_by_hand(call, user):
+    (user / ".cursor").mkdir()
+    body = call("GET /api/connect")
+    assert set(body) == {"command", "asked", "config", "targets", "guided"}
+    assert (body["command"], body["asked"]) == ("/opt/app/bin/djs", False)
+    assert json.loads(body["config"]) == {"mcpServers": {"dear-job-seeker": {"command": "/opt/app/bin/djs"}}}
+    assert len(body["targets"]) == 12   # found or not
+    assert {t["key"] for t in body["targets"] if t["detected"]} == {"cursor"}
+    assert [t for t in body["targets"] if t["key"] == "cursor"] == [
+        {"key": "cursor", "label": "Cursor", "group": "intl", "detected": True, "state": "off", "path": "~/.cursor/mcp.json"}]
+    assert {t["group"] for t in body["targets"]} == {"cn", "intl"} and states(body) == {}
+    assert [(g["key"], g["label"]) for g in body["guided"]] == [
+        ("qoder", "Qoder"), ("trae", "Trae / Trae CN"), ("lingma", "通义灵码"), ("cherry-studio", "Cherry Studio")]
+    assert all(set(g) == {"key", "label", "where"} and g["where"] for g in body["guided"])
+
+
+def test_the_switch_writes_and_removes_our_entry_and_remembers_it(call, user, tmp_path):
+    (user / ".cursor").mkdir()
+    (user / ".qwen").mkdir()
+    body = call("POST /api/connect", {"key": "cursor", "on": True})
+    assert states(body) == {"cursor": "connected"} and body == call("GET /api/connect")   # the same shape as the page's read
+    assert json.loads((user / ".cursor" / "mcp.json").read_text())["mcpServers"]["dear-job-seeker"]["command"] == "/opt/app/bin/djs"
+    assert saved(tmp_path)["connect"] == {"on": ["cursor"], "asked": False}
+    call("POST /api/connect", {"key": "qwen-code", "on": True})
+    assert saved(tmp_path)["connect"]["on"] == ["cursor", "qwen-code"]
+    body = call("POST /api/connect", {"key": "cursor", "on": False})
+    assert states(body) == {"qwen-code": "connected"} and saved(tmp_path)["connect"]["on"] == ["qwen-code"]
+    assert json.loads((user / ".cursor" / "mcp.json").read_text()) == {"mcpServers": {}}
+    assert call("POST /api/connect", {"key": "qwen-code", "on": True}) == call("GET /api/connect")   # twice: no change, no error
+
+
+def test_the_switch_says_in_chinese_when_it_cannot(call, user, tmp_path):
+    assert call("POST /api/connect", {"key": "kiro", "on": True}) == {"error": "没有检测到 Kiro"}   # not on this computer
+    assert call("POST /api/connect", {"key": "nope", "on": True}) == {"error": "未知的应用"}
+    assert call("POST /api/connect", {"on": True}) == {"error": "未知的应用"}
+    assert not (user / ".kiro").exists() and not (tmp_path / "ui_prefs.json").exists()
+    (user / ".cursor").mkdir()
+    config = user / ".cursor" / "mcp.json"
+    config.write_text("// mine\n{}")
+    wrong = {"error": f"配置文件读不懂（可能带有注释）：{config}，请改用“复制配置”手动添加"}
+    assert call("POST /api/connect", {"key": "cursor", "on": True}) == wrong
+    assert config.read_text() == "// mine\n{}" and not (tmp_path / "ui_prefs.json").exists()   # not switched on
+
+
+def test_switching_off_forgets_the_assistant_even_when_its_file_cannot_be_edited(call, user, tmp_path):
+    (user / ".cursor").mkdir()
+    call("POST /api/connect", {"key": "cursor", "on": True})
+    config = user / ".cursor" / "mcp.json"
+    config.write_text("// since edited by hand\n{}")
+    assert "读不懂" in call("POST /api/connect", {"key": "cursor", "on": False})["error"]
+    assert saved(tmp_path)["connect"]["on"] == []   # it is not refreshed at the next start any more
+    assert config.read_text() == "// since edited by hand\n{}"
+
+
+def test_connect_many_connects_the_ticked_ones_found_here_and_names_the_ones_that_fail(call, user, tmp_path):
+    for folder in (".cursor", ".gemini", ".qwen"):
+        (user / folder).mkdir()
+    (user / ".qwen" / "settings.json").write_text("{ // not json")
+    keys = ["cursor", "qwen-code", "gemini-cli", "kiro", "nope", "cursor"]   # Kiro is not here, nope is not an assistant
+    body = call("POST /api/connect_many", {"keys": keys})
+    assert body["failed"] == [{"label": "Qwen Code", "error": f"配置文件读不懂（可能带有注释）：{user / '.qwen' / 'settings.json'}，请改用“复制配置”手动添加"}]
+    assert {k: v for k, v in body.items() if k != "failed"} == call("GET /api/connect")   # the same shape plus `failed`
+    assert states(body) == {"gemini-cli": "connected", "cursor": "connected", "qwen-code": "unreadable"}
+    assert saved(tmp_path)["connect"] == {"on": ["cursor", "gemini-cli"], "asked": True}   # in the order they went on
+    assert not (user / ".kiro").exists()
+    assert call("POST /api/connect_many", {"keys": ["cursor"]})["failed"] == []   # again: nothing to do, nothing wrong
+    assert saved(tmp_path)["connect"] == {"on": ["cursor", "gemini-cli"], "asked": True}   # in the order they went on
+
+
+def test_connect_many_with_nothing_ticked_still_marks_the_card_as_answered(call, user, tmp_path):
+    assert call("POST /api/connect_many", {"keys": []})["failed"] == [] and call("GET /api/connect")["asked"] is True
+    assert saved(tmp_path)["connect"] == {"on": [], "asked": True}
+
+
+def test_connect_asked_only_marks_it_asked(call, user, tmp_path):
+    (user / ".cursor").mkdir()
+    call("POST /api/connect", {"key": "cursor", "on": True})
+    body = call("POST /api/connect_asked")
+    assert body["asked"] is True and body == call("GET /api/connect") and "failed" not in body
+    assert saved(tmp_path)["connect"] == {"on": ["cursor"], "asked": True}   # nothing was connected or disconnected by it
+    (user / ".gemini").mkdir()
+    assert states(call("POST /api/connect_asked")) == {"cursor": "connected"}   # a newly found assistant is not connected unasked
+
+
+def test_the_connection_prefs_and_the_speed_preset_share_one_file_without_losing_each_other(call, user, tmp_path):
+    call("POST /api/frequency_preset", {"preset": "fast"})
+    call("POST /api/connect_asked")
+    assert saved(tmp_path) == {"preset": "fast", "connect": {"on": [], "asked": True}}
+    call("POST /api/frequency_preset", {"preset": "steady"})
+    assert saved(tmp_path) == {"preset": "steady", "connect": {"on": [], "asked": True}}
+    (tmp_path / "ui_prefs.json").write_text(json.dumps({"preset": "fast", "connect": {"on": ["cursor", "gone-app"]}}))
+    assert ui_api.connect_prefs() == {"on": ["cursor"], "asked": False}   # an app that is no longer known is dropped
+
+
+def test_the_app_refreshes_the_connections_the_user_switched_on_before_the_window_opens(call, user, tmp_path, monkeypatch, capsys):
+    for folder in (".cursor", ".qwen"):
+        (user / folder).mkdir()
+    call("POST /api/connect", {"key": "cursor", "on": True})
+    (user / ".qwen" / "settings.json").write_text(json.dumps({"mcpServers": {"dear-job-seeker": {"command": "/old/djs"}}}))   # not switched on
+    monkeypatch.setattr(sys, "executable", "/new/place/python")   # the app moved
+    started = []
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(create_window=lambda *a, **k: None, start=lambda: started.append(1)))
+    monkeypatch.setattr(ui_app.engine, "start_worker", lambda: None)
+    monkeypatch.setattr(ui_app.service, "start_login_check", lambda: None)
+    monkeypatch.setattr(ui_app.service, "shutdown", lambda: None)
+    ui_app.main([])
+    entry = lambda name: json.loads((user / name / ("mcp.json" if name == ".cursor" else "settings.json")).read_text())["mcpServers"]["dear-job-seeker"]   # noqa: E731
+    assert entry(".cursor")["command"] == "/new/place/djs" and entry(".qwen") == {"command": "/old/djs"} and started == [1]
+
+    def fail(keys):
+        raise RuntimeError("secret internals")
+    monkeypatch.setattr(ui_app.connect, "sync", fail)
+    ui_app.main([])
+    assert started == [1, 1] and "secret internals" in capsys.readouterr().err   # the window opens anyway; the detail is for the terminal
+    monkeypatch.setattr(ui_app.connect, "sync", lambda keys: {"cursor": "没能写入配置文件"})
+    ui_app.main([])
+    assert started == [1, 1, 1] and "cursor" in capsys.readouterr().err   # the ones that failed are named there, and nothing more

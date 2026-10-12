@@ -6,12 +6,12 @@ import sys
 import traceback
 from pathlib import Path
 
-from djs import db, engine, envfile, service, ui_api
+from djs import connect, db, engine, envfile, service, ui_api
 
 UI_DIR = Path(__file__).with_name("ui")
 # One classic script, no modules: the files share a scope and run in this order (a file may only use, at load time,
 # what an earlier one defined).
-SCRIPTS = ("core.js", "components.js", "login.js", "search.js", "results.js", "logins.js", "settings.js", "main.js")
+SCRIPTS = ("core.js", "components.js", "connect.js", "login.js", "search.js", "results.js", "logins.js", "settings.js", "main.js")
 
 
 def page() -> str:
@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
     engine.start_worker()
     service.start_login_check()
+    try:  # the assistants the user switched on get our entry refreshed (the app may have moved); never stops the app
+        for key, error in connect.sync(ui_api.connect_prefs()["on"]).items():
+            print(f"djs: could not refresh the {key} connection: {error}", file=sys.stderr)
+    except Exception:
+        traceback.print_exc()
     webview.create_window("找岗位助手", html=page(), js_api=Api(), width=1280, height=860, min_size=(960, 640))
     try:
         webview.start()

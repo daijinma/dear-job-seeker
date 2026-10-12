@@ -162,6 +162,81 @@ def test_the_fake_auth_covers_everything_the_engine_and_service_ask_of_auth():
     assert asked and asked <= set(dir(FakeAuth)), asked - set(dir(FakeAuth))
 
 
+# The four /api/connect routes of the page, in memory: the real ones read and write the user's config files, and the
+# page needs only the shape of their answers (djs.connect has its own tests).
+FAKE_CONFIG = '{\n  "mcpServers": {\n    "dear-job-seeker": {\n      "command": "/fake/djs"\n    }\n  }\n}'
+FAKE_TARGETS = [   # key, label, group, path
+    ("claude-code", "Claude Code", "intl", "~/.claude.json"),
+    ("claude-desktop", "Claude Desktop", "intl", "~/Library/Application Support/Claude/claude_desktop_config.json"),
+    ("codex", "Codex", "intl", "~/.codex/config.toml"),
+    ("gemini-cli", "Gemini CLI", "intl", "~/.gemini/settings.json"),
+    ("antigravity", "Antigravity", "intl", "~/.gemini/antigravity/mcp_config.json"),
+    ("cursor", "Cursor", "intl", "~/.cursor/mcp.json"),
+    ("kiro", "Kiro", "intl", "~/.kiro/settings/mcp.json"),
+    ("opencode", "OpenCode", "intl", "~/.config/opencode/opencode.json"),
+    ("workbuddy", "WorkBuddy", "cn", "~/.workbuddy/mcp.json"),
+    ("codebuddy", "CodeBuddy", "cn", "~/.codebuddy/.mcp.json"),
+    ("qwen-code", "Qwen Code", "cn", "~/.qwen/settings.json"),
+    ("kimi-code", "Kimi Code", "cn", "~/.kimi-code/mcp.json"),
+]
+FAKE_GUIDED = [("qoder", "Qoder", "设置 → MCP → 我的服务 → 添加，粘贴配置"),
+               ("trae", "Trae / Trae CN", "设置 → MCP → 添加 → 手动配置，粘贴配置"),
+               ("lingma", "通义灵码", "设置 → MCP 服务 → 添加，粘贴配置"),
+               ("cherry-studio", "Cherry Studio", "设置 → MCP 服务器 → 添加 → 从 JSON 导入，粘贴配置")]
+CONNECT_ROUTES = ("GET /api/connect", "POST /api/connect", "POST /api/connect_many", "POST /api/connect_asked")
+REAL_CONNECT = {route: ui_api.ROUTES.get(route) for route in CONNECT_ROUTES}   # before any test swaps them for the fake
+
+
+class FakeConnect:
+    """Nothing is installed on the fake computer until a test lists it in `found`; `calls` is what the page posted,
+    `refuse` maps a key to the refusal its write answers with, and `gate` holds back the next GET until it is set."""
+
+    def __init__(self):
+        self.found, self.state, self.asked = set(), {k: "off" for k, *_ in FAKE_TARGETS}, False
+        self.calls, self.refuse, self.gate = [], {}, None
+
+    def answer(self):
+        return {"command": "/fake/djs", "asked": self.asked, "config": FAKE_CONFIG,
+                "targets": [{"key": k, "label": label, "group": g, "detected": k in self.found, "state": self.state[k], "path": path}
+                            for k, label, g, path in FAKE_TARGETS],
+                "guided": [{"key": k, "label": label, "where": where} for k, label, where in FAKE_GUIDED]}
+
+    def read(self, conn, a):
+        gate, self.gate = self.gate, None
+        if gate:
+            gate.wait(20)
+        if "get" in self.refuse:
+            raise ValueError(self.refuse["get"])
+        return self.answer()
+
+    def write(self, conn, a):
+        self.calls.append(("POST /api/connect", a))
+        if a["key"] in self.refuse:
+            raise ValueError(self.refuse[a["key"]])
+        self.state[a["key"]] = "connected" if a["on"] else "off"
+        return self.answer()
+
+    def many(self, conn, a):
+        self.calls.append(("POST /api/connect_many", a))
+        failed = []
+        for key in a["keys"]:
+            if key in self.refuse:
+                failed.append({"label": next(label for k, label, *_ in FAKE_TARGETS if k == key), "error": self.refuse[key]})
+            elif key in self.found:
+                self.state[key] = "connected"
+        self.asked = True
+        return {**self.answer(), "failed": failed}
+
+    def ask_later(self, conn, a):
+        self.calls.append(("POST /api/connect_asked", a))
+        self.asked = True
+        return self.answer()
+
+    def install(self, mp):
+        for route, fn in zip(CONNECT_ROUTES, (self.read, self.write, self.many, self.ask_later)):
+            mp.setitem(ui_api.ROUTES, route, fn)
+
+
 def jobs(name, n, start=1, **extra):
     """Whole jobs by default: a title, a company, a city, a salary and (unless `jd=None`) a description."""
     cities = ["杭州", "杭州", "上海", "杭州·滨江区", "杭州·余杭区"]
@@ -183,7 +258,7 @@ def boot(mp, home):
     mp.setattr(ui_api, "downloads", lambda: home / "Downloads")
     mp.setattr(ui_api, "stamp", lambda: STAMP)
     app = SimpleNamespace(provs=provs, auth=auth, home=home, downloads=home / "Downloads", mp=mp, gates={}, blocked=set(),
-                          broken=set(), requests=[], calls=Counter(), bridge_down=False, js_errors=[], detail_gates={},
+                          broken=set(), requests=[], calls=Counter(), bridge_down=False, js_errors=[], detail_gates={}, connect=FakeConnect(),
                           data={"nc": {KEYWORD: jobs("牛客", 25, jd="1. 负责前端开发\n2. 熟悉 Vue / React")},
                                 "gp": {KEYWORD: jobs("国聘", 60, 100, jd=None)}, "xh": {},
                                 "zl": {KEYWORD: jobs("智联", 40, 300)}, "zz": {KEYWORD: jobs("中智", 3, 500)}})
@@ -207,6 +282,7 @@ def boot(mp, home):
 
     real = egress.make_client
     mp.setattr(egress, "make_client", lambda *a, **k: real(*a, transport=httpx.MockTransport(handler), **k))
+    app.connect.install(mp)   # no assistant on this computer unless a test says so
     engine.start_worker()
     return app
 
@@ -1480,7 +1556,7 @@ def test_settings_proxy_list(page, app):
     page.get_by_label("代理服务器地址").press("Enter")
     expect(page.locator("#toast")).to_have_text("代理地址的格式不对，例如 http://127.0.0.1:7890")
     page.get_by_label("代理服务器地址").fill("http://u:pw@127.0.0.1:9")
-    page.get_by_role("button", name="添加").click()
+    page.get_by_role("button", name="添加", exact=True).click()
     row = page.locator(".item", has_text="127.0.0.1:9")
     expect(row).to_contain_text("http://u:***@127.0.0.1:9")   # the password is never shown
     assert "pw@" not in page.content()
@@ -1848,3 +1924,374 @@ def test_no_horizontal_scroll_and_the_grid_follows_the_width(browser, app, size,
         page.wait_for_timeout(300)
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (size, hash)
         page.context.close()
+
+
+# ---------------------------------------------------------------- 连接 AI 助手
+def mixed(app):
+    """Five assistants on this computer: WorkBuddy and Qwen Code (国内), Claude Code, Codex and Cursor (其他)."""
+    app.connect.found.update({"claude-code", "codex", "cursor", "workbuddy", "qwen-code"})
+    app.connect.state.update({"cursor": "connected", "codex": "stale", "qwen-code": "unreadable"})
+
+
+def go_settings(page):
+    page.get_by_role("link", name="设置").click()
+    card = page.locator("#connect-card")
+    expect(card.get_by_role("heading", name="连接 AI 助手")).to_be_visible()
+    return card
+
+
+def assistant(page, label, where="#connect-card"):
+    return page.locator(f"{where} .item", has=page.get_by_text(label, exact=True))
+
+
+def connect_groups(page):
+    """[[title, [names]], ...] of the assistants found on this computer, as the settings card lists them."""
+    return page.evaluate("""() => [...document.querySelectorAll('#connect-card .group')]
+      .map((g) => [g.querySelector('h3').innerText, [...g.querySelectorAll('.item-text b')].map((b) => b.innerText)])""")
+
+
+def toast(page):
+    return page.locator("#toast")
+
+
+def test_the_settings_card_lists_what_is_on_this_computer_by_group_and_folds_the_rest_away(page, app):
+    mixed(app)
+    card = go_settings(page)
+    expect(card).to_contain_text("让你电脑上的 AI 助手直接用本程序查岗位，不用自己改配置文件。")
+    assert connect_groups(page) == [["国内应用", ["WorkBuddy", "Qwen Code"]], ["其他", ["Claude Code", "Codex", "Cursor"]]]   # 国内 first
+    states = {"WorkBuddy": ("未连接 · ~/.workbuddy/mcp.json", "false"), "Qwen Code": ("配置文件读不懂，请用复制配置 · ~/.qwen/settings.json", "false"),
+              "Claude Code": ("未连接 · ~/.claude.json", "false"), "Codex": ("需要更新 · ~/.codex/config.toml", "true"),
+              "Cursor": ("已连接 · ~/.cursor/mcp.json", "true")}
+    for label, (hint, checked) in states.items():
+        row = assistant(page, label)
+        expect(row.locator("small")).to_have_text(hint)
+        expect(row.get_by_role("switch", name=f"连接 {label}")).to_have_attribute("aria-checked", checked)
+    expect(card.get_by_role("switch")).to_have_count(5)   # an assistant that is not here has no switch
+    expect(assistant(page, "Qwen Code").get_by_role("switch")).to_be_disabled()   # a file we cannot read is not written to
+    expect(assistant(page, "Codex").get_by_role("button", name="更新")).to_be_visible()   # only the one that needs it
+    expect(card.get_by_role("button", name="更新")).to_have_count(1)
+    expect(assistant(page, "Cursor").get_by_role("button")).to_have_count(0)   # just the switch
+
+    missing = page.get_by_role("button", name="没检测到的应用")   # names only, folded
+    expect(missing).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#connect-missing")).to_be_hidden()
+    missing.click()
+    expect(page.locator("#connect-missing .pill")).to_have_text(
+        ["Claude Desktop", "Gemini CLI", "Antigravity", "Kiro", "OpenCode", "CodeBuddy", "Kimi Code"])
+    expect(page.locator("#connect-missing").get_by_role("button")).to_have_count(0)
+
+    guided = page.get_by_role("button", name="手动添加（没有公开配置文件的应用）")
+    expect(page.locator("#connect-guided")).to_be_hidden()
+    guided.click()
+    rows = page.locator("#connect-guided .item")
+    expect(rows.locator("b")).to_have_text(["Qoder", "Trae / Trae CN", "通义灵码", "Cherry Studio"])
+    expect(rows.nth(0).locator("small")).to_have_text("设置 → MCP → 我的服务 → 添加，粘贴配置")
+    expect(rows.nth(3).locator("small")).to_have_text("设置 → MCP 服务器 → 添加 → 从 JSON 导入，粘贴配置")
+    expect(rows.get_by_role("button", name="复制配置")).to_have_count(4)
+    assert page.evaluate(NAMELESS) == []
+
+
+def test_the_settings_card_says_so_when_nothing_is_found_and_keeps_the_manual_way(page, app):
+    card = go_settings(page)
+    expect(card).to_contain_text("这台电脑上还没有找到 AI 助手")
+    expect(card.get_by_role("switch")).to_have_count(0)
+    page.get_by_role("button", name="没检测到的应用").click()
+    expect(page.locator("#connect-missing .pill")).to_have_count(12)
+    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
+    expect(page.locator("#connect-guided .item")).to_have_count(4)
+
+
+def test_a_switch_writes_the_entry_and_tells_what_happened(page, app):
+    mixed(app)
+    go_settings(page)
+    claude = assistant(page, "Claude Code")
+    switch = claude.get_by_role("switch")
+    switch.click()
+    expect(toast(page)).to_have_text("已连接 Claude Code，重启它后生效")
+    expect(switch).to_have_attribute("aria-checked", "true")
+    expect(claude.locator("small")).to_have_text("已连接 · ~/.claude.json")
+    expect(switch).to_be_focused()   # the card was painted again: the keyboard stays where it was
+    switch.click()
+    expect(toast(page)).to_have_text("已断开 Claude Code")
+    expect(switch).to_have_attribute("aria-checked", "false")
+    assistant(page, "Cursor").get_by_role("switch").click()   # one that is on is switched off the same way
+    expect(assistant(page, "Cursor").get_by_role("switch")).to_have_attribute("aria-checked", "false")
+    assert app.connect.calls == [("POST /api/connect", {"key": "claude-code", "on": True}), ("POST /api/connect", {"key": "claude-code", "on": False}),
+                                 ("POST /api/connect", {"key": "cursor", "on": False})]
+    assert app.connect.state["cursor"] == "off"
+
+
+def test_an_entry_that_points_elsewhere_is_brought_up_to_date_with_one_button(page, app):
+    mixed(app)
+    go_settings(page)
+    codex = assistant(page, "Codex")
+    codex.get_by_role("button", name="更新").click()
+    expect(toast(page)).to_have_text("已更新 Codex，重启它后生效")
+    expect(codex.locator("small")).to_have_text("已连接 · ~/.codex/config.toml")
+    expect(codex.get_by_role("button", name="更新")).to_have_count(0)
+    expect(codex.get_by_role("switch")).to_have_attribute("aria-checked", "true")
+    assert app.connect.calls == [("POST /api/connect", {"key": "codex", "on": True})]
+
+
+def test_a_refused_write_is_said_in_words_and_leaves_the_switch_where_it_was(page, app):
+    mixed(app)
+    app.connect.refuse["cursor"] = "配置文件正在被其他程序修改，请稍后再试"
+    go_settings(page)
+    switch = assistant(page, "Cursor").get_by_role("switch")
+    switch.click()
+    expect(toast(page)).to_have_text("配置文件正在被其他程序修改，请稍后再试")
+    expect(toast(page)).to_have_class(re.compile(r"\bbad\b"))
+    expect(switch).to_have_attribute("aria-checked", "true")
+    expect(switch).to_be_enabled()   # it can be tried again
+    del app.connect.refuse["cursor"]
+    switch.click()
+    expect(switch).to_have_attribute("aria-checked", "false")
+
+
+def test_what_was_opened_in_the_card_stays_open_when_it_is_painted_again(page, app):
+    mixed(app)
+    go_settings(page)
+    page.get_by_role("button", name="没检测到的应用").click()
+    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
+    assistant(page, "Claude Code").get_by_role("switch").click()
+    expect(assistant(page, "Claude Code").get_by_role("switch")).to_have_attribute("aria-checked", "true")
+    expect(page.locator("#connect-missing")).to_be_visible()
+    expect(page.locator("#connect-guided")).to_be_visible()
+
+
+COPY_OK = """() => { window.copied = [];
+  Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async (t) => { copied.push(t); }}}); }"""
+
+
+def test_copy_config_puts_the_config_on_the_clipboard(page, app):
+    mixed(app)
+    go_settings(page)
+    page.evaluate(COPY_OK)
+    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
+    assistant(page, "通义灵码").get_by_role("button", name="复制配置").click()
+    expect(toast(page)).to_have_text("已复制")
+    assert page.evaluate("copied") == [FAKE_CONFIG]
+    assistant(page, "Qwen Code").get_by_role("button", name="复制配置").click()   # a file we cannot read: the same text, to paste by hand
+    until(page, lambda: len(page.evaluate("copied")) == 2)
+    assert page.evaluate("copied") == [FAKE_CONFIG] * 2
+    assert not app.connect.calls   # copying changes nothing on the computer
+
+
+def test_copy_config_falls_back_to_the_old_copy_command_where_the_window_has_no_clipboard_api(page, app):
+    go_settings(page)
+    page.evaluate("""() => { window.copied = [];
+      Object.defineProperty(navigator, 'clipboard', {configurable: true, value: undefined});
+      document.execCommand = (cmd) => { copied.push([cmd, document.querySelector('textarea').value]); return true; }; }""")
+    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
+    copy = assistant(page, "Qoder").get_by_role("button", name="复制配置")
+    copy.click()
+    expect(toast(page)).to_have_text("已复制")
+    assert page.evaluate("copied") == [["copy", FAKE_CONFIG]]
+    expect(page.locator("textarea")).to_have_count(0)   # the helper box is gone again
+    expect(copy).to_be_focused()   # and the keyboard is back on the button it was on
+
+
+def test_a_copy_that_fails_says_so_plainly(page, app):
+    go_settings(page)
+    page.evaluate("""() => { Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async () => { throw new Error('denied'); }}});
+      document.execCommand = () => false; }""")
+    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
+    assistant(page, "Qoder").get_by_role("button", name="复制配置").click()
+    expect(toast(page)).to_have_text("没能复制到剪贴板，请再试一次")
+    expect(toast(page)).to_have_class(re.compile(r"\bbad\b"))
+    page.evaluate("() => { document.execCommand = () => { throw new Error('not allowed'); }; }")   # a window that throws instead of answering false
+    assistant(page, "Qoder").get_by_role("button", name="复制配置").click()
+    page.wait_for_timeout(300)
+    expect(toast(page)).to_have_text("没能复制到剪贴板，请再试一次")
+    expect(page.locator("textarea")).to_have_count(0)
+
+
+def invitation(page):
+    return page.locator("#connect-ask .connect-ask")
+
+
+def test_the_first_search_page_invites_to_connect_every_assistant_found_all_ticked(page, app):
+    mixed(app)
+    page.reload()
+    card = invitation(page)
+    expect(card.get_by_role("heading", name="把“找岗位助手”接入你电脑上的 AI 助手？")).to_be_visible()
+    expect(card.locator(".item b")).to_have_text(["Claude Code", "Codex", "Cursor", "WorkBuddy", "Qwen Code"])
+    for label in ("Claude Code", "Codex", "Cursor", "WorkBuddy"):
+        expect(card.get_by_role("button", name=label)).to_have_attribute("aria-pressed", "true")
+    expect(assistant(page, "Claude Code", "#connect-ask").locator("small")).to_have_text("~/.claude.json")
+    expect(assistant(page, "Cursor", "#connect-ask").locator("small")).to_have_text("已连接")   # nothing left to write there
+    unreadable = assistant(page, "Qwen Code", "#connect-ask")   # offered a copy in the settings, not a tick that would fail
+    expect(unreadable).to_contain_text("配置文件读不懂，请到设置里复制配置")
+    expect(unreadable.locator("button")).to_have_count(0)
+    expect(card.get_by_role("button", name="接入", exact=True)).to_be_visible()
+    expect(card.get_by_role("button", name="以后再说")).to_be_visible()
+    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()   # the form is still where the keyboard is
+    form, examples = page.locator("form.searchbar").bounding_box(), page.locator(".examples").bounding_box()
+    box = card.bounding_box()
+    assert box["y"] > examples["y"] + examples["height"] > form["y"] + form["height"]   # under the form and its examples: they never move for it
+    assert page.evaluate(NAMELESS) == []
+
+
+def test_connect_writes_the_ticked_assistants_and_the_card_is_gone_for_good(page, app):
+    mixed(app)
+    page.reload()
+    card = invitation(page)
+    card.get_by_role("button", name="Cursor").click()   # un-tick one
+    expect(card.get_by_role("button", name="Cursor")).to_have_attribute("aria-pressed", "false")
+    expect(card.get_by_role("button", name="Cursor")).to_be_focused()
+    card.get_by_role("button", name="接入", exact=True).click()
+    expect(toast(page)).to_have_text("已接入 3 个 AI 助手，重启这些应用后生效")
+    expect(page.locator("#connect-ask")).to_be_empty()
+    assert app.connect.calls == [("POST /api/connect_many", {"keys": ["claude-code", "codex", "workbuddy"]})]   # only the ticked, nothing unreadable
+    assert app.connect.state["claude-code"] == "connected" and app.connect.state["cursor"] == "connected"
+    page.reload()
+    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()
+    page.wait_for_timeout(300)
+    expect(page.locator("#connect-ask")).to_be_empty()   # asked: it does not come back
+    go_settings(page)
+    expect(assistant(page, "Claude Code").locator("small")).to_have_text("已连接 · ~/.claude.json")
+
+
+def test_connect_with_nothing_ticked_asks_for_a_tick_instead_of_doing_nothing(page, app):
+    mixed(app)
+    page.reload()
+    card = invitation(page)
+    for label in ("Claude Code", "Codex", "Cursor", "WorkBuddy"):
+        card.get_by_role("button", name=label).click()
+    card.get_by_role("button", name="接入", exact=True).click()
+    expect(toast(page)).to_have_text("请先勾选要接入的 AI 助手")
+    expect(card).to_be_visible()
+    assert app.connect.calls == []
+
+
+def test_connect_names_what_could_not_be_written_and_leads_to_the_settings(page, app):
+    mixed(app)
+    app.connect.refuse["codex"] = "配置文件读不懂（可能带有注释）：~/.codex/config.toml，请改用“复制配置”手动添加"
+    page.reload()
+    invitation(page).get_by_role("button", name="接入", exact=True).click()
+    expect(toast(page)).to_contain_text("已接入 3 个；没接入成功：Codex（配置文件读不懂（可能带有注释）：~/.codex/config.toml，请改用“复制配置”手动添加）")
+    expect(toast(page)).to_have_class(re.compile(r"\bbad\b"))
+    expect(page.locator("#connect-ask")).to_be_empty()
+    toast(page).get_by_role("button", name="去设置").click()
+    expect(page).to_have_url(re.compile(r"#/settings$"))
+    expect(page.locator("#connect-card")).to_be_visible()
+
+
+def test_later_only_marks_it_asked(page, app):
+    mixed(app)
+    page.reload()
+    invitation(page).get_by_role("button", name="以后再说").click()
+    expect(toast(page)).to_have_text("好的，想接入时到“设置”里就行")
+    expect(page.locator("#connect-ask")).to_be_empty()
+    assert app.connect.calls == [("POST /api/connect_asked", {})]
+    assert app.connect.state["claude-code"] == "off"   # nothing was written
+    page.reload()
+    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()
+    page.wait_for_timeout(300)
+    expect(page.locator("#connect-ask")).to_be_empty()
+
+
+def test_the_invitation_is_not_there_when_it_was_answered_or_there_is_nothing_to_offer_it_for(page, app):
+    page.reload()   # nothing on this computer
+    page.wait_for_timeout(300)
+    expect(page.locator("#connect-ask")).to_be_empty()
+    app.connect.found.update({"qwen-code"})   # only an assistant whose file we cannot read: nothing to tick
+    app.connect.state["qwen-code"] = "unreadable"
+    page.reload()
+    page.wait_for_timeout(300)
+    expect(page.locator("#connect-ask")).to_be_empty()
+    mixed(app)
+    app.connect.asked = True
+    page.reload()
+    page.wait_for_timeout(300)
+    expect(page.locator("#connect-ask")).to_be_empty()
+    app.connect.asked = False
+    app.connect.state.update({k: "connected" for k in app.connect.found if k != "qwen-code"})   # all found are connected already (by hand, or in the settings)
+    page.reload()
+    page.wait_for_timeout(300)
+    expect(page.locator("#connect-ask")).to_be_empty()
+    app.connect.state["codex"] = "stale"   # one that points elsewhere is worth the question
+    page.reload()
+    expect(invitation(page)).to_be_visible()   # the same page does show it when it is due
+
+
+def test_a_failure_to_ask_is_not_worth_a_message_and_never_stops_the_search_form(page, app):
+    mixed(app)
+    app.connect.refuse["get"] = "出了点问题"
+    page.reload()
+    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()
+    finish_search(page)
+    expect(page.locator("#connect-ask")).to_be_empty()
+    expect(toast(page)).not_to_have_class(re.compile(r"\bshow\b"))
+
+
+def test_the_search_form_does_not_wait_for_the_invitation(page, app):
+    mixed(app)
+    gate = app.connect.gate = threading.Event()   # the next GET /api/connect is held back
+    try:
+        page.reload()
+        finish_search(page)   # the whole search runs while the answer is still outstanding
+        expect(page.locator("#connect-ask")).to_be_empty()
+    finally:
+        gate.set()
+    expect(invitation(page)).to_be_visible()   # and the invitation comes when the answer does
+
+
+def test_an_answer_that_comes_after_the_page_was_left_paints_nothing(page, app):
+    mixed(app)
+    gate = app.connect.gate = threading.Event()
+    page.reload()
+    go_settings(page)   # the page is left while the first answer is outstanding
+    gate.set()
+    page.wait_for_timeout(400)
+    expect(page.locator("#connect-card")).to_be_visible()
+    page.get_by_role("link", name="查找", exact=True).click()
+    expect(invitation(page)).to_be_visible()   # coming back asks again
+    # the fixture asserts that the late answer raised no error in the page
+
+
+@pytest.mark.parametrize("size", [(700, 800), (960, 640), (1280, 860)])
+def test_the_card_and_the_invitation_fit_the_window(browser, app, size):
+    mixed(app)
+    page = open_page(browser, app, size)
+    expect(invitation(page)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), size
+    assert page.evaluate("document.querySelector('.connect-ask .items').getBoundingClientRect().width <= document.querySelector('.connect-ask').getBoundingClientRect().width")
+    page.get_by_role("link", name="设置").click()
+    expect(page.locator("#connect-card")).to_be_visible()
+    page.get_by_role("button", name="没检测到的应用").click()
+    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
+    page.wait_for_timeout(200)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), size
+    page.context.close()
+
+
+@pytest.mark.skipif(not all(REAL_CONNECT.values()), reason="the connect routes are not there")
+def test_the_real_routes_connect_and_disconnect_through_the_page(browser, app):
+    """The page against djs.connect itself, on a made-up home folder: the answers it reads and the files it leaves."""
+    me = app.home / "me"
+    (me / ".cursor").mkdir(parents=True)
+    (me / ".cursor" / "mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}\n')
+    for var in ("HOME", "USERPROFILE"):
+        app.mp.setenv(var, str(me))
+    app.mp.setenv("APPDATA", str(me / "AppData" / "Roaming"))
+    app.mp.delenv("KIMI_CODE_HOME", raising=False)
+    for route, fn in REAL_CONNECT.items():
+        app.mp.setitem(ui_api.ROUTES, route, fn)
+    page = open_page(browser, app)
+    card = invitation(page)
+    expect(card.locator(".item b")).to_have_text(["Cursor"])   # the only assistant with a folder here
+    card.get_by_role("button", name="接入", exact=True).click()
+    expect(page.locator("#toast")).to_have_text("已接入 1 个 AI 助手，重启这些应用后生效")
+    written = json.loads((me / ".cursor" / "mcp.json").read_text())
+    assert written["mcpServers"]["other"] == {"command": "x"}   # what was there stays
+    assert list(written["mcpServers"]["dear-job-seeker"]) == ["command", "args"]
+    assert (me / ".cursor" / "mcp.json.djs-bak").exists()   # the first change keeps the original
+    page.get_by_role("link", name="设置").click()
+    row = assistant(page, "Cursor")
+    expect(row.locator("small")).to_contain_text("已连接")
+    row.get_by_role("switch").click()
+    expect(row.get_by_role("switch")).to_have_attribute("aria-checked", "false")
+    assert "dear-job-seeker" not in json.loads((me / ".cursor" / "mcp.json").read_text())["mcpServers"]
+    assert json.loads((app.home / "ui_prefs.json").read_text())["connect"] == {"on": [], "asked": True}
+    page.context.close()

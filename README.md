@@ -19,7 +19,7 @@ A **local job-search client** for Chinese job sites that speaks MCP. One program
 2. 填岗位和城市，点「开始查找」。常用网站已经选好，几十秒到几分钟内结果陆续出来，进度在搜索框下面。
 3. 点「查看结果」：可以按网站、按月薪筛选，按综合、薪资或公司排序；点开岗位看完整描述，「打开原页面」去投递；「导出表格」会存进「下载」文件夹。
 4. 想要更全的结果，到「平台登录」用你自己的账号登录：BOSS 直聘和康强医疗网必须登录才能搜（BOSS 不登录的页面看不到薪资，列表也不可靠，所以从不在未登录时访问）。登录只在你自己的电脑上完成，账号信息不会上传。
-5. 想让 AI 助手替你找：把下载包里的 `djs` 配成 MCP 服务（见下面 [Use it from an AI client](#use-it-from-an-ai-client-mcp)），然后直接对它说「帮我找杭州的 Python 后端，月薪 1.5 万以上，挑 5 个」。
+5. 想让 AI 助手替你找：在「设置 → 连接 AI 助手」里打开你用的助手（Claude Code、WorkBuddy、CodeBuddy、Cursor、Codex、Qwen Code、Kimi Code 等；首次打开程序时也会问一次），然后直接对它说「帮我找杭州的 Python 后端，月薪 1.5 万以上，挑 5 个」。
 
 鱼泡直聘、前程无忧和 58同城需要你自己配置密钥才会参与查找（见 [Platforms that need keys](#platforms-that-need-keys)），不配置也不影响其他网站。
 
@@ -55,7 +55,20 @@ Login windows and BOSS 直聘 need a browser: an installed Chrome or Edge is use
 
 ## Use it from an AI client (MCP)
 
-The MCP server is the `djs` program over stdio. Pick one way to register it:
+The MCP server is the `djs` program over stdio. With the download, the app registers it for you: **设置 → 连接 AI 助手** lists the assistants it finds on this computer, one switch each (the first launch asks once). It writes only an entry named `dear-job-seeker` into the assistant's own config file, keeps a `.djs-bak` copy of the file before its first change, refuses a file it cannot read (for example one with comments), and re-points the entry at each start, so moving or updating the app does not break it.
+
+| Assistant | Config file it writes |
+|---|---|
+| Claude Code | `~/.claude.json` |
+| Claude Desktop | `claude_desktop_config.json` (macOS Application Support, Windows `%APPDATA%`) |
+| Codex | `~/.codex/config.toml` |
+| Gemini CLI / Antigravity | `~/.gemini/settings.json`, `~/.gemini/antigravity/mcp_config.json` |
+| Cursor / Kiro | `~/.cursor/mcp.json`, `~/.kiro/settings/mcp.json` |
+| OpenCode | `~/.config/opencode/opencode.json` |
+| WorkBuddy / CodeBuddy | `~/.workbuddy/mcp.json`, `~/.codebuddy/.mcp.json` |
+| Qwen Code / Kimi Code | `~/.qwen/settings.json`, `~/.kimi-code/mcp.json` (`$KIMI_CODE_HOME`) |
+
+Qoder, Trae, 通义灵码 and Cherry Studio have no documented config file: the same page offers 「复制配置」 and says where to paste it. Everything else, or by hand, pick one way to register it:
 
 | Where | MCP config |
 |---|---|

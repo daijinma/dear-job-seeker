@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from djs import db, providers, results, service, taskqueue
+from djs import connect, db, providers, results, service, taskqueue
 
 PRESETS = {"steady": 1.0, "standard": 0.7, "fast": 0.5}  # multipliers of each platform's default interval
 REVEAL_LABEL = "在访达中显示" if sys.platform == "darwin" else "在文件夹中显示"
@@ -30,6 +30,11 @@ def _prefs() -> dict:
     return json.loads(f.read_text()) if f.exists() else {}
 
 
+def _save_prefs(**kw) -> None:
+    """Merge these top-level keys into the preferences file."""
+    _prefs_file().write_text(json.dumps({**_prefs(), **kw}))
+
+
 def apply_preset(conn, key: str) -> dict:
     if key not in PRESETS:
         raise ValueError("未知的速度选项")
@@ -39,7 +44,7 @@ def apply_preset(conn, key: str) -> dict:
             conn.execute("UPDATE provider_settings SET interval=NULL WHERE provider=?", (name,))
         else:
             service.set_frequency(conn, name, interval=round(max(p.interval * PRESETS[key], p.min_interval), 2))
-    _prefs_file().write_text(json.dumps({**_prefs(), "preset": key}))
+    _save_prefs(preset=key)
     return {"preset": key}
 
 
@@ -168,6 +173,55 @@ def open_url(conn, a) -> dict:
     return {"ok": True}
 
 
+# ---- connecting the AI assistants on this computer
+def connect_prefs() -> dict:
+    """`on`: the assistants the user switched on (refreshed at every start); `asked`: the first-launch card is done."""
+    saved = _prefs().get("connect") or {}
+    known = {t.key for t in connect.TARGETS}
+    return {"on": [k for k in saved.get("on", []) if k in known], "asked": bool(saved.get("asked"))}
+
+
+def _save_connect(**kw) -> None:
+    _save_prefs(connect={**connect_prefs(), **kw})
+
+
+def connect_state(conn=None, a=None) -> dict:
+    return {"asked": connect_prefs()["asked"], **connect.status()}
+
+
+def connect_set(conn, a) -> dict:
+    """One assistant's switch: write or remove our entry there, and remember the choice."""
+    key, on = a.get("key") or "", connect_prefs()["on"]
+    if a.get("on"):
+        connect.connect(key)
+        _save_connect(on=[*on, key] if key not in on else on)
+    else:
+        _save_connect(on=[k for k in on if k != key])   # first: a file we cannot read must not keep the switch on
+        connect.disconnect(key)
+    return connect_state()
+
+
+def connect_many(conn, a) -> dict:
+    """The first-launch card's 接入: every ticked assistant found on this computer; the ones that fail are named."""
+    on, failed = connect_prefs()["on"], []
+    for key in dict.fromkeys(a.get("keys") or []):
+        target = next((t for t in connect.TARGETS if t.key == key and connect.detected(t)), None)
+        if target is None:   # not on this computer: nothing to write
+            continue
+        try:
+            connect.connect(key)
+            on = [*on, key] if key not in on else on
+        except ValueError as e:
+            failed.append({"label": target.label, "error": str(e)})
+    _save_connect(on=on, asked=True)
+    return {**connect_state(), "failed": failed}
+
+
+def connect_asked(conn, a) -> dict:
+    _save_connect(asked=True)
+    return connect_state()
+
+
 # ---- exporting a table: a file in the Downloads folder, no save dialog
 def downloads() -> Path:
     return Path.home() / "Downloads"
@@ -224,6 +278,10 @@ ROUTES = {
     "POST /api/export_csv": export_csv,
     "POST /api/reveal": reveal,
     "GET /api/about": about,
+    "GET /api/connect": connect_state,
+    "POST /api/connect": connect_set,
+    "POST /api/connect_many": connect_many,
+    "POST /api/connect_asked": connect_asked,
     "POST /api/login": lambda c, a: start_login(c, a.get("provider", "")),
     "POST /api/login_cancel": lambda c, a: cancel_login(c, a.get("provider", "")),
     "POST /api/login_check": check_login,
