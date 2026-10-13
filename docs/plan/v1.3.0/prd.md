@@ -2,6 +2,8 @@
 
 Baseline: v1.2.0 (`docs/plan/v1.2.0/`, decisions A19, A20, F36, F44). Only the change is written here.
 
+Build order (2026-10-13): v1.4.0 (self-update) is built first and releases as 1.4.0. This plan then releases under the next free number above it (1.5.0): an app only offers a release whose number is higher than its own.
+
 ## Why
 - Playwright's Node.js driver is 65–70 % of every download (Windows 107 of 166 MB, macOS 136–139 of 195–201 MB unpacked).
 - BOSS 直聘 and 猎聘 blank any page Playwright drives within 1–2 s (F36). The login window already avoids it (a plain browser read at the browser level). BOSS crawling still runs on Playwright: its list call (made right after load) works, its detail calls mostly fail (F44), so logged-in BOSS jobs carry salaries but no description and stay incomplete.

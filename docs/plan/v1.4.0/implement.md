@@ -1,5 +1,7 @@
 # v1.4.0 implementation order
 
+Status 2026-10-13: steps 1–8 done (T7 in `t7-result.md`, limit tests in `limits-result.md`, T5 passed 10 of 10); step 9 (release) follows the final check.
+
 Tests first within each step (red → green). Branch: `feat/self-update`, merged after step 7's check. Release numbers follow build order (next free 1.x.y); the plan version only orders plans. v1.4.0 is built before v1.3.0 (user, 2026-10-13).
 
 | Step | What | Check |
