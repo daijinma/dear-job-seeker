@@ -21,4 +21,4 @@ build-backend = "setuptools.build_meta"
 include = ["djs*"]
 
 [tool.setuptools.package-data]
-djs = ["schema.sql", "ui/*"]
+djs = ["schema.sql", "ui/*", "apply.sh", "apply.ps1"]

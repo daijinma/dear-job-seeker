@@ -7,10 +7,15 @@ fetch(client, payload, page) -> list[dict]
   - [] means ONLY "success code + expected structure + list really empty".
     Anything else MUST raise below — never return [] on a block/odd shape, or a blocked
     exit looks healthy.
+A StructureError whose response was a verification page is turned into Blocked (see _watched).
 Providers never sleep: pacing is enforced by the egress client (djs.egress / djs.pacer).
 """
 from __future__ import annotations
 
+import contextvars
+import functools
+import inspect
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -68,7 +73,21 @@ def retry_after(r) -> float | None:
         return None
 
 
+# A verification page (slider, captcha, "confirm you are human") a site serves with HTTP 200 instead of the data. It is
+# told from a page that changed only after a provider failed to read the response (see _watched), so a job text that
+# says 验证码 on a page that parses is never taken for one. Lower case: the page is lower-cased to match.
+CHALLENGE_MARKS = ("验证码", "滑动验证", "滑块验证", "安全验证", "访问验证", "人机验证", "请完成验证", "请按住滑块",
+                   "captcha", "geetest", "verify you are human", "just a moment", "_____tmd_____", "/punish")
+CHALLENGE_MAX = 30_000   # characters: such a page is small, a real page whose layout changed is not
+CHALLENGE_MAX_JSON = 2_000   # a refusal sent as JSON is a line or two: a JSON body larger than that holds job texts
+
+# The last response check_http saw. A context variable, so each worker thread has its own: two platforms failing at the
+# same moment never read each other's page.
+_checked: contextvars.ContextVar = contextvars.ContextVar("djs_checked_response", default=None)
+
+
 def check_http(r) -> None:
+    _checked.set(r)   # the response a provider is about to read: what challenge_mark looks at if it cannot
     if r.status_code == 401:
         raise LoginRequired("HTTP 401", retry_after=retry_after(r))
     if r.status_code in (403, 429):
@@ -85,6 +104,42 @@ def get_json(r) -> dict:
     if not isinstance(d, dict):
         raise StructureError(f"top level is {type(d).__name__}, not object")
     return d
+
+
+def challenge_mark(r) -> str | None:
+    """The first of CHALLENGE_MARKS that page `r` says; None for a page larger than CHALLENGE_MAX (a JSON body:
+    CHALLENGE_MAX_JSON), no response or no mark."""
+    text = r.text if r is not None else ""
+    is_json = text.lstrip()[:1] in ("{", "[")
+    if len(text) > (CHALLENGE_MAX_JSON if is_json else CHALLENGE_MAX):
+        return None
+    if is_json:   # its Chinese may come \u-escaped
+        try:
+            text = json.dumps(json.loads(text), ensure_ascii=False)
+        except (ValueError, RecursionError):   # not JSON after all: the text as it is
+            pass
+    text = text.lower()
+    return next((mark for mark in CHALLENGE_MARKS if mark in text), None)
+
+
+def _watched(call):
+    """A provider's fetch or detail that raises Blocked, not StructureError, when what it could not read was a
+    verification page: the site wants a person, so the exit rests and the task comes back much later, instead of asking
+    again within minutes and telling the user that the page changed."""
+    @functools.wraps(call)
+    def watched(self, *args, **kwargs):
+        _checked.set(None)
+        try:
+            return call(self, *args, **kwargs)
+        except StructureError as e:
+            mark = challenge_mark(_checked.get())
+            if mark is None:
+                raise
+            raise Blocked(f"{self.name}: a verification page instead of the data ({mark})") from e
+        finally:
+            _checked.set(None)
+    watched.challenge_watched = True
+    return watched
 
 
 def join_places(names) -> str | None:
@@ -182,6 +237,13 @@ class Provider:
     missing_reasons: dict[str, str] = {}
     login_transport: str | None = None  # transport to use while logged in when the user has not chosen one
                                         # (e.g. 'browser': the logged-in endpoint only answers a real page)
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for name in ("fetch", "detail"):   # every platform's own, wrapped once
+            call = cls.__dict__.get(name)
+            if inspect.isfunction(call) and not getattr(call, "challenge_watched", False):
+                setattr(cls, name, _watched(call))
 
     def missing_env(self) -> list[str]:
         return [n for n in self.requires_env if not os.environ.get(n, "").strip()]

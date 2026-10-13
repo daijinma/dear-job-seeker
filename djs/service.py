@@ -4,15 +4,18 @@ from __future__ import annotations
 import functools
 import importlib.metadata
 import json
+import sys
 import threading
 import time
+from pathlib import Path
 
 import httpx
 
-from djs import auth, browser, db, egress, engine, jobs, pacer, providers, query, taskqueue
+from djs import auth, browser, db, egress, engine, jobs, log, pacer, providers, query, taskqueue
 from djs.normalize import CORE
 from djs.providers.base import Blocked, FetchError, LoginRequired
 
+LOG = log.get("login")
 JOB_COLS = ("id, provider, source_job_id, task_id, title, company, city, district, education, experience, benefits, "
             "salary_text, salary_min, salary_max, salary_unit, salary_months, salary_month_min, salary_month_max, "
             "description, source_url, published_at, published_at_kind, missing, complete, detail_error, "
@@ -177,10 +180,15 @@ def _why(job: dict, element: str, logged_in, completing: bool) -> str:
         return "面议"
     if element == "salary" and _login_hides_salary(job["provider"], logged_in):
         return "需登录才能看到薪资"
-    if element == "description" and job.get("detail_error"):
+    failed = job.get("detail_error") if element == "description" else None
+    if failed and failed.startswith(jobs.GONE):
+        return "职位已下架"
+    if failed and not failed.startswith(jobs.REFUSED):
         return "详情获取失败"
     if completing:
         return "正在补全详情"
+    if failed:   # refused, and no task is going to ask again
+        return "网站拒绝了详情请求"
     return _platform_says(job["provider"], element) or f"平台未提供{CORE[element]}"
 
 
@@ -297,6 +305,8 @@ def _friendly(prov, exc: Exception) -> str:
         return f"{label}: login required; log in and try again"
     if isinstance(exc, Blocked):
         return f"{label} is limiting requests right now; try again later"
+    if str(exc).startswith(jobs.GONE):
+        return f"{label}: the posting is gone ({str(exc)[len(jobs.GONE):]})"
     return f"{label}: could not load the detail ({type(exc).__name__}: {exc})"
 
 
@@ -400,13 +410,23 @@ def search_status(conn, keyword, city=None) -> dict:
 
 
 def login(conn, provider) -> dict:
-    status = auth.login(provider, timeout=180)
+    LOG.info("login window for %s opened", provider)
+    try:
+        status = auth.login(provider, timeout=180)
+    except Exception as e:   # cancelled, timed out, closed by the user, no browser: the caller words it
+        LOG.info("login for %s ended without a login: %s: %s", provider, type(e).__name__, e)
+        raise
     resumed = taskqueue.resume_login(conn, provider) if status.get("logged_in") else 0
+    LOG.info("login for %s: %s, %d waiting tasks resumed", provider, "logged in" if status.get("logged_in") else "not logged in",
+             resumed)
     return {**status, "resumed_tasks": resumed}
 
 
 def login_cancel(conn, provider) -> dict:
-    return {"provider": provider, "cancelled": auth.cancel_login(provider)}
+    cancelled = auth.cancel_login(provider)
+    if cancelled:
+        LOG.info("login window for %s cancelled", provider)
+    return {"provider": provider, "cancelled": cancelled}
 
 
 def login_status(conn, provider=None) -> dict | list[dict]:
@@ -432,10 +452,19 @@ def login_check(conn, provider=None) -> dict | list[dict]:
     return auth.check(provider) if provider else check_all_logins()
 
 
+def _check_logins_at_start() -> None:
+    try:
+        for row in check_all_logins():
+            LOG.info("login check at start: %s is %s%s", row["provider"], row.get("state"),
+                     f" ({row['error']})" if row.get("error") else "")
+    except Exception:
+        LOG.exception("the login check at start failed")
+
+
 def start_login_check() -> None:
     """Once at startup, in the background: a dead session shows as expired before the first search, and startup
     never waits for a network request."""
-    threading.Thread(target=check_all_logins, daemon=True, name="djs-login-check").start()
+    threading.Thread(target=_check_logins_at_start, daemon=True, name="djs-login-check").start()
 
 
 def logout(conn, provider) -> dict:
@@ -478,6 +507,28 @@ def app_version() -> str | None:
         return importlib.metadata.version("dear-job-seeker")
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def _update() -> dict:
+    """The updater's state as {current, latest, state, note} (djs.update, in memory: no network, no wait). A build or an
+    updater that cannot answer says there is nothing to install."""
+    try:
+        from djs import update  # late: status must still answer when the updater cannot be loaded
+        got = update.current()
+        return {key: got[key] for key in ("current", "latest", "state", "note")}
+    except Exception:
+        return {"current": app_version(), "latest": None, "state": "none", "note": ""}
+
+
+def _app() -> dict:
+    """Which program answers: its version, whether it is the packaged app, and where it lives (the app bundle or the
+    install folder; the source folder otherwise). It shows an assistant that still runs an older copy than the app."""
+    frozen = bool(getattr(sys, "frozen", False))
+    path = Path(__file__).resolve().parent.parent
+    if frozen:
+        exe = Path(sys.executable).resolve()
+        path = next((p for p in exe.parents if p.suffix == ".app"), exe.parent)
+    return {"version": app_version() or "dev", "frozen": frozen, "path": str(path)}
 
 
 def _running(conn) -> dict[str, dict]:
@@ -556,9 +607,10 @@ def status(conn) -> dict:
     """What is going on, in one call: no network, well under a second. `workers` tells, per platform, whether THIS
     process's worker thread is alive, the task the platform runs right now and the tasks that failed and wait for their
     next try (the app, an MCP server and `djs work` each run workers on the same database). `exits` is the egress pool
-    as egress_list shows it, plus whether each exit is cooling down (egress.exits)."""
+    as egress_list shows it, plus whether each exit is cooling down (egress.exits). `update` is the updater's state
+    and `app` the running program (version, packaged or not, where it lives)."""
     running, retrying, alive = _running(conn), _retrying(conn), engine.workers()
-    return {"version": app_version() or "dev", "data_dir": str(db.home()),
+    return {"version": app_version() or "dev", "app": _app(), "update": _update(), "data_dir": str(db.home()),
             "workers": {name: {"alive_in_this_process": alive[name], "running": running.get(name),
                                "retrying": retrying.get(name, [])} for name in alive},
             "queue": _queue(conn), "exits": egress.exits(conn), "browser": _browser_state(),

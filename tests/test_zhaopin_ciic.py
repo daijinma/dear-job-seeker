@@ -256,7 +256,7 @@ def test_ciic_city_is_sent_as_short_name():
 
 def test_ciic_empty_skeleton_vs_blocked():
     assert Ciic().fetch(client(text=page()), SEARCH, 1) == []
-    for bad in ("<html>captcha</html>", "<title>职位列表-中智招聘网</title>", "main-inner-container"):
+    for bad in ("<html>under maintenance</html>", "<title>职位列表-中智招聘网</title>", "main-inner-container"):
         with pytest.raises(StructureError):
             Ciic().fetch(client(text=bad), SEARCH, 1)
 

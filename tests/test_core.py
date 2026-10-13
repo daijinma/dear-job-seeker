@@ -865,3 +865,41 @@ def test_djs_work_that_times_out_hands_its_task_back_and_the_next_one_resumes_it
     slow[0] = False
     assert cli.main(["work", "--until-idle", "--timeout", "30"]) == 0   # the next start takes it up at once
     assert f"task {tid} fake done" in capsys.readouterr().out
+
+
+# ---- what the log says (djs.log): the things only a log can tell afterwards
+def test_a_failed_crawl_is_in_the_log_with_the_platform_the_task_and_what_the_site_said(env, caplog):
+    mock_client(env, lambda r: httpx.Response(403))
+    t = task(env)
+    engine.run_task(env.conn, t)
+    assert f"fake task {t['id']} failed: Blocked" in caplog.text
+
+
+def test_a_login_that_ran_out_is_in_the_log(env, caplog):
+    caplog.set_level("INFO", logger="djs")
+    env.auth.cookies = {"s": "1"}
+    mock_client(env, lambda r: httpx.Response(401))
+    t = task(env, "fakelogin", city="x")
+    engine.run_task(env.conn, t)
+    assert f"fakelogin task {t['id']} waits for a login" in caplog.text
+
+
+def test_a_task_that_crashes_leaves_its_traceback_in_the_log_and_is_tried_again(env, caplog):
+    env.mp.setattr(engine, "run_task", boom(RuntimeError("a bug of ours")))
+    t = task(env)
+    assert engine.tick(env.conn, "fake") is True
+    assert status(env, t["id"])["status"] == "pending"
+    assert f"fake task {t['id']} crashed" in caplog.text and "a bug of ours" in caplog.text
+
+
+def test_a_login_window_is_in_the_log_from_opening_to_the_end(env, caplog):
+    caplog.set_level("INFO", logger="djs")
+    service.login(env.conn, "fakelogin")
+    assert "login window for fakelogin opened" in caplog.text and "login for fakelogin: logged in" in caplog.text
+    env.mp.setattr(env.auth, "login", boom(TimeoutError("没等到登录")))
+    with pytest.raises(TimeoutError):
+        service.login(env.conn, "fakelogin")
+    assert "login for fakelogin ended without a login: TimeoutError" in caplog.text
+    env.mp.setattr(env.auth, "cancel_login", lambda p: True, raising=False)
+    service.login_cancel(env.conn, "fakelogin")
+    assert "login window for fakelogin cancelled" in caplog.text

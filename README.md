@@ -19,7 +19,8 @@ A **local job-search client** for Chinese job sites that speaks MCP. One program
 2. 填岗位和城市，点「开始查找」。常用网站已经选好，几十秒到几分钟内结果陆续出来，进度在搜索框下面。
 3. 点「查看结果」：可以按网站、按月薪筛选，按综合、薪资或公司排序；点开岗位看完整描述，「打开原页面」去投递；「导出表格」会存进「下载」文件夹。
 4. 想要更全的结果，到「平台登录」用你自己的账号登录：BOSS 直聘和康强医疗网必须登录才能搜（BOSS 不登录的页面看不到薪资，列表也不可靠，所以从不在未登录时访问）。登录只在你自己的电脑上完成，账号信息不会上传。
-5. 想让 AI 助手替你找：在「设置 → 连接 AI 助手」里打开你用的助手（Claude Code、WorkBuddy、CodeBuddy、Cursor、Codex、Qwen Code、Kimi Code 等；首次打开程序时也会问一次），然后直接对它说「帮我找杭州的 Python 后端，月薪 1.5 万以上，挑 5 个」。
+5. 想让 AI 助手替你找：第一次打开程序时，它会自动在你电脑上常见的 12 个 AI 助手里配好（Claude Code、WorkBuddy、CodeBuddy、Cursor、Codex、Qwen Code、Kimi Code 等，没装的也会先准备好配置），不想要哪个，到「设置 → 连接 AI 助手」把它的开关关掉。然后直接对助手说「帮我找杭州的 Python 后端，月薪 1.5 万以上，挑 5 个」。
+6. 更新：带更新功能的版本会在启动时和之后每 30 分钟查一次有没有新版本，有就在后台下载并检查；好了会提示「更新已就绪」，点「安装并重启」，或点「下次启动时安装」（退出程序时换好）。不会自己重启。「设置 → 软件更新」里可以手动检查。第一个带更新功能的版本要手动安装一次。
 
 鱼泡直聘、前程无忧和 58同城需要你自己配置密钥才会参与查找（见 [Platforms that need keys](#platforms-that-need-keys)），不配置也不影响其他网站。
 
@@ -40,6 +41,8 @@ Unzip it and double-click **找岗位助手** (`找岗位助手.app` on a Mac, `
 - **macOS** — "cannot be opened because Apple cannot check it for malicious software". Right-click the app, choose *Open*, then *Open* again. On macOS 15 and later that shortcut is gone: open System Settings → Privacy & Security, scroll to the message about the app and click *Open Anyway*. Or run `xattr -dr com.apple.quarantine "找岗位助手.app"` once in Terminal.
 - **Windows** — SmartScreen shows "Windows protected your PC": click *More info*, then *Run anyway*. An antivirus program may also flag or quarantine the program (it is not signed): restore it from the quarantine and choose *Allow* / *Trust*. The window needs Microsoft's WebView2 runtime, which comes with Windows 11 and current Windows 10 updates.
 
+**Updates.** The first build with the updater has to be installed by hand once; after that the app looks after itself. It asks this repository's latest GitHub release whether a newer build exists at start and every 30 minutes (one small request; nothing else is sent), downloads the build for your computer in the background, checks its size and sha256 (the values GitHub lists for the file) and runs the new build's own `--selftest`. Then it shows **更新已就绪** with **安装并重启** and **下次启动时安装**; it never restarts by itself. The swap keeps the old build in `<data>/updates/previous` and starts the new one; if it fails, the old build is put back and the next start says why. A Mac app dragged into Applications updates in place; an app still running from the download's random read-only copy, or in a folder you cannot write to, is told so and shown where the downloaded build is (打开下载好的位置), to move by hand. **设置 → 软件更新** has 检查更新 and 打开日志文件夹. A source checkout never updates; `DJS_UPDATE=0` switches the check off.
+
 **Browser.** Login windows and BOSS 直聘 use Google Chrome or Microsoft Edge when one is installed. With neither, run `djs install-browser` once: it downloads Chromium (several hundred MB).
 
 ## Quick start (from source)
@@ -55,7 +58,7 @@ Login windows and BOSS 直聘 need a browser: an installed Chrome or Edge is use
 
 ## Use it from an AI client (MCP)
 
-The MCP server is the `djs` program over stdio. With the download, the app registers it for you: **设置 → 连接 AI 助手** lists the assistants it finds on this computer, one switch each (the first launch asks once). It writes only an entry named `dear-job-seeker` into the assistant's own config file, keeps a `.djs-bak` copy of the file before its first change, refuses a file it cannot read (for example one with comments), and re-points the entry at each start, so moving or updating the app does not break it.
+The MCP server is the `djs` program over stdio. With the download, the app registers it for you: **设置 → 连接 AI 助手** shows one switch for each of the assistants below. At the first start all of them are switched on and written without asking (a missing folder or file is created, installed or not); a switch removes the entry again. It writes only an entry named `dear-job-seeker` into the assistant's own config file, keeps a `.djs-bak` copy of the file before its first change, refuses a file it cannot read (for example one with comments) and says so on its tile, and writes the entry again at each start, so moving or updating the app does not break it. For Claude Code it also adds permission rules for the ten read-only tools (`status`, `provider_list`, `search`, `wait_for_search`, `jobs_get`, `job_detail`, `search_list`, `task_list`, `login_status`, `login_check`) to `~/.claude/settings.json`, so those run without a question each time; `login`, `logout`, `crawl_start`, `set_*` and `egress_*` still ask. The rules go with the switch.
 
 | Assistant | Config file it writes |
 |---|---|
@@ -147,7 +150,7 @@ Click **去登录** in the app (page 平台登录) or call the `login` tool: an 
 
 | Tool | Purpose |
 |---|---|
-| `status()` | what is going on, in one call and without network: version, data folder, workers and the task each platform runs now (pages, details done / total) or waits to retry (reason, time), the queue by status, the exits all traffic goes through (direct or your proxies, passwords masked, which ones rest), the browser a login window would use, open login windows, profiles in use, every login's state and end, missing keys (names only), cooling-down exits and each platform's latest problem in plain words. The first call when results look wrong |
+| `status()` | what is going on, in one call and without network: version, data folder, workers and the task each platform runs now (pages, details done / total) or waits to retry (reason, time), the queue by status, the exits all traffic goes through (direct or your proxies, passwords masked, which ones rest), `update` (this app's version, the newest release found, `none` / `downloading` / `ready` / `failed`) and `app` (version, whether it is the packaged app, where it lives), the browser a login window would use, open login windows, profiles in use, every login's state and end, missing keys (names only), cooling-down exits and each platform's latest problem in plain words. The first call when results look wrong |
 | `search(keyword, city?, providers?, max_pages=1)` | start a search on every platform usable right now (or on `providers`); returns at once with the task ids, and in `skipped` the platforms that could not take it and why (a city they do not cover, keys missing); the search fails only when no platform can take it |
 | `wait_for_search(keyword, city?, timeout=120)` | block until the search is done (one call waits at most 600 s, then answers `timed_out: true`): per platform the outcome, job counts and `completing {done, total}` while job details are still being fetched. A platform that failed and waits for its next try is `retrying` (reason, `retry_at`) and does not hold the search up |
 | `jobs_get(keyword?, city?, task_id?, provider?, min_month_salary?, max_month_salary?, floor_month_salary?, title?, text?, complete_only=true, dedupe=true, fields="summary", limit=20, offset=0)` | stored jobs as `{jobs, total, returned, next_offset}`, newest first. From a search (keyword + city), a task and/or a platform. Filters run in SQL: pay per month overlapping the range (`min_month_salary`: the range reaches it; `floor_month_salary`: the lowest pay is at least it), every word of `title` in the job title, every word of `text` in the title, description or welfare tags (双休, 五险一金), the job's city. `summary` rows carry a 120-character `description_snippet` (20 jobs ≈ 16 KB; `full` ≈ 41 KB). Complete jobs only and each job once by default: `also_on` names the other platforms carrying it; incomplete jobs (`complete_only=false`) say what is `missing` and why |
@@ -157,6 +160,7 @@ Click **去登录** in the app (page 平台登录) or call the `login` tool: an 
 | `task_list(status?, limit=20)` | tasks with their stats (pages, new / seen jobs, details, complete / incomplete) and outcome |
 | `provider_list()` | every platform: label, login, city rule, effective interval / jitter / max pages, floor, page cap, keys and browser state |
 | `login(provider)` | open the platform's login page in a browser window (blocks up to 180 s) and save the session once it is detected |
+| `login_cancel(provider)` | close the login window `login` opened (the tasks keep waiting for a login) |
 | `login_status(provider?)` / `login_check(provider?)` / `logout(provider)` | saved login state (`logged_in` / `expired` / `not_logged_in`, saved and expiry times, how to log in, what it adds); ask the site whether a saved login still works; delete a saved login |
 | `set_frequency(provider, interval?, jitter?, max_pages?, force?)` | per-platform override; below the floor needs `force=true` |
 | `set_transport(provider, transport?)` | `http` or `browser` for a platform that supports both; omit to go back to its default |
@@ -220,11 +224,11 @@ djs call search_list
 - **查找** — keyword and city; the newest search sits right under the box with each site's progress and what went wrong in plain words. The sites that need nothing from you are already picked (the city-only sites join when a city is filled in); a site that cannot take the city is skipped and named.
 - **我的结果** — complete jobs by default, each job once ("也在 前程无忧" on a job found on several sites), a switch for the incomplete ones with the reason on each, filters by site and by pay per month (5千+ … 3万+), order 综合 (jobs whose title matches the search first, sites taking turns) / 薪资从高到低 / 公司, a side panel with the full description, the welfare tags and links to every site that has the job, and CSV export into the Downloads folder.
 - **平台登录** — the state of every login, with a badge in the top bar while some are missing or expired.
-- **设置** — speed (steady / standard / fast, never below a platform's floor) and an optional proxy.
+- **设置** — speed (steady / standard / fast, never below a platform's floor) and an optional proxy; 连接 AI 助手 (one switch per assistant); 软件更新 (version, 检查更新, 打开日志文件夹); an update that is ready is announced by a message that stays until you choose 安装并重启 or 下次启动时安装.
 
 ## Data and privacy
 
-Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite), `.env` (optional keys, see above), `profiles/<platform>/` (saved login 0600, browser profile), `pace/` (rate-limit locks), `ui_prefs.json`. Cookie values are never written to the database, logs, tool results or error messages, and nothing is sent anywhere but to the job sites themselves. While a login window is open, that browser listens on a local debugging port (127.0.0.1 only) through which the program reads the cookies; the port closes with the window.
+Everything lives in `$DJS_HOME` (default `~/.dear-job-seeker`): `djs.db` (SQLite), `.env` (optional keys, see above), `profiles/<platform>/` (saved login 0600, browser profile), `pace/` (rate-limit locks), `ui_prefs.json`, `logs/djs.log` (rotating, 1 MB × 3, no cookies, tokens or keys; URLs without their query), `updates/` (a downloaded build, the previous build, the result of the last swap). Cookie values are never written to the database, logs, tool results or error messages, and nothing is sent anywhere but to the job sites themselves and, for the update check, to GitHub (`DJS_UPDATE=0` turns that off). No crash reports or usage data leave the computer. While a login window is open, that browser listens on a local debugging port (127.0.0.1 only) through which the program reads the cookies; the port closes with the window.
 
 ## Development
 

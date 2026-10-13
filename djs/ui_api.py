@@ -2,6 +2,7 @@
 background login, exporting a table, showing files and folders)."""
 from __future__ import annotations
 
+import functools
 import json
 import re
 import subprocess
@@ -14,11 +15,14 @@ from pathlib import Path
 
 import httpx
 
-from djs import connect, db, providers, results, service, taskqueue
+from djs import connect, db, log, providers, results, service, taskqueue, update
 
 PRESETS = {"steady": 1.0, "standard": 0.7, "fast": 0.5}  # multipliers of each platform's default interval
 REVEAL_LABEL = "在访达中显示" if sys.platform == "darwin" else "在文件夹中显示"
+CLOSE_DELAY = 0.5   # seconds between the answer to 「安装并重启」 and the window closing
+LOG = log.get("ui")
 login_state: dict[str, dict] = {}
+_result_read = False   # what the last install came to is shown once per start of the app
 
 
 def _prefs_file() -> Path:
@@ -148,7 +152,9 @@ def add_proxy(conn, a) -> dict:
 
 
 def about(conn, a) -> dict:
-    return {"home": str(db.home()), "version": service.app_version() or "开发版"}  # no version: a source checkout
+    now = update.current()
+    return {"home": str(db.home()), "version": service.app_version() or "开发版",   # no version: a source checkout
+            "latest": now["latest"], "update_state": now["state"]}
 
 
 def _show(command: list[str]) -> dict:
@@ -165,6 +171,16 @@ def open_home(conn, a) -> dict:
     return _show([{"darwin": "open", "win32": "explorer"}.get(sys.platform, "xdg-open"), str(db.home())])
 
 
+def open_logs(conn, a) -> dict:
+    """Show the folder of the log file in the system file manager (made first: a log that was never written has none)."""
+    folder = log.path().parent
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return _show([{"darwin": "open", "win32": "explorer"}.get(sys.platform, "xdg-open"), str(folder)])
+
+
 def open_url(conn, a) -> dict:
     url = a.get("url", "")
     if not url.startswith(("http://", "https://")):
@@ -175,51 +191,112 @@ def open_url(conn, a) -> dict:
 
 # ---- connecting the AI assistants on this computer
 def connect_prefs() -> dict:
-    """`on`: the assistants the user switched on (refreshed at every start); `asked`: the first-launch card is done."""
+    """`enabled`: the assistants switched on (written again at every start); with nothing saved, all of them. A 1.2.6
+    file (`{on, asked}`) counts as a saved choice once the user answered or switched something on."""
     saved = _prefs().get("connect") or {}
     known = {t.key for t in connect.TARGETS}
-    return {"on": [k for k in saved.get("on", []) if k in known], "asked": bool(saved.get("asked"))}
-
-
-def _save_connect(**kw) -> None:
-    _save_prefs(connect={**connect_prefs(), **kw})
+    if "enabled" in saved:
+        keys = saved["enabled"]
+    elif saved.get("asked") or saved.get("on"):
+        keys = saved.get("on", [])
+    else:
+        return {"enabled": [t.key for t in connect.TARGETS]}
+    return {"enabled": [k for k in keys if k in known]}
 
 
 def connect_state(conn=None, a=None) -> dict:
-    return {"asked": connect_prefs()["asked"], **connect.status()}
+    return {**connect_prefs(), **connect.status()}
 
 
 def connect_set(conn, a) -> dict:
     """One assistant's switch: write or remove our entry there, and remember the choice."""
-    key, on = a.get("key") or "", connect_prefs()["on"]
+    key = a.get("key") or ""
+    connect.find(key)   # an unknown one changes nothing, not even the saved choice
+    enabled = connect_prefs()["enabled"]
     if a.get("on"):
         connect.connect(key)
-        _save_connect(on=[*on, key] if key not in on else on)
+        _save_prefs(connect={"enabled": [*enabled, key] if key not in enabled else enabled})
     else:
-        _save_connect(on=[k for k in on if k != key])   # first: a file we cannot read must not keep the switch on
+        _save_prefs(connect={"enabled": [k for k in enabled if k != key]})   # first: a file we cannot read must not keep the switch on
         connect.disconnect(key)
     return connect_state()
 
 
-def connect_many(conn, a) -> dict:
-    """The first-launch card's 接入: every ticked assistant found on this computer; the ones that fail are named."""
-    on, failed = connect_prefs()["on"], []
-    for key in dict.fromkeys(a.get("keys") or []):
-        target = next((t for t in connect.TARGETS if t.key == key and connect.detected(t)), None)
-        if target is None:   # not on this computer: nothing to write
-            continue
+# ---- updating the app (the work is djs.update's; these only carry it to the window)
+def _update_route(fn):
+    """An update route that fails leaves a line in the log; the window only gets the plain Chinese answer."""
+    @functools.wraps(fn)
+    def route(conn, a):
         try:
-            connect.connect(key)
-            on = [*on, key] if key not in on else on
-        except ValueError as e:
-            failed.append({"label": target.label, "error": str(e)})
-    _save_connect(on=on, asked=True)
-    return {**connect_state(), "failed": failed}
+            return fn(conn, a)
+        except Exception as e:
+            LOG.warning("%s failed: %s", fn.__name__, e, exc_info=not isinstance(e, ValueError))
+            raise
+    return route
 
 
-def connect_asked(conn, a) -> dict:
-    _save_connect(asked=True)
-    return connect_state()
+def _update_now() -> dict:
+    ok, reason = update.can_install()
+    return {**update.current(), "can_install": ok, "reason": reason}
+
+
+@_update_route
+def update_state(conn, a) -> dict:
+    """The state of the update, and whether it can be installed here. `result` (the text of how the last install went)
+    comes with the first answer after the app started and never again."""
+    global _result_read
+    state = {**_update_now(), "result": None}
+    if not _result_read:
+        _result_read = True
+        last = update.last_result()
+        state["result"] = last["text"] if last else None
+    return state
+
+
+@_update_route
+def update_check(conn, a) -> dict:
+    """The user asked: look now. `found`: an update is downloading or ready."""
+    return {"found": bool(update.check(manual=True)["found"]), **_update_now()}
+
+
+@_update_route
+def update_later(conn, a) -> dict:
+    update.later()
+    return _update_now()
+
+
+@_update_route
+def update_reveal(conn, a) -> dict:
+    """Show the downloaded build in the file manager, for an app that cannot be replaced in place (the user moves it by
+    hand)."""
+    build = update.staged()
+    if build is None:
+        raise ValueError(update.WHY_NOT_READY)
+    command = {"darwin": ["open", "-R", str(build)], "win32": ["explorer", f"/select,{build}"]}
+    return _show(command.get(sys.platform, ["xdg-open", str(build.parent)]))
+
+
+def _close_window() -> None:
+    """Close the app's window a moment from now, so that the answer to the page goes first; webview.start() then returns
+    and main() leaves the way it always does (the update is applied there)."""
+    def close():
+        try:
+            import webview
+            for window in list(webview.windows):
+                window.destroy()
+        except Exception:
+            LOG.exception("could not close the window to install the update")
+    timer = threading.Timer(CLOSE_DELAY, close)
+    timer.daemon = True
+    timer.start()
+
+
+@_update_route
+def update_install(conn, a) -> dict:
+    """Install the downloaded update: the app quits and the new build takes its place. ValueError says why it cannot."""
+    update.install_now()
+    _close_window()
+    return {"ok": True}
 
 
 # ---- exporting a table: a file in the Downloads folder, no save dialog
@@ -275,13 +352,17 @@ ROUTES = {
     "POST /api/retry": retry,
     "POST /api/open_url": open_url,
     "POST /api/open_home": open_home,
+    "POST /api/open_logs": open_logs,
     "POST /api/export_csv": export_csv,
     "POST /api/reveal": reveal,
     "GET /api/about": about,
     "GET /api/connect": connect_state,
     "POST /api/connect": connect_set,
-    "POST /api/connect_many": connect_many,
-    "POST /api/connect_asked": connect_asked,
+    "GET /api/update": update_state,
+    "POST /api/update_check": update_check,
+    "POST /api/update_later": update_later,
+    "POST /api/update_install": update_install,
+    "POST /api/update_reveal": update_reveal,
     "POST /api/login": lambda c, a: start_login(c, a.get("provider", "")),
     "POST /api/login_cancel": lambda c, a: cancel_login(c, a.get("provider", "")),
     "POST /api/login_check": check_login,

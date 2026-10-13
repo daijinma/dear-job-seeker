@@ -33,12 +33,13 @@ const loading = (text) => `<div class="loading">${spinner()}<span>${esc(text)}</
 const emptyState = (title, text, action = "") => `<div class="card empty"><h2>${esc(title)}</h2><p class="sub">${esc(text)}</p>${action}</div>`;
 const skeletons = (n) => '<div class="card job skeleton" aria-hidden="true"><i></i><i></i><i></i></div>'.repeat(n);
 
-/* A list row: text on the left (optionally a tick that makes the whole left side a toggle), anything on the right. */
-function itemRow({ name, hint = "", end = "", pick = "", on = false, off = false }) {
+/* A list row: text on the left (optionally a tick that makes the whole left side a toggle, or a `lead` before the text),
+   anything on the right. */
+function itemRow({ name, hint = "", end = "", pick = "", on = false, off = false, lead = "" }) {
   const text = `<span class="item-text"><b>${esc(name)}</b>${hint ? `<small>${esc(hint)}</small>` : ""}</span>`;
   const main = pick
     ? `<button type="button" class="item-main" aria-pressed="${on}" ${pick}><span class="tick">${on ? icon("check", 12) : ""}</span>${text}</button>`
-    : `<div class="item-main">${text}</div>`;
+    : `<div class="item-main">${lead}${text}</div>`;
   return `<div class="item${on ? " on" : ""}${off ? " off" : ""}">${main}${end ? `<div class="item-end">${end}</div>` : ""}</div>`;
 }
 

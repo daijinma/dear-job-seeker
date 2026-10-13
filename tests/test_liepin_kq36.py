@@ -256,7 +256,7 @@ def test_kq36_zero_cards_is_empty_only_on_a_real_list_page():
     empty = b'<html><input name="keyword"  id="keyword" value=""><ul class="position-job-list"></ul></html>'
     assert Kq36().fetch(client(content=empty), {"keyword": "zzz"}, 1) == []
     with pytest.raises(StructureError, match="no job cards"):
-        Kq36().fetch(client(content=b"<html>captcha</html>"), {"keyword": "x"}, 1)
+        Kq36().fetch(client(content=b"<html>under maintenance</html>"), {"keyword": "x"}, 1)
 
 
 def test_kq36_cards_that_cannot_be_read_are_never_dropped_silently():

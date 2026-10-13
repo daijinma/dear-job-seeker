@@ -41,14 +41,15 @@ function banner(text) {
   el.hidden = !text;
 }
 
-/* a message that fades by itself; with `action` ({ label, name, data }) it carries a button and stays longer */
-function toast(text, tone = "", action = null) {
+/* a message that fades by itself (after `ms`, else 3.6 s); with `action` ({ label, name, data }) it carries a button and
+   stays longer */
+function toast(text, tone = "", action = null, ms = 0) {
   const el = $("#toast");
   el.textContent = text;
   if (action) el.insertAdjacentHTML("beforeend", btn(action.label, action.name, action.data, "line sm"));
   el.className = `toast show ${tone}${action ? " act" : ""}`;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), action ? 10000 : 3600);
+  toastTimer = setTimeout(() => el.classList.remove("show"), ms || (action ? 10000 : 3600));
 }
 
 /* Python answers {error} for what went wrong on its side (shown as text); a throw means the bridge itself failed. */

@@ -100,6 +100,13 @@ jobs:
           cp packaging/install.ps1 dist/dear-job-seeker/
           bash packaging/install-check.sh dist/dear-job-seeker
 
+      # The app replaces itself with a downloaded build through a helper script (djs/apply.sh, djs/apply.ps1): run the real
+      # helper on this runner's build against a copy of it (the relaunch is stubbed, no window opens)
+      - name: Self-update helper
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then bash packaging/update-check.sh "dist/找岗位助手.app"
+          else bash packaging/update-check.sh dist/dear-job-seeker; fi
+
       - name: Zip (macOS)
         if: ${{ runner.os == 'macOS' }}
         run: ditto -c -k dist/stage "dist/${{ steps.asset.outputs.name }}"
@@ -149,3 +156,26 @@ jobs:
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
           gh release upload "$GITHUB_REF_NAME" assets/*.zip --clobber
+
+      # The app's updater reads this release through the API: exactly the three downloads, named for this version, each
+      # with a sha256 digest. A release it cannot read is worse than none.
+      - name: The updater can read this release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release view "$GITHUB_REF_NAME" --json assets,isDraft,isPrerelease > release.json
+          python3 - "$version" <<'PY'
+          import json, sys
+          version = sys.argv[1]
+          release = json.load(open("release.json"))
+          want = {f"dear-job-seeker-{version}-{t}.zip" for t in ("macos-arm64", "macos-x86_64", "windows-x64")}
+          got = {a["name"]: a.get("digest") or "" for a in release["assets"]}
+          problems = []
+          if set(got) != want:
+              problems.append(f"assets are {sorted(got)}, expected {sorted(want)}")
+          problems += [f"{n}: no sha256 digest" for n, d in got.items() if not d.startswith("sha256:")]
+          if release["isDraft"] or release["isPrerelease"]:
+              problems.append("the release is a draft or a pre-release: the updater ignores it")
+          if problems:
+              sys.exit("::error::" + "; ".join(problems))
+          print("ok:", ", ".join(sorted(got)))
+          PY

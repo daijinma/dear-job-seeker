@@ -16,7 +16,8 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the source tree, for the expected platform list
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))  # the source tree, for the expected platform list
 
 NAME = "找岗位助手"
 FOLDER = "dear-job-seeker"  # the Windows build folder (see the spec)
@@ -69,6 +70,19 @@ def check_cli(console: Path, home: str) -> None:
     expect(all(p["browser_ready"] for p in platforms), "the Playwright driver is not in the build")
     expect(call(console, home, "login_status", {"provider": "boss"})["logged_in"] is False, "login_status")
     ok(f"djs call provider_list: {len(platforms)} platforms, browser ready")
+
+
+def check_status(console: Path, home: str) -> None:
+    """The release job names the downloads from pyproject.toml's version and the updater compares against the build's own:
+    the packaged program must report that one, as a packaged program, with the updater's state."""
+    import tomllib
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    status = call(console, home, "status")
+    expect(status["version"] == version and status["app"]["version"] == version,
+           f"status says {status['version']} / {status['app']['version']}, pyproject.toml says {version}")
+    expect(status["app"]["frozen"] is True, f"status.app says this is not the packaged program: {status['app']}")
+    expect(status["update"]["current"] == version and status["update"]["state"] == "none", f"status.update: {status['update']}")
+    ok(f"djs call status: version {version}, packaged, update {status['update']['state']}")
 
 
 def check_crawl(console: Path, home: str) -> None:
@@ -128,6 +142,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
         check_selftest(window, console, home)
         check_cli(console, home)
+        check_status(console, home)
         check_crawl(console, home)
         check_mcp(window, console, home)
         if app and not args.no_launch:

@@ -75,7 +75,7 @@ def test_structure_break(p, _, body):
 @pytest.mark.parametrize("p,_", PROVIDERS, ids=IDS)
 def test_non_json_is_structure_error(p, _):
     with pytest.raises(StructureError):
-        p.fetch(client(text="<html>captcha</html>"), SEARCH, p.first_page)
+        p.fetch(client(text="<html>under maintenance</html>"), SEARCH, p.first_page)
 
 
 @pytest.mark.parametrize("p,_", PROVIDERS, ids=IDS)

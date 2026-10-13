@@ -1,30 +1,31 @@
-/* 连接 AI 助手: the card on 设置 (one switch per assistant found on this computer) and the one-time invitation on 查找.
-   Every /api/connect route answers in one shape: {command, asked, config, targets: [{key, label, group, detected,
-   state, path}], guided: [{key, label, where}]}; connect_many adds `failed: [{label, error}]`. */
+/* 连接 AI 助手: the card on 设置, a grid of every supported assistant with one switch each. Every /api/connect route
+   answers in one shape: {command, config, enabled, targets: [{key, label, state, path}], guided: [{key, label,
+   where}]}. */
 
-const CONNECT_STATE = { off: "未连接", connected: "已连接", stale: "需要更新", unreadable: "配置文件读不懂，请用复制配置" };
-const CONNECT_GROUPS = [["cn", "国内应用"], ["intl", "其他"]];   // the order the card lists them in
-const invite = { data: null, ticked: new Set() };   // the answer the invitation was made from, and the keys ticked in it
+const CONNECT_HINT = { stale: "需要更新", unreadable: "配置文件读不懂，请用下面的复制配置" };   // only what is not as it should be
 
-/* ---- 设置 ---- */
-function connectRow(t) {
-  const unreadable = t.state === "unreadable";
-  const end = (t.state === "stale" ? btn("更新", "connect-update", { k: t.key }) : "") + (unreadable ? btn("复制配置", "connect-copy") : "")
-    + switchBtn(t.state === "connected" || t.state === "stale", `连接 ${t.label}`, act("connect-toggle", { k: t.key }), unreadable);
-  return itemRow({ name: t.label, hint: `${CONNECT_STATE[t.state]} · ${t.path}`, end });
+/* a round badge with the assistant's first letter, in a colour that follows its key (no brand artwork is bundled) */
+const connectBadge = (t) => {
+  const hue = [...t.key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+  return `<span class="avatar" style="background:hsl(${hue} 50% 40%)" aria-hidden="true">${esc(t.label[0])}</span>`;
+};
+
+function connectTile(t) {
+  const on = t.state === "connected" || t.state === "stale";
+  return itemRow({
+    name: t.label, hint: CONNECT_HINT[t.state], lead: connectBadge(t),
+    end: switchBtn(on, `连接 ${t.label}`, act("connect-toggle", { k: t.key, s: t.state })),
+  });
 }
 
 function connectCard(data) {
-  const found = data.targets.filter((t) => t.detected);
-  const groups = CONNECT_GROUPS.map(([g, title]) => [title, found.filter((t) => t.group === g)]).filter(([, rows]) => rows.length)
-    .map(([title, rows]) => `<div class="group"><h3>${title}</h3><div class="items">${rows.map(connectRow).join("")}</div></div>`);
-  const missing = data.targets.filter((t) => !t.detected);
-  const guided = data.guided.map((g) => itemRow({ name: g.label, hint: g.where, end: btn("复制配置", "connect-copy") }));
+  const guided = data.guided.map((g) => `<p class="sub"><b>${esc(g.label)}</b> · ${esc(g.where)}</p>`);
   return `<div class="card connect" id="connect-card" data-config="${esc(data.config)}"><h2>连接 AI 助手</h2>
     <p class="sub">让你电脑上的 AI 助手直接用本程序查岗位，不用自己改配置文件。</p>
-    ${groups.join("") || '<p class="sub">这台电脑上还没有找到 AI 助手。</p>'}
-    ${missing.length ? `<div>${disclosure("connect-missing", "没检测到的应用", `<div class="chips">${missing.map((t) => pill(t.label, "gray")).join("")}</div>`)}</div>` : ""}
-    <div>${disclosure("connect-guided", "手动添加（没有公开配置文件的应用）", `<div class="items">${guided.join("")}</div>`)}</div></div>`;
+    <p class="sub caption">找岗位助手启动时会自动在已开启的 AI 助手里配置 MCP。</p>
+    <div class="tiles">${data.targets.map(connectTile).join("")}</div>
+    <section class="block"><div class="row"><h3>连接其他 MCP 客户端</h3>${btn("复制配置", "connect-copy")}</div>
+      <div class="guided">${guided.join("")}</div></section></div>`;
 }
 
 /* the clipboard API where the window allows it; a hidden text box and the old copy command where it does not (the
@@ -47,10 +48,12 @@ async function copyText(text) {
   }
 }
 
-/* switch a target on or off (or bring a stale entry up to date); the card shows what the route answered */
-async function connectSet(el, on, done = "已连接") {
+/* A switch: off to on writes our entry, on to off removes it, and one that is on but out of date (it points to where the
+   app was) is written again; the card shows what the route answered. A refusal leaves the card as it was. */
+async function connectSet(el) {
   const e = epoch;
-  const key = el.dataset.k;
+  const { k: key, s: state } = el.dataset;
+  const on = state !== "connected";
   el.disabled = true;
   try {
     const data = await api("POST /api/connect", { key, on });
@@ -58,76 +61,19 @@ async function connectSet(el, on, done = "已连接") {
     $("#connect-card").outerHTML = connectCard(data);
     $(`#connect-card [data-act="connect-toggle"][data-k="${key}"]`)?.focus();   // the repaint replaced the button the keyboard was on
     const label = data.targets.find((t) => t.key === key).label;
-    toast(on ? `${done} ${label}，重启它后生效` : `已断开 ${label}`, "ok");
+    toast(on ? `${state === "stale" ? "已更新" : "已连接"} ${label}，重启它后生效` : `已断开 ${label}`, "ok");
+  } catch (err) {
+    if (err.bridge) throw err;
+    toast(`没能更新这个 AI 助手的配置：${err.message}`, "bad");
   } finally {
     el.disabled = false;
   }
 }
 
-/* ---- 查找 ---- */
-function inviteRow(t) {
-  if (t.state === "unreadable") return itemRow({ name: t.label, hint: "配置文件读不懂，请到设置里复制配置", off: true });
-  return itemRow({ name: t.label, hint: t.state === "connected" ? "已连接" : t.path, pick: act("connect-pick", { k: t.key }), on: invite.ticked.has(t.key) });
-}
-
-const inviteHtml = () => `<div class="card connect-ask"><h2>把“找岗位助手”接入你电脑上的 AI 助手？</h2>
-  <p class="sub">勾上的 AI 助手接入后，就能直接用本程序查岗位。只会加一条配置，其他内容不动，原来的配置文件会先备份。以后可以在“设置”里随时关掉。</p>
-  <div class="items">${invite.data.targets.filter((t) => t.detected).map(inviteRow).join("")}</div>
-  <div class="actions">${btn("以后再说", "connect-later", {}, "line")}${btn("接入", "connect-go", {}, "primary")}</div></div>`;
-
-/* the invitation, or "" when it was answered before or there is nothing on this computer to offer it for (nothing
-   found, nothing we can read, or everything found is connected already) */
-function connectAsk(data) {
-  const open = data.targets.filter((t) => t.detected && t.state !== "unreadable");
-  if (data.asked || !open.some((t) => t.state !== "connected")) return "";
-  Object.assign(invite, { data, ticked: new Set(open.map((t) => t.key)) });
-  return inviteHtml();
-}
-
-/* The invitation fills its own place once the answer is in: the search form never waits for it, and a failure to ask
-   is not worth a message (the same list is on 设置). */
-function showConnectAsk(e) {
-  api("GET /api/connect").then((data) => { if (e === epoch) paint($("#connect-ask"), connectAsk(data)); }, () => {});
-}
-
-/* "已接入 2 个；没接入成功：Cursor（…）" */
-function connectResult(done, failed) {
-  const bad = failed.map((f) => `${f.label}（${f.error}）`).join("；");
-  if (!bad) return [`已接入 ${done} 个 AI 助手，重启这些应用后生效`, "ok"];
-  return [`${done ? `已接入 ${done} 个；` : ""}没接入成功：${bad}`, "bad", { label: "去设置", name: "connect-settings" }];
-}
-
 Object.assign(ACTIONS, {
-  "connect-toggle": (el) => connectSet(el, el.getAttribute("aria-checked") !== "true"),
-  "connect-update": (el) => connectSet(el, true, "已更新"),
+  "connect-toggle": connectSet,
   "connect-copy": async (el) => {
     const ok = await copyText(el.closest("[data-config]").dataset.config);
     toast(ok ? "已复制" : "没能复制到剪贴板，请再试一次", ok ? "ok" : "bad");
   },
-  "connect-pick": (el) => {
-    const k = el.dataset.k;
-    invite.ticked.has(k) ? invite.ticked.delete(k) : invite.ticked.add(k);
-    paint($("#connect-ask"), inviteHtml());
-    $(`#connect-ask [data-act="connect-pick"][data-k="${k}"]`)?.focus();
-  },
-  "connect-go": async (el) => {
-    const keys = invite.data.targets.filter((t) => invite.ticked.has(t.key)).map((t) => t.key);
-    if (!keys.length) return toast("请先勾选要接入的 AI 助手");
-    const e = epoch;
-    el.disabled = true;
-    try {
-      const { failed } = await api("POST /api/connect_many", { keys });
-      if (e === epoch) paint($("#connect-ask"), "");
-      toast(...connectResult(keys.length - failed.length, failed));
-    } finally {
-      el.disabled = false;
-    }
-  },
-  "connect-later": async () => {
-    const e = epoch;
-    await api("POST /api/connect_asked");
-    if (e === epoch) paint($("#connect-ask"), "");
-    toast("好的，想接入时到“设置”里就行");
-  },
-  "connect-settings": () => { location.hash = "#/settings"; },
 });

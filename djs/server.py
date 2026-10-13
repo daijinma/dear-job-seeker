@@ -39,7 +39,8 @@ Compare pay only through salary_month_min / salary_month_max: salary_text is the
 hour, per year) and the figures behind it are in salary_unit.
 If results look wrong or a search does not move, call status first: workers, queue, exits (the proxies requests go
 out through, or direct), browser, logins and each platform's latest problem (failed, waiting for a login, waiting to
-retry) in one call, without touching the network."""
+retry) in one call, without touching the network. If `status` shows `update.state == "ready"`, tell the user that a new
+version waits in the app: it installs from the app, not from here."""
 
 
 @asynccontextmanager
@@ -95,7 +96,9 @@ async def status() -> dict:
     windows and the platform profiles in use; each login's state and end; per platform its missing keys (names only),
     cooling-down exits and, when its newest task failed, waits for a login or waits for its next try (status
     retrying, with kind, reason and retry_at), why. If every site is retrying, read the exits and the reason here
-    before searching again. Call it first when results look wrong or a search does not move. Example: status()."""
+    before searching again. Also the app's own version, where it runs from and `update` {current, latest, state, note}:
+    state `ready` means a newer version is downloaded and waits in the app (it installs from the app, not from here).
+    Call it first when results look wrong or a search does not move. Example: status()."""
     return await asyncio.to_thread(_run, service.status)  # finding the browser can start Playwright (plain thread)
 
 
@@ -199,10 +202,17 @@ def search_list(limit: int = 20) -> dict:
 
 @mcp.tool()
 async def login(provider: str) -> dict:
-    """Open a browser window on the platform's login page for the user to log in (blocks up to 180s). The window
-    closes by itself once the login is detected; tasks waiting for it resume. Only for platforms that have a login
-    (see login_status)."""
+    """Open a browser window on the platform's login page for the user to log in (blocks up to 180s; login_cancel
+    ends it early). The window closes by itself once the login is detected; tasks waiting for it resume. Only for
+    platforms that have a login (see login_status)."""
     return await asyncio.to_thread(_run, service.login, provider)
+
+
+@mcp.tool()
+async def login_cancel(provider: str) -> dict:
+    """Stop the login window that `login` opened for this platform; the waiting `login` call ends with an error.
+    Tasks keep waiting for a login. Returns {provider, cancelled}: false when no window was open."""
+    return await asyncio.to_thread(_run, service.login_cancel, provider)
 
 
 @mcp.tool()

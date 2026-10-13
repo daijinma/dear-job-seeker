@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 
-from djs import cities, providers, taskqueue
+from djs import cities, jobs, providers, taskqueue
 
 MAX_WORDS = 10
 # Of two records of one job, the one with more of these columns filled is the better one
 FILLED = ("district", "education", "experience", "description", "published_at", "source_url")
-# A queued or running task will still ask for this job's detail: it has none and no failed attempt on record, and the
-# task does not run with detail 'never' (a JSON false reads as 0).
-DUE = (f"(j.detail IS NULL AND j.detail_error IS NULL AND j.id IN (SELECT job_id FROM task_jobs WHERE task_id IN "
+# A queued or running task will still ask for this job's detail: it has none and no failed attempt on record (a refusal
+# does not count: the retry asks again), and the task does not run with detail 'never' (a JSON false reads as 0).
+DUE = (f"(j.detail IS NULL AND (j.detail_error IS NULL OR j.detail_error LIKE '{jobs.REFUSED}%') "
+       f"AND j.id IN (SELECT job_id FROM task_jobs WHERE task_id IN "
        f"(SELECT t.id FROM tasks t WHERE t.status IN {taskqueue.ACTIVE_SQL} "
        "AND IFNULL(json_extract(t.payload, '$.detail'), 'auto') NOT IN ('never', 0)))) AS detail_due")
 WHY = f"j.provider, j.missing, j.salary_text, j.detail_error, {DUE}"   # what service.reasons needs to explain a job

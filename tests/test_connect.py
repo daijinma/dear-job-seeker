@@ -58,7 +58,7 @@ def home(tmp_path, monkeypatch):
 
 
 def installed(home, key, text=None):
-    """The assistant is on this computer (its folder; Claude Code: its file), with this text as its config if given."""
+    """The assistant's folder is there (Claude Code: its file), with this text as its config if given."""
     path = home / PATHS[key]
     path.parent.mkdir(parents=True, exist_ok=True)
     if text is not None or key == "claude-code":
@@ -89,20 +89,17 @@ def test_command_is_the_console_program_next_to_the_interpreter_or_the_app(home,
 
 def test_a_translocated_app_is_not_written_into_an_assistant(home, monkeypatch):
     """A downloaded app that was not moved runs from a random read-only copy: its path would not last."""
-    key = "cursor"
-    (home / ".cursor").mkdir()
     monkeypatch.setattr(connect, "command", lambda: "/private/var/folders/x/AppTranslocation/ABC/d/找岗位助手.app/Contents/MacOS/djs")
     with pytest.raises(ValueError, match="应用程序"):
-        connect.connect(key)
-    assert not (home / ".cursor" / "mcp.json").exists()
+        connect.connect("cursor")
+    assert os.listdir(home) == []   # not even a folder
 
 
 def test_targets_and_where_their_files_are(home):
-    assert [(t.key, t.label, t.group) for t in connect.TARGETS] == [
-        ("claude-code", "Claude Code", "intl"), ("claude-desktop", "Claude Desktop", "intl"), ("codex", "Codex", "intl"),
-        ("gemini-cli", "Gemini CLI", "intl"), ("antigravity", "Antigravity", "intl"), ("cursor", "Cursor", "intl"),
-        ("kiro", "Kiro", "intl"), ("opencode", "OpenCode", "intl"), ("workbuddy", "WorkBuddy", "cn"),
-        ("codebuddy", "CodeBuddy", "cn"), ("qwen-code", "Qwen Code", "cn"), ("kimi-code", "Kimi Code", "cn")]
+    assert [(t.key, t.label) for t in connect.TARGETS] == [
+        ("claude-code", "Claude Code"), ("claude-desktop", "Claude Desktop"), ("codex", "Codex"), ("gemini-cli", "Gemini CLI"),
+        ("antigravity", "Antigravity"), ("cursor", "Cursor"), ("kiro", "Kiro"), ("opencode", "OpenCode"),
+        ("workbuddy", "WorkBuddy"), ("codebuddy", "CodeBuddy"), ("qwen-code", "Qwen Code"), ("kimi-code", "Kimi Code")]
     assert {t.key: t.path() for t in connect.TARGETS} == {k: home / p for k, p in PATHS.items()}
     assert [(g.key, g.label) for g in connect.GUIDED] == [
         ("qoder", "Qoder"), ("trae", "Trae / Trae CN"), ("lingma", "通义灵码"), ("cherry-studio", "Cherry Studio")]
@@ -125,60 +122,51 @@ def test_claude_desktop_lives_where_each_system_keeps_application_data(home, mon
 def test_claude_desktop_is_written_under_appdata_on_windows(home, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     folder = home / "AppData" / "Roaming" / "Claude"
-    assert not connect.detected(connect.find("claude-desktop"))
-    folder.mkdir(parents=True)
-    assert connect.connect("claude-desktop") is True
+    assert connect.connect("claude-desktop") is True   # the folders are made
     assert json.loads((folder / "claude_desktop_config.json").read_text()) == {"mcpServers": {NAME: {"command": C, "args": []}}}
 
 
 def test_kimi_code_follows_its_home_variable(home, monkeypatch, tmp_path):
-    (home / ".kimi-code").mkdir()
     target = connect.find("kimi-code")
-    assert target.path() == home / ".kimi-code" / "mcp.json" and connect.detected(target)
+    assert target.path() == home / ".kimi-code" / "mcp.json"
     elsewhere = tmp_path / "kimi"
     monkeypatch.setenv("KIMI_CODE_HOME", str(elsewhere))
-    assert target.path() == elsewhere / "mcp.json" and not connect.detected(target)   # its folder is the variable's
-    elsewhere.mkdir()
+    assert target.path() == elsewhere / "mcp.json"   # its folder is the variable's
     assert connect.connect("kimi-code") is True
     assert json.loads((elsewhere / "mcp.json").read_text())["mcpServers"][NAME]["command"] == C
-    assert names(home / ".kimi-code") == []
+    assert not (home / ".kimi-code").exists()
 
 
-def test_an_assistant_is_found_by_its_own_folder_and_claude_code_by_its_file(home):
-    detected = lambda: {t.key for t in connect.TARGETS if connect.detected(t)}   # noqa: E731
-    assert detected() == set()   # a home folder alone is no assistant
-    (home / ".gemini").mkdir()
-    assert detected() == {"gemini-cli"}   # antigravity has its own folder inside
-    (home / ".gemini" / "antigravity").mkdir()
-    (home / ".kiro").mkdir()
-    assert detected() == {"gemini-cli", "antigravity"}   # Kiro's config sits one folder deeper
-    (home / ".kiro" / "settings").mkdir()
-    for folder in (".codex", ".cursor", ".config/opencode", ".workbuddy", ".codebuddy", ".qwen", ".kimi-code",
-                   "Library/Application Support/Claude"):
-        (home / folder).mkdir(parents=True)
-    assert detected() == set(PATHS) - {"claude-code"}
-    (home / ".claude").mkdir()
-    assert "claude-code" not in detected()   # its folder is not its file
-    (home / ".claude.json").write_text("{}")
-    assert "claude-code" in detected()
+@pytest.mark.parametrize("key", PATHS)
+def test_an_assistant_that_is_not_there_yet_gets_its_folders_and_its_file(home, key):
+    assert os.listdir(home) == []   # a fresh computer
+    assert connect.connect(key) is True
+    path = home / PATHS[key]
+    assert names(path.parent) == sorted([path.name, *([".claude"] if key == "claude-code" else [])])   # no backup of nothing, no temp file
+    if key == "codex":
+        assert tomllib.loads(path.read_text()) == {"mcp_servers": {NAME: {"command": C, "args": []}}}
+    else:
+        assert path.read_text(encoding="utf-8") == dumped({container(key): {NAME: entry(key)}})
+    assert connect.connect(key) is False and connect.status()["targets"][list(PATHS).index(key)]["state"] == "connected"
 
 
-def test_a_folder_we_may_not_look_into_is_not_an_assistant_and_does_not_break_the_list(home, monkeypatch):
-    def denied(self):
-        raise PermissionError("denied")   # what Python 3.12 does for a folder made with sudo
-    monkeypatch.setattr(Path, "is_dir", denied)
-    monkeypatch.setattr(Path, "is_file", denied)
-    assert not any(connect.detected(t) for t in connect.TARGETS)
-    assert not any(t["detected"] for t in connect.status()["targets"])
-
-
-def test_nothing_is_written_for_an_assistant_that_is_not_there(home):
-    with pytest.raises(ValueError, match="没有检测到 Cursor"):
-        connect.connect("cursor")
-    assert os.listdir(home) == []   # not even its folder
+def test_removing_from_an_assistant_that_is_not_there_makes_nothing(home):
+    assert connect.disconnect("cursor") is False and os.listdir(home) == []   # no folder, no file, no settings.json
+    assert connect.disconnect("claude-code") is False and os.listdir(home) == []
     with pytest.raises(ValueError, match="未知的应用"):
         connect.connect("nope")
-    assert connect.disconnect("cursor") is False and os.listdir(home) == []   # nothing to take out of a file that is not there
+    with pytest.raises(ValueError, match="未知的应用"):
+        connect.disconnect("nope")
+
+
+def test_a_folder_that_cannot_be_made_is_said_in_words(home, monkeypatch):
+    def denied(self, *args, **kw):
+        raise PermissionError("denied")   # a folder made with sudo
+    monkeypatch.setattr(Path, "mkdir", denied)
+    with pytest.raises(ValueError, match=f"没能写入配置文件：{home / '.cursor' / 'mcp.json'}"):
+        connect.connect("cursor")
+    assert os.listdir(home) == []
+    assert connect.sync(["cursor"]) == {"cursor": f"没能写入配置文件：{home / '.cursor' / 'mcp.json'}，请检查它的权限，或改用“复制配置”手动添加"}
 
 
 def test_config_text_is_what_a_guided_assistant_pastes(home):
@@ -190,10 +178,10 @@ def test_config_text_is_what_a_guided_assistant_pastes(home):
 @pytest.mark.parametrize("key", JSON_KEYS)
 def test_connect_creates_the_entry_and_the_file(home, key):
     path = installed(home, key)
-    existed = path.exists()   # only Claude Code is found by its file
+    existed = path.exists()   # only Claude Code's file is made by `installed`
     assert connect.connect(key) is True
     assert path.read_text(encoding="utf-8") == dumped({container(key): {NAME: entry(key)}})
-    assert names(path.parent) == sorted({path.name, *([path.name + ".djs-bak"] if existed else [])})   # no backup of nothing, no temp file
+    assert names(path.parent) == sorted({path.name, *([path.name + ".djs-bak"] if existed else []), *([".claude"] if key == "claude-code" else [])})   # no backup of nothing, no temp file
     assert (path.parent / (path.name + ".djs-bak")).exists() is existed
 
 
@@ -328,7 +316,7 @@ def test_a_lone_surrogate_the_file_carries_as_an_escape_does_not_stop_the_write(
     assert connect.connect("claude-code") is True
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["history"] == ["cut \ud83d"] and data["mcpServers"][NAME] == entry("claude-code")   # nothing lost
-    assert names(path.parent) == [".claude.json", ".claude.json.djs-bak"]
+    assert names(path.parent) == [".claude", ".claude.json", ".claude.json.djs-bak"]   # .claude: its permission rules
 
 
 CMD = 'C:\\Users\\x "y"\\找岗位助手\\djs.exe'   # backslashes, quotes and the app's own name
@@ -350,7 +338,7 @@ def test_a_command_with_backslashes_quotes_and_chinese_letters_is_written_exactl
 
 
 def test_each_state_is_told_apart(home):
-    assert {t["state"] for t in connect.status()["targets"]} == {"off"}   # no file at all is off, found or not
+    assert {t["state"] for t in connect.status()["targets"]} == {"off"}   # no file at all is off
     installed(home, "cursor", dumped({"mcpServers": {NAME: entry("cursor")}}))
     installed(home, "kiro", dumped({"mcpServers": {NAME: {"command": "/old/djs", "args": []}}}))
     installed(home, "qwen-code", dumped({"mcpServers": {"other": {}}}))
@@ -624,24 +612,40 @@ def test_a_file_that_appears_while_we_write_is_not_overwritten(home, monkeypatch
 
 
 # ---- every start
-def test_sync_refreshes_what_points_elsewhere_and_nothing_else(home, monkeypatch):
+def test_sync_writes_what_is_missing_and_refreshes_what_points_elsewhere_and_nothing_else(home, monkeypatch):
     cursor = installed(home, "cursor", dumped({"mcpServers": {NAME: entry("cursor")}}))
     codex = installed(home, "codex", OURS)
     kiro = installed(home, "kiro", dumped({"mcpServers": {"other": {}}}))
     qwen = installed(home, "qwen-code", dumped({"mcpServers": {NAME: entry("qwen-code", "/old/djs")}}))
     new = moved(monkeypatch)
-    assert connect.sync(["cursor", "codex", "kiro"]) == {}
+    assert connect.sync(["cursor", "codex", "kiro", "gemini-cli"]) == {}
     assert json.loads(cursor.read_text())["mcpServers"][NAME]["command"] == new
     assert tomllib.loads(codex.read_text())["mcp_servers"][NAME]["command"] == new
-    assert json.loads(kiro.read_text()) == {"mcpServers": {"other": {}}}   # the user did not switch it on: no entry is added
+    assert json.loads(kiro.read_text()) == {"mcpServers": {"other": {}, NAME: entry("kiro", new)}}   # off: written
+    assert json.loads((home / ".gemini" / "settings.json").read_text()) == {"mcpServers": {NAME: entry("gemini-cli", new)}}   # not there at all: made
     assert json.loads(qwen.read_text())["mcpServers"][NAME]["command"] == "/old/djs"   # not in the list: not touched
     before = (cursor.read_bytes(), cursor.stat().st_mtime_ns)
     assert connect.sync(["cursor"]) == {} and (cursor.read_bytes(), cursor.stat().st_mtime_ns) == before   # up to date
 
 
+def test_sync_of_every_assistant_on_a_fresh_computer_writes_all_twelve(home):
+    assert connect.sync([t.key for t in connect.TARGETS]) == {}
+    for key, rel in PATHS.items():
+        text = (home / rel).read_text(encoding="utf-8")
+        if key == "codex":
+            assert tomllib.loads(text)["mcp_servers"][NAME] == {"command": C, "args": []}
+        else:
+            assert json.loads(text) == {container(key): {NAME: entry(key)}}
+    assert {t["state"] for t in connect.status()["targets"]} == {"connected"}
+    stat = (home / PATHS["cursor"]).stat()
+    assert connect.sync([t.key for t in connect.TARGETS]) == {}   # the next start changes nothing
+    assert (home / PATHS["cursor"]).stat().st_mtime_ns == stat.st_mtime_ns
+
+
 def test_sync_swallows_failures_and_says_which_assistant_and_why(home, monkeypatch):
     cursor = installed(home, "cursor", dumped({"mcpServers": {NAME: entry("cursor")}}))
     kiro = installed(home, "kiro", dumped({"mcpServers": {NAME: entry("kiro")}}))
+    bad = installed(home, "qwen-code", "{ // by hand")
     moved(monkeypatch)
     real = os.replace
 
@@ -650,8 +654,9 @@ def test_sync_swallows_failures_and_says_which_assistant_and_why(home, monkeypat
             raise PermissionError("denied")
         real(src, dst)
     monkeypatch.setattr(connect.os, "replace", replace)
-    errors = connect.sync(["cursor", "nope", "kiro"])
-    assert set(errors) == {"cursor", "nope"} and str(cursor) in errors["cursor"] and errors["nope"] == "未知的应用"
+    errors = connect.sync(["cursor", "nope", "kiro", "qwen-code"])
+    assert set(errors) == {"cursor", "nope", "qwen-code"} and str(cursor) in errors["cursor"] and errors["nope"] == "未知的应用"
+    assert "配置文件读不懂" in errors["qwen-code"] and bad.read_text() == "{ // by hand"
     assert json.loads(kiro.read_text())["mcpServers"][NAME]["command"] == "/new/place/djs"   # the others went on
 
 
@@ -660,10 +665,151 @@ def test_status_lists_every_assistant_with_the_path_shown_from_home(home):
     body = connect.status()
     assert set(body) == {"command", "config", "targets", "guided"} and body["command"] == C
     assert [t["key"] for t in body["targets"]] == list(PATHS)
-    assert {t["key"]: t["detected"] for t in body["targets"]} == {k: k == "cursor" for k in PATHS}
+    assert all(set(t) == {"key", "label", "state", "path"} for t in body["targets"])   # nothing says whether it is installed
     assert {t["key"]: t["path"] for t in body["targets"]}["cursor"] == "~/.cursor/mcp.json"
     assert {t["key"]: t["path"] for t in body["targets"]}["claude-desktop"] == "~/Library/Application Support/Claude/claude_desktop_config.json"
-    assert body["targets"][0] == {"key": "claude-code", "label": "Claude Code", "group": "intl", "detected": False, "state": "off",
-                                  "path": "~/.claude.json"}
+    assert body["targets"][0] == {"key": "claude-code", "label": "Claude Code", "state": "off", "path": "~/.claude.json"}
     assert body["guided"][0] == {"key": "qoder", "label": "Qoder", "where": "设置 → MCP → 我的服务 → 添加，粘贴配置"}
     assert len(body["guided"]) == 4
+
+
+# ---- Claude Code's permission rules: the read-only tools run without a question per call
+RULES = [f"mcp__{NAME}__{tool}" for tool in ("status", "provider_list", "search", "wait_for_search", "jobs_get", "job_detail",
+                                             "search_list", "task_list", "login_status", "login_check")]
+
+
+def settings_file(home, text=None):
+    path = home / ".claude" / "settings.json"
+    if text is not None:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text if isinstance(text, str) else dumped(text), encoding="utf-8")
+    return path
+
+
+def test_the_allowed_tools_are_the_ten_read_only_ones():
+    assert list(connect.ALLOWED_TOOLS) == [r.removeprefix(f"mcp__{NAME}__") for r in RULES] and len(RULES) == 10
+    assert list(connect.RULES) == RULES
+    assert not {"login", "logout", "crawl_start", "egress_add", "set_frequency"} & set(connect.ALLOWED_TOOLS)   # these keep asking
+
+
+def test_every_allowed_tool_is_a_tool_the_server_has():
+    import asyncio
+
+    from djs import server   # a tool that is renamed must not leave a rule that matches nothing
+    assert set(connect.ALLOWED_TOOLS) <= {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+
+
+def test_connecting_claude_code_makes_settings_json_with_the_rules(home):
+    installed(home, "claude-code")
+    assert connect.connect("claude-code") is True
+    path = settings_file(home)
+    assert json.loads(path.read_text()) == {"permissions": {"allow": RULES}}
+    assert path.read_text() == dumped({"permissions": {"allow": RULES}})   # two-space indent, final newline
+    assert names(path.parent) == ["settings.json"]   # a file that was not there has no backup
+
+
+def test_the_rules_are_merged_into_the_settings_without_touching_the_rest(home):
+    before = {"theme": "暗色", "permissions": {"deny": ["Bash(rm:*)"], "allow": ["Bash(ls:*)", RULES[2]], "defaultMode": "plan"}, "env": {"A": "1"}}
+    original = json.dumps(before, indent=4, ensure_ascii=False)   # the user's own layout
+    path = settings_file(home, original)
+    connect.connect("claude-code")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert list(data) == ["theme", "permissions", "env"] and list(data["permissions"]) == ["deny", "allow", "defaultMode"]   # nothing moved
+    assert data["permissions"]["allow"] == ["Bash(ls:*)", RULES[2], *[r for r in RULES if r != RULES[2]]]   # theirs first, no duplicate
+    assert {**data, "permissions": {**data["permissions"], "allow": None}} == {**before, "permissions": {**before["permissions"], "allow": None}}
+    assert path.read_text(encoding="utf-8") == dumped(data) and "暗色" in path.read_text(encoding="utf-8")   # no \u escapes
+    assert (path.parent / "settings.json.djs-bak").read_text(encoding="utf-8") == original   # the user's file as it was
+    for _ in range(2):   # again, and by a restart: nothing changes, nothing is duplicated
+        stat = path.stat()
+        connect.connect("claude-code")
+        connect.sync(["claude-code"])
+        assert (path.stat().st_mtime_ns, json.loads(path.read_text())["permissions"]["allow"].count(RULES[0])) == (stat.st_mtime_ns, 1)
+
+
+def test_a_settings_file_that_has_a_permissions_key_without_allow_or_none_at_all_gets_the_missing_parts(home):
+    path = settings_file(home, {"permissions": {"deny": []}, "x": 1})
+    connect.connect("claude-code")
+    assert json.loads(path.read_text()) == {"permissions": {"deny": [], "allow": RULES}, "x": 1}
+    path.write_text("{}")
+    connect.sync(["claude-code"])
+    assert json.loads(path.read_text()) == {"permissions": {"allow": RULES}}
+
+
+def test_the_rules_come_back_at_a_start_when_the_entry_is_there_already(home):
+    installed(home, "claude-code", dumped({"mcpServers": {NAME: entry("claude-code")}}))
+    assert connect.sync(["claude-code"]) == {}
+    assert json.loads(settings_file(home).read_text())["permissions"]["allow"] == RULES   # the entry was right, the rules were not there
+
+
+def test_disconnecting_claude_code_takes_exactly_its_rules_out(home):
+    path = settings_file(home, {"permissions": {"allow": ["Bash(ls:*)", *RULES, "mcp__other__tool", RULES[0]], "deny": ["x"]}, "k": 1})
+    installed(home, "claude-code", dumped({"mcpServers": {NAME: entry("claude-code"), "other": {}}}))
+    assert connect.disconnect("claude-code") is True
+    assert json.loads(path.read_text()) == {"permissions": {"allow": ["Bash(ls:*)", "mcp__other__tool"], "deny": ["x"]}, "k": 1}
+    assert json.loads((home / ".claude.json").read_text()) == {"mcpServers": {"other": {}}}
+    path.write_text(dumped({"permissions": {"allow": RULES}}))
+    connect.disconnect("claude-code")
+    assert json.loads(path.read_text()) == {"permissions": {"allow": []}}   # the emptied containers are Claude Code's own keys: they stay
+    stat = path.stat()
+    connect.disconnect("claude-code")
+    assert path.stat().st_mtime_ns == stat.st_mtime_ns   # nothing left to remove: no rewrite
+
+
+def test_the_rules_leave_with_the_switch_even_when_the_assistants_own_file_cannot_be_edited(home):
+    path = settings_file(home, {"permissions": {"allow": [*RULES]}})
+    installed(home, "claude-code", "{ // by hand")
+    with pytest.raises(ValueError, match="配置文件读不懂"):
+        connect.disconnect("claude-code")
+    assert json.loads(path.read_text()) == {"permissions": {"allow": []}}
+
+
+def test_other_assistants_never_touch_the_settings_file(home):
+    for key in connect.TARGETS:
+        if key.key != "claude-code":
+            connect.connect(key.key)
+            connect.disconnect(key.key)
+    assert not (home / ".claude").exists()
+
+
+@pytest.mark.parametrize("what", ["// mine\n{}", '{"permissions": {', '["permissions"]', '{"permissions": "all"}', '{"permissions": {"allow": "all"}}', b"\xff\xfe{\x00"])
+def test_a_settings_file_we_cannot_read_stays_byte_for_byte_and_the_entry_is_still_written(home, capsys, what):
+    path = settings_file(home)
+    path.parent.mkdir()
+    path.write_bytes(what if isinstance(what, bytes) else what.encode())
+    before, stat = path.read_bytes(), path.stat()
+    installed(home, "claude-code")
+    assert connect.connect("claude-code") is True   # no exception: the connection itself does not depend on the rules
+    assert json.loads((home / ".claude.json").read_text())["mcpServers"][NAME] == entry("claude-code")
+    assert (path.read_bytes(), path.stat().st_mtime_ns, names(path.parent)) == (before, stat.st_mtime_ns, ["settings.json"])   # no backup, no temp file
+    err = capsys.readouterr().err
+    assert "permission rules" in err and str(path) in err   # said on the terminal, not raised
+    assert connect.sync(["claude-code"]) == {} and path.read_bytes() == before   # the start does not fail either
+    assert connect.disconnect("claude-code") is True and path.read_bytes() == before
+    assert NAME not in json.loads((home / ".claude.json").read_text())["mcpServers"]
+
+
+def test_a_settings_file_that_cannot_be_written_does_not_stop_the_connection(home, monkeypatch, capsys):
+    path = settings_file(home, {"x": 1})
+    real = os.replace
+
+    def replace(src, dst):
+        if Path(dst) == path:
+            raise PermissionError("denied")
+        real(src, dst)
+    monkeypatch.setattr(connect.os, "replace", replace)
+    installed(home, "claude-code")
+    assert connect.connect("claude-code") is True
+    assert json.loads(path.read_text()) == {"x": 1} and "没能写入配置文件" in capsys.readouterr().err
+    assert set(names(path.parent)) <= {"settings.json", "settings.json.djs-bak"}   # no *.tmp
+
+
+def test_a_symlinked_settings_file_is_written_through_and_the_link_stays(home):
+    if os.name == "nt":
+        pytest.skip("symlinks need a privilege")
+    real = home / "dotfiles" / "settings.json"
+    real.parent.mkdir()
+    real.write_text('{"x": 1}')
+    (home / ".claude").mkdir()
+    (home / ".claude" / "settings.json").symlink_to(real)
+    connect.connect("claude-code")
+    assert (home / ".claude" / "settings.json").is_symlink() and json.loads(real.read_text())["permissions"]["allow"] == RULES

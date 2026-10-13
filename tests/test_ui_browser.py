@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-from djs import db, egress, engine, providers, results, service, taskqueue, ui_api, ui_app
+from djs import db, egress, engine, providers, results, service, taskqueue, ui_api, ui_app, update
 from djs.auth import LoginCancelled
 from djs.providers.base import Blocked, Login, Provider, get_json, need
 
@@ -162,51 +162,44 @@ def test_the_fake_auth_covers_everything_the_engine_and_service_ask_of_auth():
     assert asked and asked <= set(dir(FakeAuth)), asked - set(dir(FakeAuth))
 
 
-# The four /api/connect routes of the page, in memory: the real ones read and write the user's config files, and the
+# The two /api/connect routes of the page, in memory: the real ones read and write the user's config files, and the
 # page needs only the shape of their answers (djs.connect has its own tests).
 FAKE_CONFIG = '{\n  "mcpServers": {\n    "dear-job-seeker": {\n      "command": "/fake/djs"\n    }\n  }\n}'
-FAKE_TARGETS = [   # key, label, group, path
-    ("claude-code", "Claude Code", "intl", "~/.claude.json"),
-    ("claude-desktop", "Claude Desktop", "intl", "~/Library/Application Support/Claude/claude_desktop_config.json"),
-    ("codex", "Codex", "intl", "~/.codex/config.toml"),
-    ("gemini-cli", "Gemini CLI", "intl", "~/.gemini/settings.json"),
-    ("antigravity", "Antigravity", "intl", "~/.gemini/antigravity/mcp_config.json"),
-    ("cursor", "Cursor", "intl", "~/.cursor/mcp.json"),
-    ("kiro", "Kiro", "intl", "~/.kiro/settings/mcp.json"),
-    ("opencode", "OpenCode", "intl", "~/.config/opencode/opencode.json"),
-    ("workbuddy", "WorkBuddy", "cn", "~/.workbuddy/mcp.json"),
-    ("codebuddy", "CodeBuddy", "cn", "~/.codebuddy/.mcp.json"),
-    ("qwen-code", "Qwen Code", "cn", "~/.qwen/settings.json"),
-    ("kimi-code", "Kimi Code", "cn", "~/.kimi-code/mcp.json"),
+FAKE_TARGETS = [   # key, label, path
+    ("claude-code", "Claude Code", "~/.claude.json"),
+    ("claude-desktop", "Claude Desktop", "~/Library/Application Support/Claude/claude_desktop_config.json"),
+    ("codex", "Codex", "~/.codex/config.toml"),
+    ("gemini-cli", "Gemini CLI", "~/.gemini/settings.json"),
+    ("antigravity", "Antigravity", "~/.gemini/antigravity/mcp_config.json"),
+    ("cursor", "Cursor", "~/.cursor/mcp.json"),
+    ("kiro", "Kiro", "~/.kiro/settings/mcp.json"),
+    ("opencode", "OpenCode", "~/.config/opencode/opencode.json"),
+    ("workbuddy", "WorkBuddy", "~/.workbuddy/mcp.json"),
+    ("codebuddy", "CodeBuddy", "~/.codebuddy/.mcp.json"),
+    ("qwen-code", "Qwen Code", "~/.qwen/settings.json"),
+    ("kimi-code", "Kimi Code", "~/.kimi-code/mcp.json"),
 ]
 FAKE_GUIDED = [("qoder", "Qoder", "设置 → MCP → 我的服务 → 添加，粘贴配置"),
                ("trae", "Trae / Trae CN", "设置 → MCP → 添加 → 手动配置，粘贴配置"),
                ("lingma", "通义灵码", "设置 → MCP 服务 → 添加，粘贴配置"),
                ("cherry-studio", "Cherry Studio", "设置 → MCP 服务器 → 添加 → 从 JSON 导入，粘贴配置")]
-CONNECT_ROUTES = ("GET /api/connect", "POST /api/connect", "POST /api/connect_many", "POST /api/connect_asked")
+CONNECT_ROUTES = ("GET /api/connect", "POST /api/connect")
 REAL_CONNECT = {route: ui_api.ROUTES.get(route) for route in CONNECT_ROUTES}   # before any test swaps them for the fake
 
 
 class FakeConnect:
-    """Nothing is installed on the fake computer until a test lists it in `found`; `calls` is what the page posted,
-    `refuse` maps a key to the refusal its write answers with, and `gate` holds back the next GET until it is set."""
+    """Every assistant is off on the fake computer until a test sets its `state`; `calls` is what the page posted,
+    `refuse` maps a key to the refusal its write answers with."""
 
     def __init__(self):
-        self.found, self.state, self.asked = set(), {k: "off" for k, *_ in FAKE_TARGETS}, False
-        self.calls, self.refuse, self.gate = [], {}, None
+        self.state, self.calls, self.refuse = {k: "off" for k, *_ in FAKE_TARGETS}, [], {}
 
     def answer(self):
-        return {"command": "/fake/djs", "asked": self.asked, "config": FAKE_CONFIG,
-                "targets": [{"key": k, "label": label, "group": g, "detected": k in self.found, "state": self.state[k], "path": path}
-                            for k, label, g, path in FAKE_TARGETS],
+        return {"command": "/fake/djs", "enabled": [k for k, *_ in FAKE_TARGETS], "config": FAKE_CONFIG,
+                "targets": [{"key": k, "label": label, "state": self.state[k], "path": path} for k, label, path in FAKE_TARGETS],
                 "guided": [{"key": k, "label": label, "where": where} for k, label, where in FAKE_GUIDED]}
 
     def read(self, conn, a):
-        gate, self.gate = self.gate, None
-        if gate:
-            gate.wait(20)
-        if "get" in self.refuse:
-            raise ValueError(self.refuse["get"])
         return self.answer()
 
     def write(self, conn, a):
@@ -216,25 +209,42 @@ class FakeConnect:
         self.state[a["key"]] = "connected" if a["on"] else "off"
         return self.answer()
 
-    def many(self, conn, a):
-        self.calls.append(("POST /api/connect_many", a))
-        failed = []
-        for key in a["keys"]:
-            if key in self.refuse:
-                failed.append({"label": next(label for k, label, *_ in FAKE_TARGETS if k == key), "error": self.refuse[key]})
-            elif key in self.found:
-                self.state[key] = "connected"
-        self.asked = True
-        return {**self.answer(), "failed": failed}
+    def install(self, mp):
+        for route, fn in zip(CONNECT_ROUTES, (self.read, self.write)):
+            mp.setitem(ui_api.ROUTES, route, fn)
 
-    def ask_later(self, conn, a):
-        self.calls.append(("POST /api/connect_asked", a))
-        self.asked = True
-        return self.answer()
+
+class FakeUpdate:
+    """djs.update on the fake computer. `now` is what the page reads (no `current` = a source checkout); `after_check` is
+    what a manual check turns it into; `last` is how the last install went; `refuse` is the reason an install answers
+    with; `calls` is what the page asked of it and `closed` how often the window was asked to close."""
+
+    def __init__(self):
+        self.now = {"current": "1.4.0", "latest": None, "state": "none", "note": "", "install_on_quit": False}
+        self.can, self.last, self.after_check, self.refuse, self.calls, self.closed = (True, ""), None, {}, None, [], []
+        self.staged = None   # where the downloaded build is, once there is one
+
+    def check(self, manual=False):
+        self.calls.append("check")
+        self.now.update(self.after_check)
+        return {"found": self.now["state"] in ("downloading", "ready"), **self.now}
+
+    def later(self):
+        self.calls.append("later")
+        self.now["install_on_quit"] = True
+
+    def install_now(self):
+        self.calls.append("install")
+        if self.refuse:
+            raise ValueError(self.refuse)
 
     def install(self, mp):
-        for route, fn in zip(CONNECT_ROUTES, (self.read, self.write, self.many, self.ask_later)):
-            mp.setitem(ui_api.ROUTES, route, fn)
+        for name, fn in {"current": lambda: dict(self.now), "can_install": lambda: self.can, "last_result": lambda: self.last,
+                         "check": self.check, "later": self.later, "install_now": self.install_now,
+                         "staged": lambda: self.staged}.items():
+            mp.setattr(update, name, fn)   # the real one reads the data folder and the network
+        mp.setattr(ui_api, "_close_window", lambda: self.closed.append(1))
+        mp.setattr(ui_api, "_result_read", False)
 
 
 def jobs(name, n, start=1, **extra):
@@ -259,6 +269,7 @@ def boot(mp, home):
     mp.setattr(ui_api, "stamp", lambda: STAMP)
     app = SimpleNamespace(provs=provs, auth=auth, home=home, downloads=home / "Downloads", mp=mp, gates={}, blocked=set(),
                           broken=set(), requests=[], calls=Counter(), bridge_down=False, js_errors=[], detail_gates={}, connect=FakeConnect(),
+                          update=FakeUpdate(),
                           data={"nc": {KEYWORD: jobs("牛客", 25, jd="1. 负责前端开发\n2. 熟悉 Vue / React")},
                                 "gp": {KEYWORD: jobs("国聘", 60, 100, jd=None)}, "xh": {},
                                 "zl": {KEYWORD: jobs("智联", 40, 300)}, "zz": {KEYWORD: jobs("中智", 3, 500)}})
@@ -282,7 +293,8 @@ def boot(mp, home):
 
     real = egress.make_client
     mp.setattr(egress, "make_client", lambda *a, **k: real(*a, transport=httpx.MockTransport(handler), **k))
-    app.connect.install(mp)   # no assistant on this computer unless a test says so
+    app.connect.install(mp)   # no assistant's file is read or written
+    app.update.install(mp)   # no release is asked for, no build installed
     engine.start_worker()
     return app
 
@@ -1928,8 +1940,7 @@ def test_no_horizontal_scroll_and_the_grid_follows_the_width(browser, app, size,
 
 # ---------------------------------------------------------------- 连接 AI 助手
 def mixed(app):
-    """Five assistants on this computer: WorkBuddy and Qwen Code (国内), Claude Code, Codex and Cursor (其他)."""
-    app.connect.found.update({"claude-code", "codex", "cursor", "workbuddy", "qwen-code"})
+    """One of each state: Cursor is connected, Codex points elsewhere, Qwen Code's file cannot be read."""
     app.connect.state.update({"cursor": "connected", "codex": "stale", "qwen-code": "unreadable"})
 
 
@@ -1940,106 +1951,97 @@ def go_settings(page):
     return card
 
 
-def assistant(page, label, where="#connect-card"):
-    return page.locator(f"{where} .item", has=page.get_by_text(label, exact=True))
-
-
-def connect_groups(page):
-    """[[title, [names]], ...] of the assistants found on this computer, as the settings card lists them."""
-    return page.evaluate("""() => [...document.querySelectorAll('#connect-card .group')]
-      .map((g) => [g.querySelector('h3').innerText, [...g.querySelectorAll('.item-text b')].map((b) => b.innerText)])""")
+def tile(page, label):
+    return page.locator("#connect-card .tiles .item", has=page.get_by_text(label, exact=True))
 
 
 def toast(page):
     return page.locator("#toast")
 
 
-def test_the_settings_card_lists_what_is_on_this_computer_by_group_and_folds_the_rest_away(page, app):
+def columns(page):
+    return page.evaluate("getComputedStyle(document.querySelector('.tiles')).gridTemplateColumns.split(' ').length")
+
+
+def test_the_settings_card_is_a_grid_of_every_assistant_with_one_switch_each(page, app):
     mixed(app)
     card = go_settings(page)
     expect(card).to_contain_text("让你电脑上的 AI 助手直接用本程序查岗位，不用自己改配置文件。")
-    assert connect_groups(page) == [["国内应用", ["WorkBuddy", "Qwen Code"]], ["其他", ["Claude Code", "Codex", "Cursor"]]]   # 国内 first
-    states = {"WorkBuddy": ("未连接 · ~/.workbuddy/mcp.json", "false"), "Qwen Code": ("配置文件读不懂，请用复制配置 · ~/.qwen/settings.json", "false"),
-              "Claude Code": ("未连接 · ~/.claude.json", "false"), "Codex": ("需要更新 · ~/.codex/config.toml", "true"),
-              "Cursor": ("已连接 · ~/.cursor/mcp.json", "true")}
-    for label, (hint, checked) in states.items():
-        row = assistant(page, label)
-        expect(row.locator("small")).to_have_text(hint)
-        expect(row.get_by_role("switch", name=f"连接 {label}")).to_have_attribute("aria-checked", checked)
-    expect(card.get_by_role("switch")).to_have_count(5)   # an assistant that is not here has no switch
-    expect(assistant(page, "Qwen Code").get_by_role("switch")).to_be_disabled()   # a file we cannot read is not written to
-    expect(assistant(page, "Codex").get_by_role("button", name="更新")).to_be_visible()   # only the one that needs it
-    expect(card.get_by_role("button", name="更新")).to_have_count(1)
-    expect(assistant(page, "Cursor").get_by_role("button")).to_have_count(0)   # just the switch
-
-    missing = page.get_by_role("button", name="没检测到的应用")   # names only, folded
-    expect(missing).to_have_attribute("aria-expanded", "false")
-    expect(page.locator("#connect-missing")).to_be_hidden()
-    missing.click()
-    expect(page.locator("#connect-missing .pill")).to_have_text(
-        ["Claude Desktop", "Gemini CLI", "Antigravity", "Kiro", "OpenCode", "CodeBuddy", "Kimi Code"])
-    expect(page.locator("#connect-missing").get_by_role("button")).to_have_count(0)
-
-    guided = page.get_by_role("button", name="手动添加（没有公开配置文件的应用）")
-    expect(page.locator("#connect-guided")).to_be_hidden()
-    guided.click()
-    rows = page.locator("#connect-guided .item")
-    expect(rows.locator("b")).to_have_text(["Qoder", "Trae / Trae CN", "通义灵码", "Cherry Studio"])
-    expect(rows.nth(0).locator("small")).to_have_text("设置 → MCP → 我的服务 → 添加，粘贴配置")
-    expect(rows.nth(3).locator("small")).to_have_text("设置 → MCP 服务器 → 添加 → 从 JSON 导入，粘贴配置")
-    expect(rows.get_by_role("button", name="复制配置")).to_have_count(4)
+    expect(card).to_contain_text("找岗位助手启动时会自动在已开启的 AI 助手里配置 MCP。")
+    expect(card.locator(".tiles .item b")).to_have_text([label for _, label, *_ in FAKE_TARGETS])   # all twelve, in the app's order, none folded away
+    expect(card.locator(".tiles .avatar")).to_have_text([label[0] for _, label, *_ in FAKE_TARGETS])   # a round badge with the first letter
+    expect(card.get_by_role("switch")).to_have_count(12)
+    colours = page.evaluate("[...document.querySelectorAll('.tiles .avatar')].map((a) => getComputedStyle(a).backgroundColor)")
+    assert len(set(colours)) > 6 and colours == page.evaluate("[...document.querySelectorAll('.tiles .avatar')].map((a) => getComputedStyle(a).backgroundColor)")
+    on = {"Cursor", "Codex"}   # connected, and out of date: both are on
+    for _, label, *_ in FAKE_TARGETS:
+        expect(tile(page, label).get_by_role("switch", name=f"连接 {label}")).to_have_attribute("aria-checked", "true" if label in on else "false")
     assert page.evaluate(NAMELESS) == []
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
-def test_the_settings_card_says_so_when_nothing_is_found_and_keeps_the_manual_way(page, app):
-    card = go_settings(page)
-    expect(card).to_contain_text("这台电脑上还没有找到 AI 助手")
-    expect(card.get_by_role("switch")).to_have_count(0)
-    page.get_by_role("button", name="没检测到的应用").click()
-    expect(page.locator("#connect-missing .pill")).to_have_count(12)
-    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
-    expect(page.locator("#connect-guided .item")).to_have_count(4)
+def test_only_a_tile_that_is_not_as_it_should_be_has_a_line_under_its_name(page, app):
+    mixed(app)
+    go_settings(page)
+    expect(page.locator("#connect-card .tiles small")).to_have_count(2)
+    expect(tile(page, "Codex").locator("small")).to_have_text("需要更新")
+    expect(tile(page, "Qwen Code").locator("small")).to_have_text("配置文件读不懂，请用下面的复制配置")
+    expect(tile(page, "Cursor").locator("small")).to_have_count(0)   # connected: nothing to say
+    expect(tile(page, "Kiro").locator("small")).to_have_count(0)   # off: nothing to say, the path is not shown either
+    expect(page.locator("#connect-card .tiles")).not_to_contain_text("~/")
+
+
+def test_the_grid_has_four_columns_and_two_when_the_card_is_narrow(browser, app):
+    for size, expected in (((1280, 860), 4), ((960, 640), 4), ((640, 800), 2)):
+        page = open_page(browser, app, size, "#/settings")
+        expect(page.locator("#connect-card .tiles .item")).to_have_count(12)
+        assert columns(page) == expected, size
+        assert page.evaluate("document.querySelector('.tiles').scrollWidth <= document.querySelector('.tiles').clientWidth"), size
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), size
+        page.context.close()
 
 
 def test_a_switch_writes_the_entry_and_tells_what_happened(page, app):
     mixed(app)
     go_settings(page)
-    claude = assistant(page, "Claude Code")
+    claude = tile(page, "Claude Code")
     switch = claude.get_by_role("switch")
     switch.click()
     expect(toast(page)).to_have_text("已连接 Claude Code，重启它后生效")
     expect(switch).to_have_attribute("aria-checked", "true")
-    expect(claude.locator("small")).to_have_text("已连接 · ~/.claude.json")
     expect(switch).to_be_focused()   # the card was painted again: the keyboard stays where it was
+    expect(claude.locator("small")).to_have_count(0)
     switch.click()
     expect(toast(page)).to_have_text("已断开 Claude Code")
     expect(switch).to_have_attribute("aria-checked", "false")
-    assistant(page, "Cursor").get_by_role("switch").click()   # one that is on is switched off the same way
-    expect(assistant(page, "Cursor").get_by_role("switch")).to_have_attribute("aria-checked", "false")
+    tile(page, "Cursor").get_by_role("switch").click()   # one that is on is switched off the same way
+    expect(tile(page, "Cursor").get_by_role("switch")).to_have_attribute("aria-checked", "false")
     assert app.connect.calls == [("POST /api/connect", {"key": "claude-code", "on": True}), ("POST /api/connect", {"key": "claude-code", "on": False}),
                                  ("POST /api/connect", {"key": "cursor", "on": False})]
     assert app.connect.state["cursor"] == "off"
 
 
-def test_an_entry_that_points_elsewhere_is_brought_up_to_date_with_one_button(page, app):
+def test_an_entry_that_points_elsewhere_is_written_again_by_its_switch(page, app):
     mixed(app)
     go_settings(page)
-    codex = assistant(page, "Codex")
-    codex.get_by_role("button", name="更新").click()
+    codex = tile(page, "Codex")
+    codex.get_by_role("switch").click()
     expect(toast(page)).to_have_text("已更新 Codex，重启它后生效")
-    expect(codex.locator("small")).to_have_text("已连接 · ~/.codex/config.toml")
-    expect(codex.get_by_role("button", name="更新")).to_have_count(0)
-    expect(codex.get_by_role("switch")).to_have_attribute("aria-checked", "true")
+    expect(codex.locator("small")).to_have_count(0)
+    expect(codex.get_by_role("switch")).to_have_attribute("aria-checked", "true")   # it stays on
     assert app.connect.calls == [("POST /api/connect", {"key": "codex", "on": True})]
+    codex.get_by_role("switch").click()   # now it is right: the next click switches it off
+    expect(codex.get_by_role("switch")).to_have_attribute("aria-checked", "false")
+    assert app.connect.calls[-1] == ("POST /api/connect", {"key": "codex", "on": False})
 
 
 def test_a_refused_write_is_said_in_words_and_leaves_the_switch_where_it_was(page, app):
     mixed(app)
     app.connect.refuse["cursor"] = "配置文件正在被其他程序修改，请稍后再试"
     go_settings(page)
-    switch = assistant(page, "Cursor").get_by_role("switch")
+    switch = tile(page, "Cursor").get_by_role("switch")
     switch.click()
-    expect(toast(page)).to_have_text("配置文件正在被其他程序修改，请稍后再试")
+    expect(toast(page)).to_have_text("没能更新这个 AI 助手的配置：配置文件正在被其他程序修改，请稍后再试")
     expect(toast(page)).to_have_class(re.compile(r"\bbad\b"))
     expect(switch).to_have_attribute("aria-checked", "true")
     expect(switch).to_be_enabled()   # it can be tried again
@@ -2048,33 +2050,38 @@ def test_a_refused_write_is_said_in_words_and_leaves_the_switch_where_it_was(pag
     expect(switch).to_have_attribute("aria-checked", "false")
 
 
-def test_what_was_opened_in_the_card_stays_open_when_it_is_painted_again(page, app):
+def test_an_assistant_whose_file_cannot_be_read_says_why_when_it_is_tried(page, app):
     mixed(app)
+    app.connect.refuse["qwen-code"] = "配置文件读不懂（可能带有注释）：~/.qwen/settings.json，请改用“复制配置”手动添加"
     go_settings(page)
-    page.get_by_role("button", name="没检测到的应用").click()
-    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
-    assistant(page, "Claude Code").get_by_role("switch").click()
-    expect(assistant(page, "Claude Code").get_by_role("switch")).to_have_attribute("aria-checked", "true")
-    expect(page.locator("#connect-missing")).to_be_visible()
-    expect(page.locator("#connect-guided")).to_be_visible()
+    switch = tile(page, "Qwen Code").get_by_role("switch")
+    switch.click()
+    expect(toast(page)).to_contain_text("没能更新这个 AI 助手的配置：配置文件读不懂")
+    expect(switch).to_have_attribute("aria-checked", "false")
+    assert app.connect.calls == [("POST /api/connect", {"key": "qwen-code", "on": True})]
 
 
 COPY_OK = """() => { window.copied = [];
   Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async (t) => { copied.push(t); }}}); }"""
 
 
-def test_copy_config_puts_the_config_on_the_clipboard(page, app):
+def test_the_other_clients_block_lists_where_to_paste_and_copies_the_config(page, app):
     mixed(app)
-    go_settings(page)
+    card = go_settings(page)
+    block = card.locator(".block")
+    expect(block.get_by_role("heading", name="连接其他 MCP 客户端")).to_be_visible()
+    lines = block.locator(".guided p")
+    expect(lines).to_have_text([f"{label} · {where}" for _, label, where in FAKE_GUIDED])
+    expect(lines.nth(0)).to_have_text("Qoder · 设置 → MCP → 我的服务 → 添加，粘贴配置")
+    assert block.bounding_box()["y"] > card.locator(".tiles").bounding_box()["y"] + card.locator(".tiles").bounding_box()["height"]   # under a divider
+    assert page.evaluate("getComputedStyle(document.querySelector('#connect-card .block')).borderTopWidth") == "1px"
+    expect(card.get_by_role("button", name="复制配置")).to_have_count(1)   # the one button, not one per app
     page.evaluate(COPY_OK)
-    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
-    assistant(page, "通义灵码").get_by_role("button", name="复制配置").click()
+    card.get_by_role("button", name="复制配置").click()
     expect(toast(page)).to_have_text("已复制")
     assert page.evaluate("copied") == [FAKE_CONFIG]
-    assistant(page, "Qwen Code").get_by_role("button", name="复制配置").click()   # a file we cannot read: the same text, to paste by hand
-    until(page, lambda: len(page.evaluate("copied")) == 2)
-    assert page.evaluate("copied") == [FAKE_CONFIG] * 2
     assert not app.connect.calls   # copying changes nothing on the computer
+    assert page.evaluate(NAMELESS) == []
 
 
 def test_copy_config_falls_back_to_the_old_copy_command_where_the_window_has_no_clipboard_api(page, app):
@@ -2082,8 +2089,7 @@ def test_copy_config_falls_back_to_the_old_copy_command_where_the_window_has_no_
     page.evaluate("""() => { window.copied = [];
       Object.defineProperty(navigator, 'clipboard', {configurable: true, value: undefined});
       document.execCommand = (cmd) => { copied.push([cmd, document.querySelector('textarea').value]); return true; }; }""")
-    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
-    copy = assistant(page, "Qoder").get_by_role("button", name="复制配置")
+    copy = page.get_by_role("button", name="复制配置")
     copy.click()
     expect(toast(page)).to_have_text("已复制")
     assert page.evaluate("copied") == [["copy", FAKE_CONFIG]]
@@ -2095,174 +2101,40 @@ def test_a_copy_that_fails_says_so_plainly(page, app):
     go_settings(page)
     page.evaluate("""() => { Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async () => { throw new Error('denied'); }}});
       document.execCommand = () => false; }""")
-    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
-    assistant(page, "Qoder").get_by_role("button", name="复制配置").click()
+    page.get_by_role("button", name="复制配置").click()
     expect(toast(page)).to_have_text("没能复制到剪贴板，请再试一次")
     expect(toast(page)).to_have_class(re.compile(r"\bbad\b"))
     page.evaluate("() => { document.execCommand = () => { throw new Error('not allowed'); }; }")   # a window that throws instead of answering false
-    assistant(page, "Qoder").get_by_role("button", name="复制配置").click()
+    page.get_by_role("button", name="复制配置").click()
     page.wait_for_timeout(300)
     expect(toast(page)).to_have_text("没能复制到剪贴板，请再试一次")
     expect(page.locator("textarea")).to_have_count(0)
 
 
-def invitation(page):
-    return page.locator("#connect-ask .connect-ask")
-
-
-def test_the_first_search_page_invites_to_connect_every_assistant_found_all_ticked(page, app):
+def test_the_search_page_has_no_connection_card_and_never_asks_about_it(page, app):
     mixed(app)
-    page.reload()
-    card = invitation(page)
-    expect(card.get_by_role("heading", name="把“找岗位助手”接入你电脑上的 AI 助手？")).to_be_visible()
-    expect(card.locator(".item b")).to_have_text(["Claude Code", "Codex", "Cursor", "WorkBuddy", "Qwen Code"])
-    for label in ("Claude Code", "Codex", "Cursor", "WorkBuddy"):
-        expect(card.get_by_role("button", name=label)).to_have_attribute("aria-pressed", "true")
-    expect(assistant(page, "Claude Code", "#connect-ask").locator("small")).to_have_text("~/.claude.json")
-    expect(assistant(page, "Cursor", "#connect-ask").locator("small")).to_have_text("已连接")   # nothing left to write there
-    unreadable = assistant(page, "Qwen Code", "#connect-ask")   # offered a copy in the settings, not a tick that would fail
-    expect(unreadable).to_contain_text("配置文件读不懂，请到设置里复制配置")
-    expect(unreadable.locator("button")).to_have_count(0)
-    expect(card.get_by_role("button", name="接入", exact=True)).to_be_visible()
-    expect(card.get_by_role("button", name="以后再说")).to_be_visible()
-    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()   # the form is still where the keyboard is
-    form, examples = page.locator("form.searchbar").bounding_box(), page.locator(".examples").bounding_box()
-    box = card.bounding_box()
-    assert box["y"] > examples["y"] + examples["height"] > form["y"] + form["height"]   # under the form and its examples: they never move for it
-    assert page.evaluate(NAMELESS) == []
-
-
-def test_connect_writes_the_ticked_assistants_and_the_card_is_gone_for_good(page, app):
-    mixed(app)
-    page.reload()
-    card = invitation(page)
-    card.get_by_role("button", name="Cursor").click()   # un-tick one
-    expect(card.get_by_role("button", name="Cursor")).to_have_attribute("aria-pressed", "false")
-    expect(card.get_by_role("button", name="Cursor")).to_be_focused()
-    card.get_by_role("button", name="接入", exact=True).click()
-    expect(toast(page)).to_have_text("已接入 3 个 AI 助手，重启这些应用后生效")
-    expect(page.locator("#connect-ask")).to_be_empty()
-    assert app.connect.calls == [("POST /api/connect_many", {"keys": ["claude-code", "codex", "workbuddy"]})]   # only the ticked, nothing unreadable
-    assert app.connect.state["claude-code"] == "connected" and app.connect.state["cursor"] == "connected"
     page.reload()
     expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()
-    page.wait_for_timeout(300)
-    expect(page.locator("#connect-ask")).to_be_empty()   # asked: it does not come back
-    go_settings(page)
-    expect(assistant(page, "Claude Code").locator("small")).to_have_text("已连接 · ~/.claude.json")
-
-
-def test_connect_with_nothing_ticked_asks_for_a_tick_instead_of_doing_nothing(page, app):
-    mixed(app)
-    page.reload()
-    card = invitation(page)
-    for label in ("Claude Code", "Codex", "Cursor", "WorkBuddy"):
-        card.get_by_role("button", name=label).click()
-    card.get_by_role("button", name="接入", exact=True).click()
-    expect(toast(page)).to_have_text("请先勾选要接入的 AI 助手")
-    expect(card).to_be_visible()
+    page.wait_for_timeout(500)
+    assert page.locator("#connect-ask, .connect-ask, #connect-card").count() == 0
+    assert "接入" not in page.locator("#view").inner_text() and "AI 助手" not in page.locator("#view").inner_text()
+    assert app.calls["GET /api/connect"] == 0   # not even asked: the page works without it
     assert app.connect.calls == []
-
-
-def test_connect_names_what_could_not_be_written_and_leads_to_the_settings(page, app):
-    mixed(app)
-    app.connect.refuse["codex"] = "配置文件读不懂（可能带有注释）：~/.codex/config.toml，请改用“复制配置”手动添加"
-    page.reload()
-    invitation(page).get_by_role("button", name="接入", exact=True).click()
-    expect(toast(page)).to_contain_text("已接入 3 个；没接入成功：Codex（配置文件读不懂（可能带有注释）：~/.codex/config.toml，请改用“复制配置”手动添加）")
-    expect(toast(page)).to_have_class(re.compile(r"\bbad\b"))
-    expect(page.locator("#connect-ask")).to_be_empty()
-    toast(page).get_by_role("button", name="去设置").click()
-    expect(page).to_have_url(re.compile(r"#/settings$"))
-    expect(page.locator("#connect-card")).to_be_visible()
-
-
-def test_later_only_marks_it_asked(page, app):
-    mixed(app)
-    page.reload()
-    invitation(page).get_by_role("button", name="以后再说").click()
-    expect(toast(page)).to_have_text("好的，想接入时到“设置”里就行")
-    expect(page.locator("#connect-ask")).to_be_empty()
-    assert app.connect.calls == [("POST /api/connect_asked", {})]
-    assert app.connect.state["claude-code"] == "off"   # nothing was written
-    page.reload()
-    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()
-    page.wait_for_timeout(300)
-    expect(page.locator("#connect-ask")).to_be_empty()
-
-
-def test_the_invitation_is_not_there_when_it_was_answered_or_there_is_nothing_to_offer_it_for(page, app):
-    page.reload()   # nothing on this computer
-    page.wait_for_timeout(300)
-    expect(page.locator("#connect-ask")).to_be_empty()
-    app.connect.found.update({"qwen-code"})   # only an assistant whose file we cannot read: nothing to tick
-    app.connect.state["qwen-code"] = "unreadable"
-    page.reload()
-    page.wait_for_timeout(300)
-    expect(page.locator("#connect-ask")).to_be_empty()
-    mixed(app)
-    app.connect.asked = True
-    page.reload()
-    page.wait_for_timeout(300)
-    expect(page.locator("#connect-ask")).to_be_empty()
-    app.connect.asked = False
-    app.connect.state.update({k: "connected" for k in app.connect.found if k != "qwen-code"})   # all found are connected already (by hand, or in the settings)
-    page.reload()
-    page.wait_for_timeout(300)
-    expect(page.locator("#connect-ask")).to_be_empty()
-    app.connect.state["codex"] = "stale"   # one that points elsewhere is worth the question
-    page.reload()
-    expect(invitation(page)).to_be_visible()   # the same page does show it when it is due
-
-
-def test_a_failure_to_ask_is_not_worth_a_message_and_never_stops_the_search_form(page, app):
-    mixed(app)
-    app.connect.refuse["get"] = "出了点问题"
-    page.reload()
-    expect(page.get_by_label("岗位或关键词", exact=True)).to_be_focused()
     finish_search(page)
-    expect(page.locator("#connect-ask")).to_be_empty()
-    expect(toast(page)).not_to_have_class(re.compile(r"\bshow\b"))
+    assert app.calls["GET /api/connect"] == 0 and page.locator(".connect-ask").count() == 0
 
 
-def test_the_search_form_does_not_wait_for_the_invitation(page, app):
+@pytest.mark.parametrize("size", [(640, 800), (700, 800), (960, 640), (1280, 860)])
+def test_the_card_fits_the_window(browser, app, size):
     mixed(app)
-    gate = app.connect.gate = threading.Event()   # the next GET /api/connect is held back
-    try:
-        page.reload()
-        finish_search(page)   # the whole search runs while the answer is still outstanding
-        expect(page.locator("#connect-ask")).to_be_empty()
-    finally:
-        gate.set()
-    expect(invitation(page)).to_be_visible()   # and the invitation comes when the answer does
-
-
-def test_an_answer_that_comes_after_the_page_was_left_paints_nothing(page, app):
-    mixed(app)
-    gate = app.connect.gate = threading.Event()
-    page.reload()
-    go_settings(page)   # the page is left while the first answer is outstanding
-    gate.set()
-    page.wait_for_timeout(400)
+    page = open_page(browser, app, size, "#/settings")
     expect(page.locator("#connect-card")).to_be_visible()
-    page.get_by_role("link", name="查找", exact=True).click()
-    expect(invitation(page)).to_be_visible()   # coming back asks again
-    # the fixture asserts that the late answer raised no error in the page
-
-
-@pytest.mark.parametrize("size", [(700, 800), (960, 640), (1280, 860)])
-def test_the_card_and_the_invitation_fit_the_window(browser, app, size):
-    mixed(app)
-    page = open_page(browser, app, size)
-    expect(invitation(page)).to_be_visible()
-    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), size
-    assert page.evaluate("document.querySelector('.connect-ask .items').getBoundingClientRect().width <= document.querySelector('.connect-ask').getBoundingClientRect().width")
-    page.get_by_role("link", name="设置").click()
-    expect(page.locator("#connect-card")).to_be_visible()
-    page.get_by_role("button", name="没检测到的应用").click()
-    page.get_by_role("button", name="手动添加（没有公开配置文件的应用）").click()
     page.wait_for_timeout(200)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), size
+    cards = page.evaluate("""() => { const c = document.querySelector('#connect-card').getBoundingClientRect();
+      return [...document.querySelectorAll('#connect-card .item, #connect-card .block, #connect-card .btn')].every((e) => {
+        const r = e.getBoundingClientRect(); return r.left >= c.left - 0.5 && r.right <= c.right + 0.5; }); }""")
+    assert cards, size
     page.context.close()
 
 
@@ -2278,20 +2150,297 @@ def test_the_real_routes_connect_and_disconnect_through_the_page(browser, app):
     app.mp.delenv("KIMI_CODE_HOME", raising=False)
     for route, fn in REAL_CONNECT.items():
         app.mp.setitem(ui_api.ROUTES, route, fn)
-    page = open_page(browser, app)
-    card = invitation(page)
-    expect(card.locator(".item b")).to_have_text(["Cursor"])   # the only assistant with a folder here
-    card.get_by_role("button", name="接入", exact=True).click()
-    expect(page.locator("#toast")).to_have_text("已接入 1 个 AI 助手，重启这些应用后生效")
+    page = open_page(browser, app, hash="#/settings")
+    expect(page.locator("#connect-card .tiles .item")).to_have_count(12)
+    expect(page.locator("#connect-card .tiles small")).to_have_count(0)
+    expect(page.locator("#connect-card").get_by_role("switch", name=re.compile("连接"))).to_have_count(12)
+    row = tile(page, "Cursor")
+    expect(row.get_by_role("switch")).to_have_attribute("aria-checked", "false")   # nothing is written by looking
+    row.get_by_role("switch").click()
+    expect(page.locator("#toast")).to_have_text("已连接 Cursor，重启它后生效")
     written = json.loads((me / ".cursor" / "mcp.json").read_text())
     assert written["mcpServers"]["other"] == {"command": "x"}   # what was there stays
     assert list(written["mcpServers"]["dear-job-seeker"]) == ["command", "args"]
     assert (me / ".cursor" / "mcp.json.djs-bak").exists()   # the first change keeps the original
-    page.get_by_role("link", name="设置").click()
-    row = assistant(page, "Cursor")
-    expect(row.locator("small")).to_contain_text("已连接")
+    expect(row.get_by_role("switch")).to_have_attribute("aria-checked", "true")
+    tile(page, "Claude Code").get_by_role("switch").click()   # a file that is not there yet is made, with the rules
+    expect(tile(page, "Claude Code").get_by_role("switch")).to_have_attribute("aria-checked", "true")
+    assert len(json.loads((me / ".claude" / "settings.json").read_text())["permissions"]["allow"]) == 10
     row.get_by_role("switch").click()
     expect(row.get_by_role("switch")).to_have_attribute("aria-checked", "false")
     assert "dear-job-seeker" not in json.loads((me / ".cursor" / "mcp.json").read_text())["mcpServers"]
-    assert json.loads((app.home / "ui_prefs.json").read_text())["connect"] == {"on": [], "asked": True}
+    saved = json.loads((app.home / "ui_prefs.json").read_text())["connect"]
+    assert "cursor" not in saved["enabled"] and "claude-code" in saved["enabled"] and len(saved["enabled"]) == 11
     page.context.close()
+
+
+# ---------------------------------------------------------------- 软件更新
+READY = {"state": "ready", "latest": "1.4.1"}
+SHOWN = re.compile(r"\bshow\b")
+
+
+def fast_updates(page):
+    """Read the update state every 0.2 s instead of every 5 s (and now: the timer that is waiting is replaced)."""
+    page.evaluate("UPDATE_POLL_MS = 200; pollUpdate()")
+
+
+def ready_message(page):
+    return page.locator("#update-ready")
+
+
+def update_card(page):
+    return page.locator("#update-card")
+
+
+def settings_with(browser, app, **now):
+    app.update.now.update(now)
+    page = open_page(browser, app, hash="#/settings")
+    expect(update_card(page).get_by_role("heading", name="软件更新")).to_be_visible()
+    return page
+
+
+def test_a_downloaded_build_shows_the_persistent_message_with_its_two_buttons(page, app):
+    expect(ready_message(page)).to_be_hidden()
+    app.update.now.update(state="downloading", latest="1.4.1")
+    fast_updates(page)
+    page.wait_for_timeout(500)
+    expect(ready_message(page)).to_be_hidden()   # on its way: nothing to say yet
+    app.update.now.update(READY)
+    message = ready_message(page)
+    expect(message).to_be_visible()
+    expect(message.get_by_role("heading", name="更新已就绪")).to_be_visible()
+    expect(message).to_contain_text("新版本已下载好，可以安装了。")
+    expect(message.get_by_role("button")).to_have_text(["安装并重启", "下次启动时安装"])
+    box = message.bounding_box()   # at the lower right of the window
+    assert box["x"] + box["width"] > 1280 - 40 and box["y"] + box["height"] > 860 - 40
+    page.mouse.click(300, 300)   # not dismissed by clicking away, nor by Escape, nor by changing page
+    page.keyboard.press("Escape")
+    page.get_by_role("link", name="设置").click()
+    expect(page.get_by_role("heading", name="设置")).to_be_visible()
+    expect(message).to_be_visible()
+    assert page.evaluate(NAMELESS) == []
+    assert app.update.calls == []   # looking asks nothing of the updater but its state
+
+
+def test_install_on_next_launch_closes_the_message_and_it_stays_closed(page, app):
+    app.update.now.update(READY)
+    fast_updates(page)
+    message = ready_message(page)
+    expect(message).to_be_visible()
+    message.get_by_role("button", name="下次启动时安装").click()
+    expect(message).to_be_hidden()
+    assert app.update.calls == ["later"] and app.update.now["install_on_quit"] is True
+    page.wait_for_timeout(700)   # a few more reads: it does not come back
+    expect(message).to_be_hidden()
+    page.reload()
+    expect(page.get_by_role("heading", name="想找什么工作？")).to_be_visible()
+    page.wait_for_timeout(300)
+    expect(message).to_be_hidden()
+    assert app.update.closed == []
+
+
+def test_no_message_when_install_on_next_launch_is_already_chosen(page, app):
+    app.update.now.update(READY, install_on_quit=True)
+    fast_updates(page)
+    page.wait_for_timeout(700)
+    expect(ready_message(page)).to_be_hidden()
+    assert app.calls["GET /api/update"] >= 2
+
+
+def test_install_and_restart_asks_the_updater_and_closes_the_window_when_no_search_is_running(page, app):
+    asked = []
+    page.on("dialog", lambda d: (asked.append(d.message), d.dismiss()))
+    app.update.now.update(READY)
+    fast_updates(page)
+    ready_message(page).get_by_role("button", name="安装并重启").click()
+    until(page, lambda: app.update.closed)
+    assert app.update.calls == ["install"] and asked == []   # nothing running: no question
+    expect(ready_message(page).get_by_role("button", name="安装并重启")).to_be_disabled()   # not twice
+
+
+def test_install_and_restart_names_the_searches_that_are_running_and_waits_for_the_answer(page, app):
+    hold(app, *app.provs)
+    start_search(page)
+    expect(page.locator(".search-card")).to_have_count(1)
+    expect(page.get_by_role("button", name="开始查找")).to_be_enabled()   # Enter does nothing while the button is busy
+    start_search(page, keyword="后端工程师")
+    expect(page.locator(".search-card .pill")).to_have_text(["查找中", "查找中"])
+    asked = []
+    answer = {"accept": False}
+    page.on("dialog", lambda d: (asked.append(d.message), d.accept() if answer["accept"] else d.dismiss()))
+    app.update.now.update(READY)
+    fast_updates(page)
+    install = ready_message(page).get_by_role("button", name="安装并重启")
+    install.click()
+    expect(install).to_be_enabled()   # the question was answered with no: nothing happened
+    assert asked == ["现在有 2 个查找在进行，重启后会自动继续。确定重启吗？"]
+    assert app.update.calls == [] and app.update.closed == []
+    answer["accept"] = True
+    install.click()
+    until(page, lambda: app.update.closed)
+    assert len(asked) == 2 and app.update.calls == ["install"]
+
+
+def test_a_refused_install_says_why_and_the_app_keeps_running(page, app):
+    app.update.now.update(READY)
+    app.update.refuse = "还有一个 AI 助手在用旧版本，请先关闭它再安装"
+    fast_updates(page)
+    install = ready_message(page).get_by_role("button", name="安装并重启")
+    install.click()
+    expect(page.locator("#toast")).to_have_text("还有一个 AI 助手在用旧版本，请先关闭它再安装")
+    expect(page.locator("#toast")).to_have_class(re.compile(r"\bbad\b"))
+    expect(install).to_be_enabled()
+    expect(ready_message(page)).to_be_visible()
+    assert app.update.closed == []
+
+
+def test_a_build_that_cannot_be_installed_here_says_so_and_shows_where_the_new_one_is(browser, app, monkeypatch):
+    launched = []
+    monkeypatch.setattr(ui_api, "subprocess", SimpleNamespace(Popen=launched.append))
+    app.update.can = (False, "这个程序装在需要管理员权限的位置，请手动更新")
+    app.update.staged = app.home / "updates" / "1.4.1" / "stage" / "找岗位助手.app"
+    page = settings_with(browser, app, **READY)
+    message = ready_message(page)
+    expect(message).to_be_visible()
+    expect(message).to_contain_text("这个程序装在需要管理员权限的位置，请手动更新")
+    expect(message.get_by_role("button")).to_have_text(["打开下载好的位置"])   # nothing that could not work: no install, no "next time"
+    card = update_card(page)
+    expect(card).to_contain_text("这个程序装在需要管理员权限的位置，请手动更新")
+    expect(card).not_to_contain_text("已连接的 AI 助手要重启一次才会用新版")
+    expect(card.get_by_role("button", name="重启并安装更新")).to_have_count(0)
+    message.get_by_role("button", name="打开下载好的位置").click()
+    until(page, lambda: launched)
+    assert str(app.update.staged.parent) in launched[0][-1] and app.update.calls == []   # the folder opens; no install was tried
+    card.get_by_role("button", name="打开下载好的位置").click()
+    until(page, lambda: len(launched) == 2)
+    page.context.close()
+
+
+def test_the_settings_row_when_nothing_is_new(browser, app, monkeypatch):
+    launched = []
+    monkeypatch.setattr(ui_api, "subprocess", SimpleNamespace(Popen=launched.append))
+    page = settings_with(browser, app)
+    card = update_card(page)
+    expect(card).to_contain_text("当前版本 1.4.0")
+    expect(card.get_by_role("button")).to_have_text(["检查更新", "打开日志文件夹"])
+    expect(card.get_by_role("button", name="检查更新")).to_be_enabled()
+    expect(card).not_to_contain_text("已连接的 AI 助手要重启一次才会用新版")
+    expect(card.locator(".switch")).to_have_count(0)   # no switch, no skip
+    expect(page.locator("nav")).not_to_contain_text("更新")   # no pill in the top bar
+    expect(ready_message(page)).to_be_hidden()
+    card.get_by_role("button", name="打开日志文件夹").click()
+    until(page, lambda: launched)
+    assert launched[0][1:] == [str(app.home / "logs")] and (app.home / "logs").is_dir()
+    assert page.evaluate(NAMELESS) == []
+    page.context.close()
+
+
+def test_the_settings_row_while_a_build_is_downloading(browser, app):
+    page = settings_with(browser, app, state="downloading", latest="1.4.1")
+    card = update_card(page)
+    expect(card).to_contain_text("当前版本 1.4.0")
+    expect(card.get_by_role("button", name="正在下载新版本…")).to_be_disabled()
+    expect(card.get_by_role("button", name="检查更新")).to_have_count(0)
+    expect(card).not_to_contain_text("已连接的 AI 助手要重启一次才会用新版")
+    expect(ready_message(page)).to_be_hidden()
+    fast_updates(page)   # the download ends: the same card turns into the install button, by itself
+    app.update.now.update(READY)
+    expect(card.get_by_role("button", name="重启并安装更新")).to_be_enabled()
+    expect(ready_message(page)).to_be_visible()
+    page.context.close()
+
+
+def test_the_settings_row_when_a_build_is_ready_installs_it_and_warns_the_assistants(browser, app):
+    page = settings_with(browser, app, **READY, install_on_quit=True)   # chosen "next launch": the message is gone, the row still offers it
+    card = update_card(page)
+    expect(ready_message(page)).to_be_hidden()
+    expect(card.get_by_role("button", name="重启并安装更新")).to_have_class(re.compile(r"\bprimary\b"))
+    expect(card.get_by_role("button", name="检查更新")).to_have_count(0)
+    expect(card).to_contain_text("已连接的 AI 助手要重启一次才会用新版")
+    card.get_by_role("button", name="重启并安装更新").click()
+    until(page, lambda: app.update.closed)
+    assert app.update.calls == ["install"]
+    page.context.close()
+
+
+def test_the_settings_row_when_a_download_was_refused_shows_the_note(browser, app):
+    page = settings_with(browser, app, state="failed", latest="1.4.1", note="下载的文件没通过校验")
+    card = update_card(page)
+    expect(card).to_contain_text("下载的文件没通过校验")
+    expect(card.get_by_role("button", name="检查更新")).to_be_enabled()
+    expect(card).not_to_contain_text("已连接的 AI 助手要重启一次才会用新版")
+    expect(ready_message(page)).to_be_hidden()
+    page.context.close()
+
+
+def test_the_settings_row_of_a_source_checkout_does_not_update(browser, app):
+    page = settings_with(browser, app, current=None)
+    card = update_card(page)
+    expect(card).to_contain_text("开发版")
+    expect(card).to_contain_text("开发版不会自动更新")
+    expect(card).not_to_contain_text("当前版本")
+    expect(card.get_by_role("button", name="检查更新")).to_be_disabled()
+    expect(card.get_by_role("button", name="打开日志文件夹")).to_be_enabled()
+    page.context.close()
+
+
+def test_a_manual_check_that_finds_a_build_says_so_for_three_seconds_and_the_row_follows(browser, app):
+    app.update.after_check = {"state": "downloading", "latest": "1.4.1"}
+    page = settings_with(browser, app)
+    toast = page.locator("#toast")
+    page.get_by_role("button", name="检查更新").click()
+    expect(toast).to_have_text("有新版本 · 正在下载新版本…")
+    expect(toast).to_have_class(SHOWN)
+    expect(update_card(page).get_by_role("button", name="正在下载新版本…")).to_be_disabled()
+    expect(toast).not_to_have_class(SHOWN, timeout=3500)   # gone by itself after about three seconds
+    assert app.update.calls == ["check"]
+    page.context.close()
+
+
+def test_a_manual_check_that_finds_nothing_says_so(browser, app):
+    page = settings_with(browser, app)
+    button = page.get_by_role("button", name="检查更新")
+    button.click()
+    expect(page.locator("#toast")).to_have_text("当前没有可用的更新")
+    expect(button).to_be_enabled()
+    expect(ready_message(page)).to_be_hidden()
+    assert app.update.calls == ["check"]
+    page.context.close()
+
+
+def test_a_manual_check_that_ends_in_a_refused_download_says_nothing_but_the_row_shows_the_note(browser, app):
+    app.update.after_check = {"state": "failed", "latest": "1.4.1", "note": "下载的文件没通过校验"}
+    page = settings_with(browser, app)
+    page.get_by_role("button", name="检查更新").click()
+    expect(update_card(page)).to_contain_text("下载的文件没通过校验")
+    expect(page.locator("#toast")).not_to_have_class(SHOWN)   # a failed check is for the log, not for a message
+    page.context.close()
+
+
+def test_a_manual_check_that_finds_a_build_already_downloaded_shows_the_message_at_once(browser, app):
+    app.update.after_check = READY
+    page = settings_with(browser, app)
+    page.get_by_role("button", name="检查更新").click()
+    expect(ready_message(page)).to_be_visible()
+    expect(page.locator("#toast")).not_to_contain_text("正在下载")   # it is not downloading any more
+    expect(update_card(page).get_by_role("button", name="重启并安装更新")).to_be_visible()
+    page.context.close()
+
+
+def test_how_the_last_install_went_is_said_once_at_the_start_of_the_app(browser, app):
+    app.update.last = {"ok": True, "version": "1.4.1", "text": "已更新到 1.4.1"}
+    page = open_page(browser, app)
+    expect(page.locator("#toast")).to_have_text("已更新到 1.4.1")
+    page.reload()   # the app did not start again: nothing more to say
+    expect(page.get_by_role("heading", name="想找什么工作？")).to_be_visible()
+    page.wait_for_timeout(500)
+    expect(page.locator("#toast")).not_to_have_class(SHOWN)
+    page.context.close()
+
+
+def test_a_failed_install_is_told_the_same_way(browser, app):
+    app.update.last = {"ok": False, "version": "1.4.1", "text": "更新没有成功，已恢复原来的版本"}
+    page = open_page(browser, app, hash="#/settings")   # whatever page the app opens on
+    expect(page.locator("#toast")).to_have_text("更新没有成功，已恢复原来的版本")
+    page.context.close()
+

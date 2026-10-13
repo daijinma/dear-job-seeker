@@ -10,9 +10,10 @@ from contextlib import contextmanager
 
 import httpx
 
-from djs import auth, browser, cities, db, egress, jobs, pacer, providers, taskqueue
+from djs import auth, browser, cities, db, egress, jobs, log, pacer, providers, taskqueue
 from djs.providers.base import Blocked, Delisted, FetchError, LoginRequired
 
+LOG = log.get("crawl")
 REST_MARK = " | then: "   # joins the cause and the cooldown in last_error
 NO_EGRESS_DELAY = 60
 POLL_SECONDS = 1
@@ -68,8 +69,12 @@ def leased_client(conn, prov, key: str, payload: dict):
     egress.report(conn, exit_id, prov.name, ok=True)
 
 
+GONE_STATUS = (404, 410)   # a detail answered with these: the posting was taken down
+
+
 def fetch_detail(client, prov, job):
-    """Returns (detail, error). Delisted is a normal end state; Blocked propagates so the caller can back off."""
+    """Returns (detail, error). Delisted is a normal end state; Blocked propagates so the caller can back off; a posting
+    that is gone (HTTP 404 / 410) is that job's error, the pass goes on."""
     try:
         return prov.detail(client, job), None
     except Delisted:
@@ -78,6 +83,10 @@ def fetch_detail(client, prov, job):
         raise
     except FetchError as e:
         return None, e
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in GONE_STATUS:
+            return None, FetchError(f"{jobs.GONE}HTTP {e.response.status_code}")
+        raise
 
 
 class Stopped(Exception):
@@ -128,7 +137,8 @@ def _awaiting(conn, task_id, prov, mode: str) -> list:
 def _complete(conn, run, prov, client, mode: str, stats) -> None:
     """The second pass: the detail request, for the task's jobs that still miss a core element ('auto', skipping those
     a detail cannot complete) or for all of them ('always'). Skipped when the list item already is the detail. Blocked
-    ends the task (it is retried and carries on with what is still missing); any other failure is kept on the job.
+    ends the task (it is retried and carries on with what is still missing; the jobs it did not get to say the site
+    refused); any other failure is kept on the job.
     stats['details_total'] says how many requests the pass will make: readers show the progress with it. A stop request
     ends the pass between two details."""
     if mode == "never" or not prov.has_detail:
@@ -136,10 +146,15 @@ def _complete(conn, run, prov, client, mode: str, stats) -> None:
     rows = _awaiting(conn, run.id, prov, mode)
     stats["details_total"] = len(rows)
     run.progress(conn, stats)
-    for row in rows:
+    for at, row in enumerate(rows):
         run.check()
         item = json.loads(row["payload"])
-        detail, err = fetch_detail(client, prov, item)
+        try:
+            detail, err = fetch_detail(client, prov, item)
+        except Blocked as e:
+            if not isinstance(e, LoginRequired):   # a dead session is not a refusal
+                jobs.refuse_details(conn, [r["id"] for r in rows[at:]], e)
+            raise
         if err:
             jobs.fail_detail(conn, row["id"], err)
         else:
@@ -189,6 +204,7 @@ def run_task(conn, task) -> None:
     run = _run_of(task)
     prov = providers.get(task["provider"])
     if prov.missing_env():
+        LOG.warning("%s task %s given up: missing %s", prov.name, run.id, ", ".join(prov.missing_env()))
         return taskqueue.dead(conn, run.who, f"missing environment variable(s): {', '.join(prov.missing_env())}")
     payload = json.loads(task["payload"])
     max_pages = payload.get("max_pages") or pacer.effective(conn, prov.name)[2]
@@ -198,12 +214,15 @@ def run_task(conn, task) -> None:
     except Stopped:  # asked to stop: back to pending as it stands, for whoever claims it next
         return taskqueue.hand_back(conn, run.who)
     except browser.BrowserUnavailable as e:  # retrying cannot install Playwright or start the user's Chrome
+        LOG.warning("%s task %s given up: %s", prov.name, run.id, e)
         return taskqueue.dead(conn, run.who, str(e))
     except egress.NoEgressAvailable as e:  # also a busy browser profile: try again later, attempt not burned
         return taskqueue.release(conn, run.who, _resting(task, e), NO_EGRESS_DELAY)
     except (FetchError, httpx.HTTPError) as e:
         if _login_expired(prov, e):
+            LOG.info("%s task %s waits for a login", prov.name, run.id)
             return taskqueue.waiting_login(conn, run.who)
+        LOG.warning("%s task %s failed: %s: %s", prov.name, run.id, type(e).__name__, e)
         return taskqueue.retry(conn, run.who, f"{type(e).__name__}: {e}", getattr(e, "retry_after", None))
     taskqueue.done(conn, run.who, stats)
 
@@ -252,6 +271,7 @@ def tick(conn, provider: str | None = None, stop: threading.Event | None = None)
         except taskqueue.Lost:
             pass  # handed back or taken over while it ran: it is another claim's now, nothing of ours is left to write
         except Exception as e:  # never let one bad task kill the worker
+            LOG.exception("%s task %s crashed", task["provider"], task["id"])
             taskqueue.retry(conn, claim, f"{type(e).__name__}: {e}")
     return True
 
@@ -272,6 +292,7 @@ def _loop(provider: str) -> None:
                 _stop.wait(POLL_SECONDS)
         except Exception as e:
             print(f"djs worker {provider}: {type(e).__name__}: {e}", file=sys.stderr)
+            LOG.warning("worker %s: %s: %s", provider, type(e).__name__, e)
             if conn is not None:
                 conn.close()
             conn = None
@@ -327,3 +348,4 @@ def _hand_back_held() -> None:
             conn.close()
     except Exception as e:  # the process is ending: what is not handed back is taken over after LOCK_TTL
         print(f"djs: could not hand back the running tasks: {type(e).__name__}: {e}", file=sys.stderr)
+        LOG.warning("could not hand back the running tasks: %s: %s", type(e).__name__, e)

@@ -1,6 +1,6 @@
-"""Connect the app's MCP server (the `djs` console program) to the AI assistants on this computer: write, refresh and
-remove our one entry, `dear-job-seeker`, in each assistant's own config file. Nothing else in those files is touched;
-a file we cannot read is never written."""
+"""Connect the app's MCP server (the `djs` console program) to the AI assistants: write, refresh and remove our one
+entry, `dear-job-seeker`, in each assistant's own config file (made when it is not there yet). Nothing else in those
+files is touched; a file we cannot read is never written."""
 from __future__ import annotations
 
 import json
@@ -14,9 +14,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from djs import log
+
+LOG = log.get("connect")
 NAME = "dear-job-seeker"
 BACKUP = ".djs-bak"
 ENV_KEYS = ("env", "environment")   # what a user adds to our entry: OpenCode says `environment`
+# the read-only tools: Claude Code runs these without asking at every call (the others keep asking)
+ALLOWED_TOOLS = ("status", "provider_list", "search", "wait_for_search", "jobs_get", "job_detail", "search_list",
+                 "task_list", "login_status", "login_check")
+RULES = tuple(f"mcp__{NAME}__{tool}" for tool in ALLOWED_TOOLS)
 
 
 def command() -> str:
@@ -62,12 +69,10 @@ def _kimi() -> Path:
 class Target:
     key: str
     label: str
-    group: str                    # "intl" | "cn"
     path: Callable[[], Path]      # the config file
     entry: Callable[[str], dict]  # our entry, for the given command
     container: str = "mcpServers"  # the key (TOML: table) that holds the servers
     toml: bool = False
-    by_file: bool = False         # installed = the config file itself exists, not just its folder
 
 
 @dataclass(frozen=True)
@@ -78,19 +83,20 @@ class Guided:
 
 
 TARGETS = (
-    Target("claude-code", "Claude Code", "intl", _home(".claude.json"), _typed, by_file=True),
-    Target("claude-desktop", "Claude Desktop", "intl", _claude_desktop, _plain),
-    Target("codex", "Codex", "intl", _home(".codex", "config.toml"), _plain, container="mcp_servers", toml=True),
-    Target("gemini-cli", "Gemini CLI", "intl", _home(".gemini", "settings.json"), _plain),
-    Target("antigravity", "Antigravity", "intl", _home(".gemini", "antigravity", "mcp_config.json"), _plain),
-    Target("cursor", "Cursor", "intl", _home(".cursor", "mcp.json"), _plain),
-    Target("kiro", "Kiro", "intl", _home(".kiro", "settings", "mcp.json"), _plain),
-    Target("opencode", "OpenCode", "intl", _home(".config", "opencode", "opencode.json"), _opencode, container="mcp"),
-    Target("workbuddy", "WorkBuddy", "cn", _home(".workbuddy", "mcp.json"), _typed),
-    Target("codebuddy", "CodeBuddy", "cn", _home(".codebuddy", ".mcp.json"), _typed),
-    Target("qwen-code", "Qwen Code", "cn", _home(".qwen", "settings.json"), _plain),
-    Target("kimi-code", "Kimi Code", "cn", _kimi, _plain),
+    Target("claude-code", "Claude Code", _home(".claude.json"), _typed),
+    Target("claude-desktop", "Claude Desktop", _claude_desktop, _plain),
+    Target("codex", "Codex", _home(".codex", "config.toml"), _plain, container="mcp_servers", toml=True),
+    Target("gemini-cli", "Gemini CLI", _home(".gemini", "settings.json"), _plain),
+    Target("antigravity", "Antigravity", _home(".gemini", "antigravity", "mcp_config.json"), _plain),
+    Target("cursor", "Cursor", _home(".cursor", "mcp.json"), _plain),
+    Target("kiro", "Kiro", _home(".kiro", "settings", "mcp.json"), _plain),
+    Target("opencode", "OpenCode", _home(".config", "opencode", "opencode.json"), _opencode, container="mcp"),
+    Target("workbuddy", "WorkBuddy", _home(".workbuddy", "mcp.json"), _typed),
+    Target("codebuddy", "CodeBuddy", _home(".codebuddy", ".mcp.json"), _typed),
+    Target("qwen-code", "Qwen Code", _home(".qwen", "settings.json"), _plain),
+    Target("kimi-code", "Kimi Code", _kimi, _plain),
 )
+SETTINGS = Target("claude-settings", "Claude Code", _home(".claude", "settings.json"), _plain)   # not an assistant: where the allow rules go
 GUIDED = (
     Guided("qoder", "Qoder", "设置 → MCP → 我的服务 → 添加，粘贴配置"),
     Guided("trae", "Trae / Trae CN", "设置 → MCP → 添加 → 手动配置，粘贴配置"),
@@ -111,14 +117,6 @@ def _path(t: Target) -> Path:
     return Path(os.path.realpath(t.path()))
 
 
-def detected(t: Target) -> bool:
-    p = t.path()
-    try:
-        return p.is_file() if t.by_file else p.parent.is_dir()
-    except OSError:   # a folder we may not look into (one made with sudo): not ours to connect
-        return False
-
-
 def _shown(p: Path) -> str:
     try:
         return "~/" + p.relative_to(Path.home()).as_posix()
@@ -129,6 +127,10 @@ def _shown(p: Path) -> str:
 def _unreadable(t: Target) -> str:
     hint = "" if t.toml else "（可能带有注释）"
     return f"配置文件读不懂{hint}：{t.path()}，请改用“复制配置”手动添加"
+
+
+def _unwritable(t: Target) -> str:
+    return f"没能写入配置文件：{t.path()}，请检查它的权限，或改用“复制配置”手动添加"
 
 
 # ---- reading
@@ -270,6 +272,28 @@ def _without_entry(t: Target, text: str, doc: dict, c: str) -> str | None:
     return _dump(doc, text)
 
 
+def _with_rules(t: Target, text: str, doc: dict, c: str) -> str | None:
+    perms = doc.get("permissions", {})
+    allow = perms.get("allow", []) if isinstance(perms, dict) else None
+    if not isinstance(allow, list):
+        raise ValueError(_unreadable(t))
+    missing = [r for r in RULES if r not in allow]
+    if not missing:
+        return None
+    perms["allow"] = [*allow, *missing]
+    doc["permissions"] = perms
+    return _dump(doc, text)
+
+
+def _without_rules(t: Target, text: str, doc: dict, c: str) -> str | None:
+    perms = doc.get("permissions")
+    allow = perms.get("allow") if isinstance(perms, dict) else None
+    if not isinstance(allow, list) or not any(r in allow for r in RULES):
+        return None
+    perms["allow"] = [r for r in allow if r not in RULES]   # an emptied list stays: it is Claude Code's own key
+    return _dump(doc, text)
+
+
 # ---- writing
 def _backup(p: Path, raw: bytes) -> None:
     """A copy of the file as it was before we first changed it, with its permissions; an existing one is never touched."""
@@ -312,39 +336,59 @@ def _apply(t: Target, edit: Callable[[Target, str, dict, str], str | None]) -> b
             os.replace(tmp, p)
             return True
         except OSError:
-            raise ValueError(f"没能写入配置文件：{t.path()}，请检查它的权限，或改用“复制配置”手动添加") from None
+            raise ValueError(_unwritable(t)) from None
         finally:
             if tmp:
                 tmp.unlink(missing_ok=True)
     raise ValueError("配置文件正在被其他程序修改，请稍后再试")
 
 
+def _set_rules(add: bool) -> None:
+    """Add or remove the allow rules in Claude Code's settings.json. That file is not ours: one we cannot read is left
+    alone, and the reason only goes to stderr, never to the caller (the connection itself does not depend on it)."""
+    try:
+        if add:
+            _path(SETTINGS).parent.mkdir(parents=True, exist_ok=True)
+        _apply(SETTINGS, _with_rules if add else _without_rules)
+    except (OSError, ValueError) as e:
+        print(f"djs: could not {'add' if add else 'remove'} Claude Code's permission rules: {e}", file=sys.stderr)
+        LOG.warning("could not %s Claude Code's permission rules: %s", "add" if add else "remove", e)
+
+
 # ---- public
 def connect(key: str) -> bool:
-    """Write our entry for the assistant, or refresh it; False when it was there already. Only for an assistant found
-    on this computer. Raises ValueError, in Chinese, when it cannot."""
+    """Write our entry for the assistant (and its file and folders, when they are not there yet), or refresh it; False
+    when it was there already. Raises ValueError, in Chinese, when it cannot."""
     t = find(key)
-    if not detected(t):
-        raise ValueError(f"没有检测到 {t.label}")
     if "/AppTranslocation/" in command():   # macOS runs a downloaded app that was not moved from a random read-only copy
         raise ValueError("请先把“找岗位助手”拖进「应用程序」文件夹，再从那里打开并接入：现在这个位置是系统临时放的，路径每次都会变")
-    _path(t).parent.mkdir(parents=True, exist_ok=True)
-    return _apply(t, _with_entry)
+    try:
+        _path(t).parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise ValueError(_unwritable(t)) from None
+    changed = _apply(t, _with_entry)
+    if key == "claude-code":
+        _set_rules(True)
+    return changed
 
 
 def disconnect(key: str) -> bool:
     """Remove our entry (and nothing else); False when there was none."""
-    return _apply(find(key), _without_entry)
+    t = find(key)
+    try:
+        return _apply(t, _without_entry)
+    finally:
+        if key == "claude-code":
+            _set_rules(False)
 
 
 def sync(keys) -> dict[str, str]:
-    """Refresh our entry wherever it points elsewhere now (the app moved or was updated). Best effort: returns the
-    messages of the ones that failed, by key."""
-    errors, c = {}, command()
+    """Write or refresh our entry for these assistants, wherever it is missing or points elsewhere (the app moved or was
+    updated); an entry that is right is left alone. Best effort: returns the messages of the ones that failed, by key."""
+    errors = {}
     for key in keys:
         try:
-            if _state(find(key), c) == "stale":
-                connect(key)
+            connect(key)
         except Exception as e:
             errors[key] = str(e)
     return errors
@@ -358,6 +402,6 @@ def config_text(c: str | None = None) -> str:
 def status() -> dict:
     c = command()
     return {"command": c, "config": config_text(c),
-            "targets": [{"key": t.key, "label": t.label, "group": t.group, "detected": detected(t),
-                         "state": _state(t, c), "path": _shown(t.path())} for t in TARGETS],
+            "targets": [{"key": t.key, "label": t.label, "state": _state(t, c), "path": _shown(t.path())}
+                        for t in TARGETS],
             "guided": [{"key": g.key, "label": g.label, "where": g.where} for g in GUIDED]}

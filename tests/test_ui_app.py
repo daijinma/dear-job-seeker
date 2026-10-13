@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import re
 import sys
 import threading
@@ -8,7 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from djs import auth, browser, db, egress, providers, service, taskqueue, ui_api, ui_app
+from djs import auth, browser, connect, db, egress, log, providers, service, taskqueue, ui_api, ui_app, update
 from provider_fakes import job
 
 
@@ -17,6 +19,7 @@ def call(tmp_path, monkeypatch):
     monkeypatch.setenv("DJS_HOME", str(tmp_path))
     for var in ("DJS_JOB58_LUNA_SALT", "DJS_YUPAO_NONCE_KEY", "DJS_YUPAO_SIGN_SALT", "DJS_JOB51_HMAC_KEY"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(ui_api, "_result_read", False)   # a fresh start of the app: how the last install went is not read yet
     return ui_app.Api().call
 
 
@@ -58,14 +61,18 @@ def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_wind
     window = SimpleNamespace(create_window=lambda *a, **k: order.append(("window", k["js_api"])), start=lambda: order.append("start"))
     monkeypatch.setenv("DJS_HOME", str(tmp_path))
     monkeypatch.setitem(sys.modules, "webview", window)
+    monkeypatch.setattr(ui_app.log, "setup", lambda: order.append("log"))
     monkeypatch.setattr(ui_app.envfile, "load", lambda: order.append("env"))
     monkeypatch.setattr(ui_app.engine, "start_worker", lambda: order.append("workers"))
     monkeypatch.setattr(ui_app.service, "start_login_check", lambda: order.append("check"))   # in the background: never held up
-    monkeypatch.setattr(ui_app.connect, "sync", lambda keys: order.append("connect") or {})   # never the real config files
+    monkeypatch.setattr(ui_app.connect, "sync", lambda keys: {})   # never the real config files
+    monkeypatch.setattr(ui_app.update, "start", lambda: order.append("update"))   # its own thread: never held up
+    monkeypatch.setattr(ui_app.update, "apply_on_exit", lambda: order.append("apply"))
     monkeypatch.setattr(ui_app.service, "shutdown", lambda: order.append("shutdown"))
     ui_app.main([])
-    assert order[:4] == ["env", "workers", "check", "connect"] and order[5:] == ["start", "shutdown"]
-    assert order[4][0] == "window" and isinstance(order[4][1], ui_app.Api)
+    assert order[:5] == ["log", "env", "workers", "check", "update"]
+    assert order[5][0] == "window" and isinstance(order[5][1], ui_app.Api)
+    assert order[6:] == ["start", "apply", "shutdown"]   # the update is put in place before the workers are stopped
 
     def crash():
         raise RuntimeError("the window died")
@@ -74,7 +81,7 @@ def test_the_app_starts_the_workers_and_the_login_check_before_it_opens_the_wind
     window.start = crash
     with pytest.raises(RuntimeError):
         ui_app.main([])
-    assert order[-1] == "shutdown"   # the login windows and workers are stopped on the way out, whatever ended the app
+    assert order[-2:] == ["apply", "shutdown"]   # the login windows and workers are stopped on the way out, whatever ended the app
 
 
 def test_unknown_route(call):
@@ -464,48 +471,64 @@ def saved(tmp_path):
     return json.loads((tmp_path / "ui_prefs.json").read_text())
 
 
-def test_connect_lists_every_assistant_found_or_not_and_the_ones_to_paste_by_hand(call, user):
+ALL = [t.key for t in connect.TARGETS]
+
+
+def test_connect_lists_every_assistant_with_its_switch_state_and_the_ones_to_paste_by_hand(call, user, tmp_path):
     (user / ".cursor").mkdir()
     body = call("GET /api/connect")
-    assert set(body) == {"command", "asked", "config", "targets", "guided"}
-    assert (body["command"], body["asked"]) == ("/opt/app/bin/djs", False)
+    assert set(body) == {"command", "enabled", "config", "targets", "guided"}
+    assert body["command"] == "/opt/app/bin/djs" and body["enabled"] == ALL   # nothing saved: every one is on
     assert json.loads(body["config"]) == {"mcpServers": {"dear-job-seeker": {"command": "/opt/app/bin/djs"}}}
-    assert len(body["targets"]) == 12   # found or not
-    assert {t["key"] for t in body["targets"] if t["detected"]} == {"cursor"}
+    assert [t["key"] for t in body["targets"]] == ALL and len(ALL) == 12
+    assert all(set(t) == {"key", "label", "state", "path"} for t in body["targets"]) and states(body) == {}
     assert [t for t in body["targets"] if t["key"] == "cursor"] == [
-        {"key": "cursor", "label": "Cursor", "group": "intl", "detected": True, "state": "off", "path": "~/.cursor/mcp.json"}]
-    assert {t["group"] for t in body["targets"]} == {"cn", "intl"} and states(body) == {}
+        {"key": "cursor", "label": "Cursor", "state": "off", "path": "~/.cursor/mcp.json"}]
     assert [(g["key"], g["label"]) for g in body["guided"]] == [
         ("qoder", "Qoder"), ("trae", "Trae / Trae CN"), ("lingma", "通义灵码"), ("cherry-studio", "Cherry Studio")]
     assert all(set(g) == {"key", "label", "where"} and g["where"] for g in body["guided"])
+    assert not (tmp_path / "ui_prefs.json").exists()   # reading saves nothing: the first start stays "nothing saved"
 
 
-def test_the_switch_writes_and_removes_our_entry_and_remembers_it(call, user, tmp_path):
-    (user / ".cursor").mkdir()
-    (user / ".qwen").mkdir()
+def test_the_switch_writes_and_removes_our_entry_and_remembers_the_choice(call, user, tmp_path):
+    body = call("POST /api/connect", {"key": "cursor", "on": False})   # the first start left every one on: this is a choice
+    assert body["enabled"] == [k for k in ALL if k != "cursor"] and body == call("GET /api/connect")   # the same shape as the page's read
+    assert saved(tmp_path)["connect"] == {"enabled": [k for k in ALL if k != "cursor"]}
+    assert not (user / ".cursor").exists()   # nothing was there to take out of
     body = call("POST /api/connect", {"key": "cursor", "on": True})
-    assert states(body) == {"cursor": "connected"} and body == call("GET /api/connect")   # the same shape as the page's read
+    assert states(body) == {"cursor": "connected"} and body["enabled"] == [*[k for k in ALL if k != "cursor"], "cursor"]   # in the order they went on
     assert json.loads((user / ".cursor" / "mcp.json").read_text())["mcpServers"]["dear-job-seeker"]["command"] == "/opt/app/bin/djs"
-    assert saved(tmp_path)["connect"] == {"on": ["cursor"], "asked": False}
     call("POST /api/connect", {"key": "qwen-code", "on": True})
-    assert saved(tmp_path)["connect"]["on"] == ["cursor", "qwen-code"]
+    assert states(call("GET /api/connect")) == {"cursor": "connected", "qwen-code": "connected"}
+    (user / ".cursor" / "mcp.json").write_text('{"mcpServers": {"dear-job-seeker": {"command": "x"}, "other": {"command": "y"}}}')
     body = call("POST /api/connect", {"key": "cursor", "on": False})
-    assert states(body) == {"qwen-code": "connected"} and saved(tmp_path)["connect"]["on"] == ["qwen-code"]
-    assert json.loads((user / ".cursor" / "mcp.json").read_text()) == {"mcpServers": {}}
+    assert states(body) == {"qwen-code": "connected"} and "cursor" not in body["enabled"] and "qwen-code" in body["enabled"]
+    assert json.loads((user / ".cursor" / "mcp.json").read_text()) == {"mcpServers": {"other": {"command": "y"}}}   # only our entry went
     assert call("POST /api/connect", {"key": "qwen-code", "on": True}) == call("GET /api/connect")   # twice: no change, no error
 
 
+def test_the_claude_code_switch_carries_its_permission_rules(call, user):
+    settings = user / ".claude" / "settings.json"
+    call("POST /api/connect", {"key": "claude-code", "on": True})
+    allow = json.loads(settings.read_text())["permissions"]["allow"]
+    assert len(allow) == 10 and all(r.startswith("mcp__dear-job-seeker__") for r in allow) and "mcp__dear-job-seeker__jobs_get" in allow
+    assert not any(r.endswith(("__login", "__logout", "__crawl_start")) for r in allow)
+    call("POST /api/connect", {"key": "claude-code", "on": False})
+    assert json.loads(settings.read_text()) == {"permissions": {"allow": []}}
+    assert "dear-job-seeker" not in json.loads((user / ".claude.json").read_text())["mcpServers"]
+
+
 def test_the_switch_says_in_chinese_when_it_cannot(call, user, tmp_path):
-    assert call("POST /api/connect", {"key": "kiro", "on": True}) == {"error": "没有检测到 Kiro"}   # not on this computer
     assert call("POST /api/connect", {"key": "nope", "on": True}) == {"error": "未知的应用"}
+    assert call("POST /api/connect", {"key": "nope", "on": False}) == {"error": "未知的应用"}
     assert call("POST /api/connect", {"on": True}) == {"error": "未知的应用"}
-    assert not (user / ".kiro").exists() and not (tmp_path / "ui_prefs.json").exists()
+    assert not (tmp_path / "ui_prefs.json").exists() and os.listdir(user) == []   # nothing changed, not even the saved choice
     (user / ".cursor").mkdir()
     config = user / ".cursor" / "mcp.json"
     config.write_text("// mine\n{}")
     wrong = {"error": f"配置文件读不懂（可能带有注释）：{config}，请改用“复制配置”手动添加"}
     assert call("POST /api/connect", {"key": "cursor", "on": True}) == wrong
-    assert config.read_text() == "// mine\n{}" and not (tmp_path / "ui_prefs.json").exists()   # not switched on
+    assert config.read_text() == "// mine\n{}" and not (tmp_path / "ui_prefs.json").exists()   # not saved
 
 
 def test_switching_off_forgets_the_assistant_even_when_its_file_cannot_be_edited(call, user, tmp_path):
@@ -514,70 +537,274 @@ def test_switching_off_forgets_the_assistant_even_when_its_file_cannot_be_edited
     config = user / ".cursor" / "mcp.json"
     config.write_text("// since edited by hand\n{}")
     assert "读不懂" in call("POST /api/connect", {"key": "cursor", "on": False})["error"]
-    assert saved(tmp_path)["connect"]["on"] == []   # it is not refreshed at the next start any more
+    assert "cursor" not in saved(tmp_path)["connect"]["enabled"]   # it is not written again at the next start
     assert config.read_text() == "// since edited by hand\n{}"
 
 
-def test_connect_many_connects_the_ticked_ones_found_here_and_names_the_ones_that_fail(call, user, tmp_path):
-    for folder in (".cursor", ".gemini", ".qwen"):
-        (user / folder).mkdir()
-    (user / ".qwen" / "settings.json").write_text("{ // not json")
-    keys = ["cursor", "qwen-code", "gemini-cli", "kiro", "nope", "cursor"]   # Kiro is not here, nope is not an assistant
-    body = call("POST /api/connect_many", {"keys": keys})
-    assert body["failed"] == [{"label": "Qwen Code", "error": f"配置文件读不懂（可能带有注释）：{user / '.qwen' / 'settings.json'}，请改用“复制配置”手动添加"}]
-    assert {k: v for k, v in body.items() if k != "failed"} == call("GET /api/connect")   # the same shape plus `failed`
-    assert states(body) == {"gemini-cli": "connected", "cursor": "connected", "qwen-code": "unreadable"}
-    assert saved(tmp_path)["connect"] == {"on": ["cursor", "gemini-cli"], "asked": True}   # in the order they went on
-    assert not (user / ".kiro").exists()
-    assert call("POST /api/connect_many", {"keys": ["cursor"]})["failed"] == []   # again: nothing to do, nothing wrong
-    assert saved(tmp_path)["connect"] == {"on": ["cursor", "gemini-cli"], "asked": True}   # in the order they went on
+def test_the_ask_first_routes_are_gone(call, user, tmp_path):
+    assert not {"POST /api/connect_many", "POST /api/connect_asked"} & set(ui_api.ROUTES)
+    assert call("POST /api/connect_many", {"keys": ["cursor"]}) == {"error": "找不到该功能"}
+    assert call("POST /api/connect_asked") == {"error": "找不到该功能"}
+    assert not hasattr(ui_api, "connect_many") and not hasattr(ui_api, "connect_asked")
+    assert os.listdir(user) == [] and not (tmp_path / "ui_prefs.json").exists()
 
 
-def test_connect_many_with_nothing_ticked_still_marks_the_card_as_answered(call, user, tmp_path):
-    assert call("POST /api/connect_many", {"keys": []})["failed"] == [] and call("GET /api/connect")["asked"] is True
-    assert saved(tmp_path)["connect"] == {"on": [], "asked": True}
+@pytest.mark.parametrize("pref, expected", [
+    (None, ALL),                                                                # nothing saved: the first start
+    ({}, ALL),
+    ({"enabled": ["kiro", "cursor", "gone-app"]}, ["kiro", "cursor"]),            # an app that is no longer known is dropped, the order stays
+    ({"enabled": []}, []),                                                      # every switch off is a choice too
+    ({"enabled": ["kiro"], "on": ["cursor"], "asked": True}, ["kiro"]),         # the new shape wins
+    ({"on": ["cursor", "gone-app"], "asked": True}, ["cursor"]),                # 1.2.6: asked and switched some on
+    ({"on": [], "asked": True}, []),                                            # 1.2.6: asked, took none
+    ({"on": ["cursor"], "asked": False}, ["cursor"]),                           # 1.2.6: switched one on on the settings page without the card
+    ({"on": [], "asked": False}, ALL),                                          # 1.2.6: never touched
+    ({"asked": False}, ALL),
+])
+def test_the_connection_prefs_of_every_shape_resolve_to_the_switches_that_are_on(call, tmp_path, pref, expected):
+    if pref is not None:
+        (tmp_path / "ui_prefs.json").write_text(json.dumps({"preset": "fast", "connect": pref}))
+    assert ui_api.connect_prefs() == {"enabled": expected}
+    assert call("GET /api/connect")["enabled"] == expected
 
 
-def test_connect_asked_only_marks_it_asked(call, user, tmp_path):
-    (user / ".cursor").mkdir()
-    call("POST /api/connect", {"key": "cursor", "on": True})
-    body = call("POST /api/connect_asked")
-    assert body["asked"] is True and body == call("GET /api/connect") and "failed" not in body
-    assert saved(tmp_path)["connect"] == {"on": ["cursor"], "asked": True}   # nothing was connected or disconnected by it
-    (user / ".gemini").mkdir()
-    assert states(call("POST /api/connect_asked")) == {"cursor": "connected"}   # a newly found assistant is not connected unasked
+def test_a_1_2_6_choice_is_saved_in_the_new_shape_at_the_next_switch(call, user, tmp_path):
+    (tmp_path / "ui_prefs.json").write_text(json.dumps({"connect": {"on": ["cursor"], "asked": True}}))
+    call("POST /api/connect", {"key": "qwen-code", "on": True})
+    assert saved(tmp_path) == {"connect": {"enabled": ["cursor", "qwen-code"]}}   # no `on`, no `asked`
 
 
 def test_the_connection_prefs_and_the_speed_preset_share_one_file_without_losing_each_other(call, user, tmp_path):
     call("POST /api/frequency_preset", {"preset": "fast"})
-    call("POST /api/connect_asked")
-    assert saved(tmp_path) == {"preset": "fast", "connect": {"on": [], "asked": True}}
+    call("POST /api/connect", {"key": "kiro", "on": False})
+    enabled = [k for k in ALL if k != "kiro"]
+    assert saved(tmp_path) == {"preset": "fast", "connect": {"enabled": enabled}}
     call("POST /api/frequency_preset", {"preset": "steady"})
-    assert saved(tmp_path) == {"preset": "steady", "connect": {"on": [], "asked": True}}
-    (tmp_path / "ui_prefs.json").write_text(json.dumps({"preset": "fast", "connect": {"on": ["cursor", "gone-app"]}}))
-    assert ui_api.connect_prefs() == {"on": ["cursor"], "asked": False}   # an app that is no longer known is dropped
+    assert saved(tmp_path) == {"preset": "steady", "connect": {"enabled": enabled}}
 
 
-def test_the_app_refreshes_the_connections_the_user_switched_on_before_the_window_opens(call, user, tmp_path, monkeypatch, capsys):
-    for folder in (".cursor", ".qwen"):
-        (user / folder).mkdir()
-    call("POST /api/connect", {"key": "cursor", "on": True})
-    (user / ".qwen" / "settings.json").write_text(json.dumps({"mcpServers": {"dear-job-seeker": {"command": "/old/djs"}}}))   # not switched on
-    monkeypatch.setattr(sys, "executable", "/new/place/python")   # the app moved
-    started = []
+def window_app(monkeypatch, user, started):
+    """What main() needs to run without a window, a worker or a login check; `started` hears of the window opening."""
     monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(create_window=lambda *a, **k: None, start=lambda: started.append(1)))
     monkeypatch.setattr(ui_app.engine, "start_worker", lambda: None)
     monkeypatch.setattr(ui_app.service, "start_login_check", lambda: None)
     monkeypatch.setattr(ui_app.service, "shutdown", lambda: None)
+    monkeypatch.setattr(ui_app.log, "setup", lambda: None)   # no log file in the test's data folder
+    monkeypatch.setattr(ui_app.update, "start", lambda: None)
+    monkeypatch.setattr(ui_app.update, "apply_on_exit", lambda: None)
+
+
+def sync_done(monkeypatch):
+    """Wrap connect.sync so a test can wait for the background thread to finish; returns (event, list of what it was given)."""
+    done, given, real = threading.Event(), [], ui_app.connect.sync
+
+    def sync(keys):
+        given.append(list(keys))
+        try:
+            return real(keys)
+        finally:
+            done.set()
+    monkeypatch.setattr(ui_app.connect, "sync", sync)
+    return done, given
+
+
+def test_the_first_start_writes_every_assistant_without_asking_and_saves_nothing(user, tmp_path, monkeypatch):
+    started = []
+    window_app(monkeypatch, user, started)
+    done, given = sync_done(monkeypatch)
     ui_app.main([])
-    entry = lambda name: json.loads((user / name / ("mcp.json" if name == ".cursor" else "settings.json")).read_text())["mcpServers"]["dear-job-seeker"]   # noqa: E731
-    assert entry(".cursor")["command"] == "/new/place/djs" and entry(".qwen") == {"command": "/old/djs"} and started == [1]
+    assert done.wait(10) and started == [1] and given == [ALL]
+    for rel in (".claude.json", ".cursor/mcp.json", ".codex/config.toml", ".gemini/settings.json", ".gemini/antigravity/mcp_config.json",
+                ".kiro/settings/mcp.json", ".config/opencode/opencode.json", ".workbuddy/mcp.json", ".codebuddy/.mcp.json",
+                ".qwen/settings.json", ".kimi-code/mcp.json", "Library/Application Support/Claude/claude_desktop_config.json"):
+        assert "dear-job-seeker" in (user / rel).read_text(encoding="utf-8"), rel   # folders made, entry written
+    assert len(json.loads((user / ".claude" / "settings.json").read_text())["permissions"]["allow"]) == 10
+    assert {t["state"] for t in ui_api.connect_state()["targets"]} == {"connected"}
+    assert not (tmp_path / "ui_prefs.json").exists()   # nothing chosen yet: "nothing saved" stays, so the next start does the same
+
+
+def test_a_switch_that_is_off_is_not_written_at_the_start_and_the_ones_that_are_on_are_refreshed(call, user, tmp_path, monkeypatch):
+    for key in ALL:
+        if key not in ("cursor", "qwen-code"):
+            call("POST /api/connect", {"key": key, "on": False})
+    call("POST /api/connect", {"key": "cursor", "on": True})
+    (user / ".qwen" / "settings.json").parent.mkdir()
+    (user / ".qwen" / "settings.json").write_text(json.dumps({"mcpServers": {"dear-job-seeker": {"command": "/old/djs"}}}))   # on, and out of date
+    monkeypatch.setattr(sys, "executable", "/new/place/python")   # the app moved
+    started = []
+    window_app(monkeypatch, user, started)
+    done, given = sync_done(monkeypatch)
+    ui_app.main([])
+    assert done.wait(10) and given == [["cursor", "qwen-code"]]
+    entry = lambda rel: json.loads((user / rel).read_text())["mcpServers"]["dear-job-seeker"]   # noqa: E731
+    assert entry(".cursor/mcp.json")["command"] == "/new/place/djs" and entry(".qwen/settings.json")["command"] == "/new/place/djs"
+    assert not (user / ".kiro").exists() and not (user / ".codex").exists()   # off: never written
+
+
+def test_the_window_does_not_wait_for_the_config_files_and_a_failure_never_stops_it(user, capsys, caplog, monkeypatch):
+    started, release, finished = [], threading.Event(), threading.Event()
+    window_app(monkeypatch, user, started)
+
+    def slow(keys):
+        release.wait(10)   # the config files are slow (a disk that spins up, a locked file)
+        finished.set()
+        return {}
+    monkeypatch.setattr(ui_app.connect, "sync", slow)
+    ui_app.main([])
+    assert started == [1] and not finished.is_set()   # the window was opened and closed while the sync was still going
+    release.set()
+    assert finished.wait(10)
 
     def fail(keys):
         raise RuntimeError("secret internals")
     monkeypatch.setattr(ui_app.connect, "sync", fail)
-    ui_app.main([])
-    assert started == [1, 1] and "secret internals" in capsys.readouterr().err   # the window opens anyway; the detail is for the terminal
+    ui_app.sync_connections()
+    assert "secret internals" in capsys.readouterr().err   # the detail is for the terminal
+    assert "connections were not refreshed" in caplog.text and "secret internals" in caplog.text   # and for the log file
     monkeypatch.setattr(ui_app.connect, "sync", lambda keys: {"cursor": "没能写入配置文件"})
-    ui_app.main([])
-    assert started == [1, 1, 1] and "cursor" in capsys.readouterr().err   # the ones that failed are named there, and nothing more
+    ui_app.sync_connections()
+    assert "cursor" in capsys.readouterr().err   # the ones that failed are named there, and nothing more
+    assert "could not refresh the cursor connection: 没能写入配置文件" in caplog.text
+
+
+# ---- updating the app
+@pytest.fixture
+def updater(call, monkeypatch):
+    """djs.update on a fake computer: `now` is what current() says, `calls` what the routes asked of it, `after_check`
+    what a manual check changes; the window is not closed for real, `closed` counts the times it was asked to."""
+    box = SimpleNamespace(now={"current": "1.4.0", "latest": None, "state": "none", "note": "", "install_on_quit": False},
+                          can=(True, ""), last=None, calls=[], after_check={}, refuse=None, closed=[])
+
+    def check(manual=False):
+        box.calls.append(("check", manual))
+        box.now.update(box.after_check)
+        return {"found": box.now["state"] in ("downloading", "ready"), **box.now}
+
+    def later():
+        box.calls.append("later")
+        box.now["install_on_quit"] = True
+
+    def install_now():
+        box.calls.append("install")
+        if box.refuse:
+            raise ValueError(box.refuse)
+
+    for name, fn in {"current": lambda: dict(box.now), "can_install": lambda: box.can, "last_result": lambda: box.last,
+                     "check": check, "later": later, "install_now": install_now}.items():
+        monkeypatch.setattr(update, name, fn)
+    monkeypatch.setattr(ui_api, "_close_window", lambda: box.closed.append(1))
+    box.call = call
+    return box
+
+
+def test_the_update_route_carries_the_state_and_whether_it_can_be_installed_here(updater):
+    assert updater.call("GET /api/update") == {"current": "1.4.0", "latest": None, "state": "none", "note": "", "install_on_quit": False,
+                                              "can_install": True, "reason": "", "result": None}
+    updater.now.update(state="ready", latest="1.4.1")
+    updater.can = (False, "这个程序装在需要管理员权限的位置")
+    body = updater.call("GET /api/update")
+    assert (body["state"], body["latest"], body["can_install"], body["reason"]) == ("ready", "1.4.1", False, "这个程序装在需要管理员权限的位置")
+
+
+def test_how_the_last_install_went_comes_with_the_first_answer_after_a_start_and_only_then(updater):
+    updater.last = {"ok": False, "version": "1.4.1", "text": "更新没有成功，已恢复原来的版本"}
+    assert updater.call("GET /api/update")["result"] == "更新没有成功，已恢复原来的版本"
+    assert updater.call("GET /api/update")["result"] is None   # read: not told again, though the file still says it
+    ui_api._result_read = False   # the app starts again
+    assert updater.call("GET /api/update")["result"] == "更新没有成功，已恢复原来的版本"
+    ui_api._result_read = False
+    updater.last = None   # nothing happened last time
+    assert updater.call("GET /api/update")["result"] is None
+    updater.last = {"ok": True, "version": "1.4.2", "text": "已更新到 1.4.2"}
+    assert updater.call("GET /api/update")["result"] is None   # a start has one answer; this one was already given
+
+
+def test_a_manual_check_says_what_it_found_and_the_state_after(updater):
+    assert updater.call("POST /api/update_check") == {"found": False, "current": "1.4.0", "latest": None, "state": "none", "note": "",
+                                                      "install_on_quit": False, "can_install": True, "reason": ""}
+    assert updater.calls == [("check", True)]   # the user asked: not the quiet kind
+    updater.after_check = {"state": "downloading", "latest": "1.4.1"}
+    body = updater.call("POST /api/update_check")
+    assert body["found"] is True and (body["state"], body["latest"]) == ("downloading", "1.4.1")
+    updater.after_check = {"state": "failed", "note": "下载的文件没通过校验"}
+    body = updater.call("POST /api/update_check")
+    assert body["found"] is False and (body["state"], body["note"]) == ("failed", "下载的文件没通过校验")
+
+
+def test_installing_later_is_remembered_and_answered_with_the_state(updater):
+    updater.now.update(state="ready", latest="1.4.1")
+    body = updater.call("POST /api/update_later")
+    assert updater.calls == ["later"] and body["install_on_quit"] is True and body["state"] == "ready" and body["can_install"] is True
+
+
+def test_installing_now_closes_the_window_after_the_answer_and_a_refusal_keeps_the_app_running(updater, caplog):
+    updater.now.update(state="ready", latest="1.4.1")
+    assert updater.call("POST /api/update_install") == {"ok": True}
+    assert updater.calls == ["install"] and updater.closed == [1]
+    updater.refuse = "还有一个 AI 助手在用旧版本，请先关闭它再安装"
+    with caplog.at_level(logging.INFO, logger="djs"):
+        assert updater.call("POST /api/update_install") == {"error": "还有一个 AI 助手在用旧版本，请先关闭它再安装"}
+    assert updater.closed == [1]   # no second close: the app keeps running
+    assert "update_install failed" in caplog.text and "Traceback" not in caplog.text   # a refusal is a line, not a crash
+
+
+def test_an_update_route_that_breaks_leaves_the_detail_in_the_log_and_plain_chinese_in_the_window(updater, monkeypatch, caplog, capsys):
+    def boom():
+        raise RuntimeError("state.json is gone")
+    monkeypatch.setattr(update, "current", boom)
+    with caplog.at_level(logging.INFO, logger="djs"):
+        assert updater.call("GET /api/update") == {"error": "出了点问题，请稍后再试"}
+    assert "update_state failed: state.json is gone" in caplog.text and "Traceback" in caplog.text
+    capsys.readouterr()
+
+
+def test_the_downloaded_build_is_shown_in_the_file_manager_and_nothing_downloaded_says_so(updater, monkeypatch, tmp_path):
+    launched = []
+    monkeypatch.setattr(ui_api, "subprocess", SimpleNamespace(Popen=launched.append))
+    monkeypatch.setattr(update, "staged", lambda: None, raising=False)
+    assert updater.call("POST /api/update_reveal") == {"error": "还没有下载好的新版本"} and launched == []
+    build = tmp_path / "updates" / "1.4.1" / "stage" / "找岗位助手.app"
+    monkeypatch.setattr(update, "staged", lambda: build, raising=False)
+    assert updater.call("POST /api/update_reveal") == {"ok": True}
+    assert launched[0][0] in ("open", "explorer", "xdg-open") and str(build.parent) in launched[0][-1]   # the build itself, or the folder it is in
+    assert updater.calls == []   # showing it installs nothing
+
+
+def test_the_window_is_closed_a_moment_later_through_the_window_system(monkeypatch):
+    closed, done = [], threading.Event()
+    windows = [SimpleNamespace(destroy=lambda n=n: (closed.append(n), done.set())) for n in (1, 2)]
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(windows=windows))
+    monkeypatch.setattr(ui_api, "CLOSE_DELAY", 0.05)
+    ui_api._close_window()
+    assert closed == []   # not before the answer has gone to the page
+    assert done.wait(5)
+    assert closed == [1, 2]
+
+
+def test_a_window_system_that_fails_to_close_is_logged_and_nothing_more(monkeypatch):
+    logged = threading.Event()
+
+    def broken():
+        raise RuntimeError("no window")
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(windows=[SimpleNamespace(destroy=broken)]))
+    monkeypatch.setattr(ui_api, "CLOSE_DELAY", 0)
+    monkeypatch.setattr(ui_api, "LOG", SimpleNamespace(exception=lambda *a, **k: logged.set()))
+    ui_api._close_window()
+    assert logged.wait(5)
+
+
+def test_about_names_the_newest_version_and_the_state_of_the_update(updater):
+    about = updater.call("GET /api/about")
+    assert (about["latest"], about["update_state"]) == (None, "none") and about["version"]
+    updater.now.update(state="ready", latest="1.4.1")
+    about = updater.call("GET /api/about")
+    assert (about["latest"], about["update_state"]) == ("1.4.1", "ready")
+
+
+def test_the_log_folder_is_shown_in_the_file_manager_and_made_first(call, tmp_path, monkeypatch):
+    launched = []
+    monkeypatch.setattr(ui_api, "subprocess", SimpleNamespace(Popen=launched.append))
+    assert not (tmp_path / "logs").exists()
+    assert call("POST /api/open_logs") == {"ok": True}
+    assert (tmp_path / "logs").is_dir() and launched[0][0] in ("open", "explorer", "xdg-open") and launched[0][1:] == [str(tmp_path / "logs")]
+    assert log.path().parent == tmp_path / "logs"

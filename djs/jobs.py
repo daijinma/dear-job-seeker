@@ -8,6 +8,9 @@ import json
 from djs.normalize import benefits, fingerprint, missing, monthly, parse_salary, plain_text
 
 SALARY = ("salary_min", "salary_max", "salary_unit", "salary_months")
+# What detail_error starts with when the failure is not the job's own: the site refused the request (the pass stopped
+# there, the jobs it had yet to ask carry it too), or the posting is gone. service.reasons words them apart.
+REFUSED, GONE = "Blocked: ", "Gone: "
 # What a provider derives from a list item (row) and its metadata (meta).
 FIELDS = ("title", "company", "city", "district", "education", "experience", "benefits", "salary_text", *SALARY,
           "description", "source_url", "published_at", "published_at_kind")
@@ -85,6 +88,13 @@ def update(conn, job_pk: int, prov, job: dict, detail: dict | None) -> None:
 
 def fail_detail(conn, job_pk: int, error: Exception) -> None:
     conn.execute("UPDATE jobs SET detail_error=? WHERE id=?", (str(error), job_pk))
+
+
+def refuse_details(conn, job_pks, error: Exception) -> None:
+    """The site refused a detail request: the job it was for and the ones the pass had yet to ask say so, until a detail
+    is stored for them."""
+    conn.executemany("UPDATE jobs SET detail_error=? WHERE id=? AND detail IS NULL",
+                     [(f"{REFUSED}{error}", pk) for pk in job_pks])
 
 
 def awaiting_detail(conn, task_id: int, everything: bool) -> list:

@@ -64,7 +64,7 @@ def test_structure_break(p, _e, broken):
 
 def test_non_json_is_structure_error():
     with pytest.raises(StructureError):
-        Bytedance().fetch(client(text="<html>captcha</html>"), SEARCH, 0)
+        Bytedance().fetch(client(text="<html>under maintenance</html>"), SEARCH, 0)
     with pytest.raises(StructureError):
         Mohrss().fetch(client(text='name="findjoblist" value="[not json]"'), SEARCH, 1)
 

@@ -1,5 +1,5 @@
-/* 设置: speed, the way to the logins, the AI assistants (connect.js), the advanced block (proxy, keys) and a few facts
-   about this installation. */
+/* 设置: speed, the way to the logins, the AI assistants (connect.js), the advanced block (proxy, keys), a few facts
+   about this installation and the software update (update.js). */
 
 const PRESETS = [["steady", "稳妥", "推荐 · 慢一点，更安全"], ["standard", "标准", "速度和安全折中"], ["fast", "较快", "可能被网站暂时限制"]];
 
@@ -39,11 +39,13 @@ const aboutCard = (about) => `<div class="card"><h2>关于</h2><div class="items
   ${itemRow({ name: "数据保存位置", hint: about.home })}${itemRow({ name: "版本", hint: about.version })}</div></div>`;
 
 async function viewSettings(params, e) {
-  const [{ egress }, about, connect] = await Promise.all([api("GET /api/egress"), api("GET /api/about"), api("GET /api/connect")]);
+  const [{ egress }, about, connect, update] = await Promise.all([api("GET /api/egress"), api("GET /api/about"), api("GET /api/connect"),
+    readUpdate().catch(() => S.update)]);   // the card is left out when the state cannot be read
   if (e !== epoch) return;
   const keys = params.get("focus") === "keys";
   if (keys) S.open.advanced = true;
-  $("#view").innerHTML = `<section class="narrow settings"><h1>设置</h1>${speedCard()}${loginsCard()}${connectCard(connect)}${advancedCard(egress)}${aboutCard(about)}</section>`;
+  $("#view").innerHTML = `<section class="narrow settings"><h1>设置</h1>${speedCard()}${loginsCard()}${connectCard(connect)}${advancedCard(egress)}${aboutCard(about)}${updateSlot(update)}</section>`;
+  paintUpdateCard();
   if (keys) $("#keys").scrollIntoView({ block: "center" });
 }
 

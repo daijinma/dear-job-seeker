@@ -3,6 +3,7 @@ httpx.MockTransport, a temp database, no network."""
 import asyncio
 import json
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import djs
 from djs import browser, cli, db, egress, engine, pacer, providers, results, server, service, taskqueue
 from djs.providers.base import Login, Provider, get_json, need
 from provider_fakes import job, retrying, task
@@ -73,6 +75,9 @@ class FakeAuth:
 
     def pending_logins(self):
         return []
+
+    def cancel_login(self, provider):
+        return False
 
 
 @pytest.fixture
@@ -587,6 +592,9 @@ def test_the_server_teaches_the_recommended_flow():
     assert "call status first" in text and "exits" in text   # and where to look when it does not go as described
     assert 'title="会计"' in text and 'text="双休"' in text            # the role goes in the title, a condition in the text
     assert "floor_month_salary=8000" in text and "benefits" in text    # a hard pay floor has its own filter; the tags are searched
+    assert 'update.state == "ready"' in text   # a new version in the app is passed on to the user, who installs it there
+    assert "a new version waits in the app: it installs from the app, not from here" in flat
+    assert text.index('update.state == "ready"') > text.index("call status first")   # at the end of the status paragraph
 
 
 def test_the_new_and_changed_tools_come_with_an_example_each():
@@ -608,6 +616,10 @@ def test_the_new_and_changed_tools_come_with_an_example_each():
     assert tools["job_detail"].inputSchema["required"] == ["job_id"]
     assert tools["search"].inputSchema["required"] == ["keyword"] and tools["search"].inputSchema["properties"]["max_pages"]["default"] == 1
     assert tools["wait_for_search"].inputSchema["properties"]["timeout"]["default"] == 120
+    assert "login_cancel ends it early" in " ".join(tools["login"].description.split())   # a login does not have to run out
+    assert tools["login_cancel"].inputSchema["required"] == ["provider"]
+    assert "Tasks keep waiting for a login" in tools["login_cancel"].description
+    assert "`update`" in tools["status"].description and "not from here" in tools["status"].description
 
 
 def test_the_two_pay_filters_are_told_apart_plainly_with_an_example_each():
@@ -655,7 +667,8 @@ def test_status_has_the_shape_clients_rely_on_and_needs_no_network_and_no_time(e
     begun = time.monotonic()
     got = call("status")
     assert time.monotonic() - begun < 1
-    assert set(got) == {"version", "data_dir", "workers", "queue", "exits", "browser", "logins", "platforms"}
+    assert set(got) == {"version", "app", "update", "data_dir", "workers", "queue", "exits", "browser", "logins", "platforms"}
+    assert set(got["app"]) == {"version", "frozen", "path"} and set(got["update"]) == {"current", "latest", "state", "note"}
     assert got["data_dir"] == str(db.home()) and got["version"]
     assert list(got["workers"]) == list(got["platforms"]) == list(env.provs)   # one entry per platform, in registry order
     assert set(got["browser"]) == {"executable", "hint", "playwright", "cdp_url_set", "login_windows", "profiles_in_use"}
@@ -804,5 +817,64 @@ def test_status_shows_the_open_login_windows_and_the_profiles_in_use(env, chrome
 
 def test_djs_call_status_prints_the_same_json(env, chrome, capsys):
     assert cli.main(["call", "status"]) == 0
-    assert set(json.loads(capsys.readouterr().out)) == {"version", "data_dir", "workers", "queue", "exits", "browser", "logins",
-                                                        "platforms"}
+    assert set(json.loads(capsys.readouterr().out)) == {"version", "app", "update", "data_dir", "workers", "queue", "exits",
+                                                        "browser", "logins", "platforms"}
+
+
+def test_djs_call_runs_login_cancel_like_any_other_tool(env, capsys):
+    assert cli.main(["call", "login_cancel", '{"provider": "opt"}']) == 0   # no window is open: nothing to stop
+    assert json.loads(capsys.readouterr().out) == {"provider": "opt", "cancelled": False}
+
+
+# ---- status: the updater and the running program
+@pytest.fixture
+def updater(monkeypatch):
+    """What the updater (djs.update) answers to `status`: the dict it returns, which a test may change."""
+    from djs import update
+    answer = {"current": "1.2.6", "latest": None, "state": "none", "note": "", "install_on_quit": False}
+    monkeypatch.setattr(update, "current", lambda: dict(answer))
+    return answer
+
+
+def test_status_says_what_the_updater_says_without_what_only_the_app_needs(env, chrome, updater):
+    assert call("status")["update"] == {"current": "1.2.6", "latest": None, "state": "none", "note": ""}
+    updater.update(latest="1.4.0", state="ready", note="1.4.0 已下载，可以安装", install_on_quit=True)
+    assert call("status")["update"] == {"current": "1.2.6", "latest": "1.4.0", "state": "ready", "note": "1.4.0 已下载，可以安装"}
+
+
+@pytest.mark.parametrize("broken", ["raises", "lacks a key", "is not importable"])
+def test_status_still_answers_when_the_updater_cannot(env, chrome, updater, monkeypatch, broken):
+    def fail():
+        raise RuntimeError("no state yet")
+
+    if broken == "raises":
+        monkeypatch.setattr(djs.update, "current", fail)
+    elif broken == "lacks a key":
+        updater.pop("state")
+    else:
+        monkeypatch.setitem(sys.modules, "djs.update", None)
+        monkeypatch.delattr(djs, "update")
+    assert call("status")["update"] == {"current": service.app_version(), "latest": None, "state": "none", "note": ""}
+
+
+def test_status_reads_the_real_updater_the_way_it_answers():
+    from djs import update   # the real one: the contract between the two is the four fields
+    answer = update.current()
+    assert {"current", "latest", "state", "note"} <= set(answer) and answer["state"] in ("none", "downloading", "ready", "failed")
+    assert service._update() == {key: answer[key] for key in ("current", "latest", "state", "note")}
+
+
+def test_status_tells_which_program_answers_and_where_it_lives(env, chrome, tmp_path, monkeypatch):
+    here = call("status")["app"]   # a source checkout: the folder that holds the package
+    assert here == {"version": service.app_version() or "dev", "frozen": False, "path": str(Path(service.__file__).resolve().parent.parent)}
+    bundle = tmp_path / "找岗位助手.app"
+    macos = bundle / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "djs").touch()
+    folder = tmp_path / "找岗位助手"
+    folder.mkdir()
+    (folder / "找岗位助手.exe").touch()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    for exe, where in ((macos / "djs", bundle), (folder / "找岗位助手.exe", folder)):   # the bundle, or the install folder
+        monkeypatch.setattr(sys, "executable", str(exe))
+        assert call("status")["app"] == {"version": service.app_version() or "dev", "frozen": True, "path": str(where.resolve())}
