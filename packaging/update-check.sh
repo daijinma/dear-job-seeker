@@ -6,7 +6,8 @@
 # is run against a process that ends after about a second and the swap must have happened: the staged build in place, the
 # old one in previous/, the result file saying ok, the app started again. No window opens: on macOS `open` is a shim that
 # logs the call, on Windows the staged folder holds a launched.cmd that writes a marker. Windows also runs the case of a
-# program of the installed folder that stays running: result "locked", that program named, the folder as it was.
+# program of the installed folder that stays running: either the swap completes (Windows can rename a folder under a
+# running program) or the result is "locked", that program named, the folder as it was; nothing in between.
 set -euo pipefail
 src="${1:?built app or folder}"
 fail() { echo "update-check: $*" >&2; exit 1; }
@@ -98,10 +99,14 @@ else
   sleep 1
   kill -0 "$holder" 2>/dev/null || fail "the stand-in for a running program did not start"
   out=$(APPLY_WAIT_SECONDS=5 apply "$(sleeper)" "$work/previous-locked") || true
-  result_is false locked
-  grep -q holder "$work/last.json" || fail "the running program is not named: $(cat "$work/last.json")"
-  [ -f "$installed/update-check-locked" ] && [ ! -e "$work/previous-locked/$name" ] ||
-    fail "the installed folder was touched although a program of it runs: $out"
+  if grep -Eq '"code" *: *"locked"' "$work/last.json" 2>/dev/null; then
+    grep -q holder "$work/last.json" || fail "the running program is not named: $(cat "$work/last.json")"
+    [ -f "$installed/update-check-locked" ] && [ ! -e "$work/previous-locked/$name" ] ||
+      fail "the installed folder was touched although a program of it runs: $out"
+  else  # Windows may rename a folder under a running program (CI showed it): then the swap is complete, the program goes on from the old copy
+    result_is true ok
+    [ -f "$installed/update-check-new" ] && [ -d "$work/previous-locked/$name" ] || fail "the swap is not complete: $out"
+  fi
   launched
 fi
 echo "update-check: ok"
