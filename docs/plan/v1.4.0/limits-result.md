@@ -10,7 +10,7 @@ Local parts: `tests/test_limits_local.py` (real engine, pacer, exit pool and que
 | L4 page caps | – | not run: caps are only known from notes (智联 60, 国聘 400, 中智 400, 前程无忧 1000, 猎聘 80, 赶集 8 a page); needs one request past each cap |
 | L5 session dies mid-crawl | done for every platform that has a login, by `auth` (so a platform added later is covered): the task waits for a login, not one request goes out signed out, resumes after a login. Optional platforms: the dead session is dropped and the next try goes on signed out, by design (`engine._login_expired`) | not run (康强 with a copy of its profile) |
 | L6 challenge page | done, and it found defects (below) | not run: what each public platform answers when asked too fast |
-| L7 exits | done: one dead exit of two is rested and the other serves, only exit dead → `retrying` with the cause, recovery | **partly:** the app downloaded a 74 MB release from GitHub through the user's proxy in about 20 s and the release API answered; the Clash controller could not be reached from this session, so which rule each job site takes is unknown; per-platform direct-vs-proxy runs wait for the user's go |
+| L7 exits | done: one dead exit of two is rested and the other serves, only exit dead → `retrying` with the cause, recovery | **run 2026-10-16** (below): 11 public platforms, direct and through the Clash port, identical; Clash sends every job site direct |
 | L8 long run | done, compressed: 200 searches, 600 tasks, a cooldown that ends, a cookie that expires, a login that resumes 80 waiting tasks; no thread, file or stuck task grows | not run: 8 h unattended |
 | L9 Windows | `update-check.sh` and the smoke test on the CI runner (first run with the tag) | none: no Windows machine |
 
@@ -25,3 +25,23 @@ One live fact from today: two searches (测试工程师 · 成都 on 13 sites, �
 | D4 | A detail answering 404/410 ended the whole pass and retried the task | now that job says 「职位已下架」 and the pass goes on; a later search asks for it again, as for any detail that failed (a 404 may also be a changed address, so it is not made final) |
 
 Markers (lower-cased match, only on a response the provider could not parse): 验证码, 滑动验证, 滑块验证, 安全验证, 访问验证, 人机验证, 请完成验证, 请按住滑块, captcha, geetest, "verify you are human", "just a moment", `_____tmd_____`, `/punish`. Size limit: 30,000 characters for a page, 2,000 for a JSON body (a refusal sent as JSON is a line or two; a larger one holds job texts, which often say 验证码); a JSON body is read with its `\uXXXX` escapes decoded. Known gap: a verification page that carries none of the markers (e.g. a script that only sets a cookie) is still read as a parse error.
+
+## L7 live, 2026-10-16: direct against the proxy app, `tests/live/exits_compare.py`
+Setup on this machine: Clash Verge (mihomo 1.19) in rule mode with **TUN on** (default route split into `utun1024`), `mixed-port` 7897, one node (a Korean VPS). Rules: private and Chinese address ranges (`cncidr`) → DIRECT, everything else → the node. The app's own "direct" exit does not read the system proxy (`trust_env=False`), but the TUN catches it, so it reaches Clash like any other program; the exit `http://127.0.0.1:7897` reaches Clash through its port.
+
+Run: 测试工程师 · 成都, default pace, a fresh data folder per run (only the signing keys copied, deleted after), 11 platforms (not BOSS 直聘, 猎聘 or 康强; no login on a fresh folder), direct first, the proxy run 5 minutes later; then 7 of them again with Clash's own log recorded.
+
+| platform | direct | through 127.0.0.1:7897 |
+|---|---|---|
+| 字节跳动招聘, 国聘, 牛客网, 鱼泡直聘, 智联招聘, 赶集网 | found 2 / 20 / 16 / 15 / 20 / 8, each in under 15 s | the same counts, the same seconds |
+| 公共招聘网 (mohrss) | no_results (nothing for this query), 5 s | the same |
+| 中智招聘 | found 20, 71 s | the same |
+| 前程无忧 | found 50, 160 s | the same |
+| 58同城 | found 50, 86 s | the same |
+| 新华英才 | found 50, 50 s | the same |
+
+- No refusal, cooldown or failed task in either run; the exits table of `status` after each run showed 7 requests ok on `direct` in one and 7 ok on `http://127.0.0.1:7897` (and none on `direct`) in the other, so the proxy run did use the proxy exit.
+- **Which rule each site takes** (read from Clash's own log while the app ran, 7 hosts, and from Clash's DNS answers checked against its `cncidr` list, the other hosts and the three login platforms): all job hosts resolve to Chinese addresses and match `RuleSet(cncidr) → DIRECT`; none goes through the Korean node. Only a non-Chinese address would (`ipinfo.io`, used to ask the exit's country, answered KR).
+- So, here, the two exits are the same path and give the same results; the sites see this machine's own Chinese address. A foreign address is not the cause of BOSS 直聘's code 37 on 2026-10-12 (its hosts match the same rule); a provider added later whose host resolves abroad would leave through the Korean node, and `login` platforms are pinned to `direct` by design (`egress._pool`) but are still caught by the TUN.
+- The Clash controller was reachable all along: it listens on a unix socket (`/var/run/clash-verge-service/users/501/verge-mihomo.sock`), not on the TCP port the earlier probe tried.
+- Not measured: an exit that really leaves through a foreign node (no job host goes there, so no such result exists), and the same run on another day or network.
