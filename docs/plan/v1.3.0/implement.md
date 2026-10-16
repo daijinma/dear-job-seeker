@@ -1,5 +1,7 @@
 # v1.3.0 implementation order
 
+Status 2026-10-16: step 0 done (E1, `e1-result.md`), the close fix is in (`8ee5feb`); steps 1–5 are built as release 1.5.0 on `feat/plain-browser-crawl`. Step 1 and the integration (steps 2, 4) are built side by side against the "Client API" section of `design.md`. Step 3 is BOSS list-only (already the behaviour since 1.2.x: `detail_can_fill` is False); its live check needs the user's go and a copy of the saved login.
+
 | Step | What | Check |
 |---|---|---|
 | 0a | E1 survival, with the user's go-ahead, hours after the last BOSS run: three fresh profiles in the same initial state, one fixed browser build, headed, same flags and window size. (A) browser-level only, (B) a page session attached, (C) attached + the client's read-only polling (`location.href`, `readyState`, token value) — nothing fetched | page URL each second at browser level for 30 s, plus looking at the window; the control (A) is run again after C; if A fails too, stop: inconclusive. Result is worded as "this combination survived this round", never as "undetected" |
@@ -7,7 +9,7 @@
 | 1 | Needs the 1.2.x close fix merged (one deadline, whole process tree; tests: DevTools socket silent, parent gone first with children alive, deadline expiry reported, the same profile reopens, an attached browser loses only our tab). Then: crawl client on the 1.2.0 browser layer: session routing, visit critical section, navigation state machine, in-page fetch → `httpx.Response`, cookies | fake DevTools server; real headless Chrome on a local site: delayed JS redirect, redirect to blank, a verification page, navigation error, context destroyed during fetch, stale token in the profile with a late fresh one — none may return empty success |
 | 2 | `providers/_browser.py` and the engine on the new client; zhaopin / job51 PC paths and BOSS code unchanged above it | full suite; live 智联 PC search via `set_transport browser` (complete jobs) |
 | 3 | BOSS on the tier E1 proved: full, list-only (detail never requested, reason "BOSS 暂时拿不到职位描述") or off ("BOSS 暂时不可用" before any page opens) | live, default pace, logged in only (A24): full = list + a whole page of details; list-only = a real list returned AND no detail request in the log AND the reason on its jobs; off = no BOSS page opened, the reason shown |
-| 4 | Remove Playwright: dependency, spec, `install-browser`, selftest, smoke, STEALTH_JS, docs | no `playwright` import (grep); CI three builds + smoke; zip sizes ≤ 35 MB |
+| 4 | Remove Playwright: dependency, spec, `install-browser`, selftest, smoke, STEALTH_JS, docs | no `playwright` import (grep); CI three builds + smoke; zip sizes reported, no limit |
 | 5 | README (Download sizes, browser requirement), decisions, release v1.3.0 with three builds | release assets present |
 
 Branch: `feat/plain-browser-crawl`; merged after the user has seen E1 and step 2's live check.
