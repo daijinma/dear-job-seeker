@@ -81,8 +81,9 @@ def description(conn, job_id) -> str | None:
 # ---- friendly errors
 _ERRORS = (  # (kind, pattern on the raw error text, what the user reads); the first match wins
     ("env", r"missing environment|MissingEnv|environment variable", "还没配置这个网站需要的密钥"),
-    ("browser", r"playwright|chromium|browser", "需要先安装浏览器组件"),
+    ("browser", r"browser|google chrome|microsoft edge", "需要先安装 Chrome 或 Edge 浏览器"),
     ("busy", r"正在使用浏览器", "浏览器正忙"),
+    ("proxy", r"proxy that needs a user name", "这个网站配的代理需要账号密码，网页方式用不了它，请换成不需要账号的代理或直连"),
     ("closed", r"登录窗口被关闭", "登录窗口被关掉了，请再试一次"),
     ("login", r"LoginRequired|login required|未登录", "需要先登录"),
     ("timeout", r"秒内没有登录成功", "等了三分钟还没有登录成功，请再试一次"),
@@ -116,7 +117,7 @@ def skip_reason(raw, city: str) -> str:
     kind = classify(raw)[0]
     if kind == "city":
         return f"不支持“{city}”" if city else "需要先填城市"
-    return {"env": "还没配置密钥", "browser": "需要先安装浏览器组件"}.get(kind, "暂时不能用")
+    return {"env": "还没配置密钥", "browser": "需要先安装 Chrome 或 Edge 浏览器"}.get(kind, "暂时不能用")
 
 
 def _shared_reason(conn, task_ids: list[int], provider: str, logged_in) -> str | None:

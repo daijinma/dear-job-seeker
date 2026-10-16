@@ -143,7 +143,7 @@ def test_every_kind_of_refusal_skips_only_its_platform_and_says_why(env):
     assert (started["providers"], started["task_ids"]) == (["a", "nocodes"], [1, 2])
     reasons = {s["provider"]: s["reason"] for s in started["skipped"]}
     assert list(reasons) == ["keyed", "city", "bro"]   # in the order they were named
-    assert "DJS_FAKE_TOOLS_KEY" in reasons["keyed"] and "庚站必须指定城市" in reasons["city"] and "Playwright" in reasons["bro"]
+    assert "DJS_FAKE_TOOLS_KEY" in reasons["keyed"] and "庚站必须指定城市" in reasons["city"] and "Chrome" in reasons["bro"]
     assert [s["label"] for s in started["skipped"]] == ["己站", "庚站", "辛站"]
 
 
@@ -171,7 +171,7 @@ def test_named_platforms_are_used_as_they_are_even_one_that_opens_a_window(env):
 
 def test_a_search_no_platform_can_take_starts_nowhere_and_says_why_of_each(env):
     error = call("search", keyword="py", providers=["keyed", "city", "bro"])["error"]
-    for why in ("己站", "DJS_FAKE_TOOLS_KEY", "庚站: 庚站必须指定城市", "辛站", "Playwright"):
+    for why in ("己站", "DJS_FAKE_TOOLS_KEY", "庚站: 庚站必须指定城市", "辛站", "Chrome"):
         assert why in error
     assert "壬站暂不支持城市「杭州」" in call("search", keyword="py", city="杭州", providers=["nocodes"])["error"]
     assert taskqueue.list_(env.conn) == []
@@ -671,7 +671,7 @@ def test_status_has_the_shape_clients_rely_on_and_needs_no_network_and_no_time(e
     assert set(got["app"]) == {"version", "frozen", "path"} and set(got["update"]) == {"current", "latest", "state", "note"}
     assert got["data_dir"] == str(db.home()) and got["version"]
     assert list(got["workers"]) == list(got["platforms"]) == list(env.provs)   # one entry per platform, in registry order
-    assert set(got["browser"]) == {"executable", "hint", "playwright", "cdp_url_set", "login_windows", "profiles_in_use"}
+    assert set(got["browser"]) == {"executable", "hint", "cdp_url_set", "login_windows", "profiles_in_use"}
     assert got["logins"]["opt"] == {"state": "not_logged_in", "expires_at": None}   # the platforms that have a login
     assert set(got["logins"]) == {"opt", "login"}
     assert got["queue"] == {"pending": 0, "running": 0, "waiting_login": 0, "done": 0, "dead": 0}
@@ -793,18 +793,12 @@ def test_status_lists_the_exits_as_egress_list_shows_them_and_whether_they_cool_
 def test_status_says_which_browser_a_login_window_would_use_or_why_there_is_none(env, chrome):
     browser_state = call("status")["browser"]
     assert browser_state["executable"] == {"kind": "chrome", "path": str(Path("/apps/chrome"))} and browser_state["hint"] is None
-    assert (browser_state["playwright"], browser_state["cdp_url_set"]) == (False, False)   # the fixture says Playwright is not there
+    assert browser_state["cdp_url_set"] is False
     env.mp.setenv("DJS_CDP_URL", "http://127.0.0.1:9222")
     env.mp.setattr(browser, "find_browser", lambda: None)
     browser_state = call("status")["browser"]
-    assert browser_state["executable"] is None and "No browser found" in browser_state["hint"] and browser_state["cdp_url_set"] is True
-
-    def playwright_missing():
-        raise browser.BrowserUnavailable(browser.INSTALL_HINT)
-
-    env.mp.setattr(browser, "find_browser", playwright_missing)
-    got = call("status")["browser"]   # no Chrome or Edge, and nobody to ask about Chromium: still an answer, not an error
-    assert got["executable"] is None and got["hint"] == browser.INSTALL_HINT
+    assert browser_state["executable"] is None and browser_state["hint"] == browser.no_browser_hint()
+    assert "Chrome" in browser_state["hint"] and browser_state["cdp_url_set"] is True
 
 
 def test_status_shows_the_open_login_windows_and_the_profiles_in_use(env, chrome):
@@ -857,7 +851,8 @@ def test_status_still_answers_when_the_updater_cannot(env, chrome, updater, monk
     assert call("status")["update"] == {"current": service.app_version(), "latest": None, "state": "none", "note": ""}
 
 
-def test_status_reads_the_real_updater_the_way_it_answers():
+def test_status_reads_the_real_updater_the_way_it_answers(tmp_path, monkeypatch):
+    monkeypatch.setenv("DJS_HOME", str(tmp_path))   # the updater keeps its state in the data folder: never the real one
     from djs import update   # the real one: the contract between the two is the four fields
     answer = update.current()
     assert {"current", "latest", "state", "note"} <= set(answer) and answer["state"] in ("none", "downloading", "ready", "failed")

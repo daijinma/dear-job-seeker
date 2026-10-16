@@ -1,8 +1,7 @@
 """Boss + auth tests. No network, no browser. Fixtures under tests/fixtures/boss_*.json are SYNTHETIC
 (hand-built from the Go mapper's expected shape, not recorded from Boss)."""
-import builtins
 import json
-import shutil
+import re
 import stat
 import time
 from pathlib import Path
@@ -13,6 +12,7 @@ import pytest
 from djs import auth, browser, cities, db, engine, service
 from djs.jobs import derive
 from djs.normalize import missing
+from djs.providers import _browser
 from djs.providers.base import Blocked, LoginRequired, ParseError, StructureError
 from djs.providers.boss import STOKEN, Boss
 from provider_fakes import FakeBrowser
@@ -93,18 +93,12 @@ def test_status_never_contains_cookie_values():
 
 # ------------------------------------------------------------------ login flow
 
-def test_login_without_playwright_gives_hint(monkeypatch):
-    monkeypatch.setattr(browser, "CHANNELS", (None,))  # whatever Chrome or Edge this machine has...
-    monkeypatch.setattr(shutil, "which", lambda *a, **k: None)  # ...or Chromium on the PATH
-    real_import = builtins.__import__
-
-    def fake(name, *a, **k):
-        if name.startswith("playwright"):
-            raise ImportError("no playwright")
-        return real_import(name, *a, **k)
-
-    monkeypatch.setattr(builtins, "__import__", fake)
-    with pytest.raises(RuntimeError, match="playwright install chromium"):
+def test_login_without_a_browser_gives_hint(monkeypatch):
+    monkeypatch.delenv("DJS_CDP_URL", raising=False)
+    monkeypatch.setattr(browser, "find_browser", lambda: None)   # whatever Chrome or Edge this machine has
+    hint = browser.no_browser_hint()
+    assert "Google Chrome" in hint and "Microsoft Edge" in hint and "playwright" not in hint.lower()
+    with pytest.raises(browser.BrowserUnavailable, match=re.escape(hint)):
         auth.login("boss")
 
 
@@ -273,6 +267,31 @@ def test_salary_is_empty_until_logged_in_and_the_detail_may_fill_it():
     assert (r["salary_text"], r["education"], r["experience"]) == ("25-35K", "硕士", "1-3年")
 
 
+def listed(salaries):
+    return {"code": 0, "message": "Success", "zpData": {"hasMore": False, "jobList": [
+        {"encryptJobId": f"j{i}", "jobName": "测试工程师", "salaryDesc": s} for i, s in enumerate(salaries)]}}
+
+
+@pytest.mark.parametrize("salaries", [["", "", ""], ["", "**-**元", "-", ""], [None, "", "--"]])
+def test_a_list_without_one_salary_means_the_saved_login_is_no_longer_accepted(salaries):
+    with pytest.raises(LoginRequired, match="no longer accepted"):
+        Boss().fetch(client_for(reply(listed(salaries))), {"keyword": "python"}, 1)
+
+
+@pytest.mark.parametrize("salaries", [["", "", "20-30K"], ["面议", "", ""], ["", ""], []])
+def test_a_list_with_a_salary_a_short_list_or_none_is_a_list(salaries):
+    got = Boss().fetch(client_for(reply(listed(salaries))), {"keyword": "python"}, 1)
+    assert len(got) == len(salaries)
+
+
+def test_that_login_is_marked_dead_so_the_next_login_clears_its_cookies(monkeypatch):
+    """The engine invalidates a session a login platform refused: the login window then forgets the stale cookies."""
+    auth.save_cookies("boss", {"wt2": "x", "zp_at": "y"})
+    assert auth.status("boss")["state"] == "logged_in"
+    auth.invalidate("boss")
+    assert auth.status("boss")["state"] == "expired" and auth.load_cookies("boss") is None
+
+
 def test_probe_payload_city_is_known():
     assert cities.code("boss", Boss().probe_payload()["city"]) not in (None, "100010000")
 
@@ -283,42 +302,48 @@ SEARCH_PAGE = "https://www.zhipin.com/web/geek/jobs"
 
 
 def visit_calls(url):
-    """What one fresh visit asks of the browser, in order."""
-    return [("clear_cookie", STOKEN), ("goto", url), ("page.settle", "networkidle"), ("wait_cookie", STOKEN),
-            ("eval", "() => location.href")]
+    """What one fresh visit asks of the browser, in order (the first visit of a client also clears the stale token)."""
+    return [("clear_cookie", STOKEN), ("goto", url), ("settle", 8000), ("eval", "() => location.href")]
+
+
+def boss_page(**kwargs):
+    """A Boss page whose scripts write a new token on every load."""
+    return FakeBrowser(renews=(STOKEN,), **kwargs)
 
 
 def test_warmup_does_nothing_because_every_call_loads_its_own_page():
-    page = FakeBrowser()
+    page = boss_page()
     Boss().warmup(page, {"keyword": "python"})
     assert page.calls == []
 
 
 def test_fetch_loads_a_fresh_search_page_with_a_new_token_right_before_the_api_call():
     """Boss blanks an automated page seconds after load, so each API call gets a freshly loaded page."""
-    page = FakeBrowser(body=fixture("boss_list.json"), href="https://www.zhipin.com/web/geek/jobs?query=python")
+    page = boss_page(body=fixture("boss_list.json"), href="https://www.zhipin.com/web/geek/jobs?query=python")
     Boss().fetch(page, {"keyword": "python", "city": "上海"}, 1)
     assert page.calls == visit_calls(f"{SEARCH_PAGE}?query=python&city=101020100")
 
 
 def test_detail_loads_the_plain_search_page_first():
     job = fixture("boss_list.json")["zpData"]["jobList"][0]
-    page = FakeBrowser(body=fixture("boss_detail.json"), href="https://www.zhipin.com/job_detail/x.html")
+    page = boss_page(body=fixture("boss_detail.json"), href="https://www.zhipin.com/job_detail/x.html")
     Boss().detail(page, job)
     assert page.calls == visit_calls(SEARCH_PAGE)
 
 
-def test_a_missing_token_is_not_fatal_and_an_unknown_city_is_refused():
-    Boss().fetch(FakeBrowser(body=fixture("boss_list.json"), cookie_timeout=True), {"keyword": "x"}, 1)
+def test_a_token_the_page_did_not_renew_is_blocked_and_an_unknown_city_is_refused(monkeypatch):
+    monkeypatch.setattr(_browser, "RENEW_SECONDS", 0.05)
+    with pytest.raises(Blocked, match="token not renewed"):
+        Boss().fetch(FakeBrowser(body=fixture("boss_list.json")), {"keyword": "x"}, 1)   # nothing writes a token
     with pytest.raises(ValueError, match="暂不支持城市「火星」"):
-        Boss().fetch(FakeBrowser(), {"keyword": "x", "city": "火星"}, 1)
+        Boss().fetch(boss_page(), {"keyword": "x", "city": "火星"}, 1)
 
 
 def test_the_security_check_page_blocks_but_the_url_left_after_passing_it_does_not():
     with pytest.raises(Blocked, match="security check"):
-        Boss().fetch(FakeBrowser(href="https://www.zhipin.com/web/common/_security_check.html?x=1"), {"keyword": "x"}, 1)
+        Boss().fetch(boss_page(href="https://www.zhipin.com/web/common/_security_check.html?x=1"), {"keyword": "x"}, 1)
     passed = "https://www.zhipin.com/web/geek/jobs?query=x&city=101210100&_security_check=1_1791707741840"
-    assert Boss().fetch(FakeBrowser(body=fixture("boss_list.json"), href=passed), {"keyword": "x"}, 1)
+    assert Boss().fetch(boss_page(body=fixture("boss_list.json"), href=passed), {"keyword": "x"}, 1)
 
 
 @pytest.mark.parametrize("shown", ["", " ", "-", "--", "-K", "-k", "\ue0a1-\ue0a2K", "\ue000", "\uf8ff1K"])
@@ -368,7 +393,7 @@ def test_a_call_the_page_could_not_make_is_blocked_not_a_network_retry():
     """Boss blanks a page an automation drives and the call fails with "Failed to fetch". That is risk control: a
     cooldown, not a quick retry that loads more pages under the same eye (a logged-in run retried 8 times)."""
     with pytest.raises(Blocked, match="went away"):
-        Boss().fetch(_PageGone(), {"keyword": "x"}, 1)
+        Boss().fetch(_PageGone(renews=(STOKEN,)), {"keyword": "x"}, 1)
     job = fixture("boss_list.json")["zpData"]["jobList"][0]
     with pytest.raises(Blocked, match="went away"):
-        Boss().detail(_PageGone(), job)
+        Boss().detail(_PageGone(renews=(STOKEN,)), job)

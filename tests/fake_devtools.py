@@ -1,5 +1,5 @@
-"""A stand-in for a browser's DevTools endpoint, for the tests of the login window in djs.browser: the browser-level
-websocket and /json/version on one port, answering the few commands the window uses. Either in a thread of the test
+"""A stand-in for a browser's DevTools endpoint, for the tests of the login window and the crawl client in djs.browser: the
+browser-level websocket and /json/version on one port, answering the few commands they use. Either in a thread of the test
 (DevTools), or as the "browser" a test starts as a process (main(): Chrome's flags in, a DevToolsActivePort file out)."""
 from __future__ import annotations
 
@@ -16,15 +16,24 @@ from pathlib import Path
 
 from websockets.sync.server import serve
 
+HOLD = object()   # what a handler returns to leave a command unanswered (until DevTools.answer)
+
 
 class DevTools:
     """`pages`: target id -> url of the open pages; `cookies`: the browser's cookie jar; `calls`: every (method, params)
-    received. `noise` sends an event before each answer, as a real browser does; `deaf` answers Browser.close but goes
-    on running."""
+    received, `messages` the same with the whole message (id, sessionId). `noise` sends an event before each answer, as a
+    real browser does; `deaf` answers Browser.close but goes on running.
+
+    A page is reached through a flattened session (Target.attachToTarget with flatten: the commands then carry a
+    sessionId, which the answer repeats; a session whose page is closed is "not found"). `handlers` maps a method to
+    fn(params, session_id) that answers it instead (a dict is the result; raise ValueError for an error answer; return HOLD
+    to say nothing, then DevTools.answer(index, result) says it later, `held` is who waits)."""
 
     def __init__(self, url: str = "about:blank", noise: bool = False, deaf: bool = False):
         self.guid, self.noise, self.deaf = uuid.uuid4().hex, noise, deaf
-        self.pages, self.cookies, self.calls = {"page-1": url}, [], []
+        self.pages, self.cookies, self.calls, self.messages = {"page-1": url}, [], [], []
+        self.attached, self.handlers, self.held = {}, {}, []   # session id -> target id
+        self._targets = 1
         self.gone, self._sessions = threading.Event(), []
         self.server = serve(self._session, "127.0.0.1", 0, process_request=self._http, max_size=None)
         self.port = self.server.socket.getsockname()[1]
@@ -61,19 +70,35 @@ class DevTools:
             return connection.respond(http.HTTPStatus.NOT_FOUND, "")
         return None
 
+    def answer(self, index: int, result: dict | None = None, error: str | None = None) -> None:
+        """Say what a held command (`held[index]`) was waiting for."""
+        ws, msg = self.held[index]
+        self._reply(ws, msg, {"error": {"code": -32000, "message": error}} if error else {"result": result or {}})
+
+    def _reply(self, ws, msg: dict, body: dict) -> None:
+        ws.send(json.dumps({"id": msg["id"], **({"sessionId": msg["sessionId"]} if "sessionId" in msg else {}), **body}))
+
     def _session(self, ws) -> None:
         self._sessions.append(ws)
         for raw in ws:
             msg = json.loads(raw)
             method, params = msg["method"], msg.get("params", {})
             self.calls.append((method, params))
+            self.messages.append(msg)
             if self.noise:
                 ws.send(json.dumps({"method": "Target.targetInfoChanged", "params": {}}))
             try:
-                reply = {"id": msg["id"], "result": self._run(method, params)}
+                if "sessionId" in msg and self.attached.get(msg["sessionId"]) not in self.pages:
+                    raise ValueError("Session with given id not found.")
+                handler = self.handlers.get(method)
+                result = handler(params, msg.get("sessionId")) if handler else self._run(method, params)
+                if result is HOLD:
+                    self.held.append((ws, msg))
+                    continue
+                body = {"result": result}
             except ValueError as e:
-                reply = {"id": msg["id"], "error": {"code": -32000, "message": str(e)}}
-            ws.send(json.dumps(reply))
+                body = {"error": {"code": -32000, "message": str(e)}}
+            self._reply(ws, msg, body)
             if method == "Browser.close" and not self.deaf:
                 threading.Thread(target=self.quit, daemon=True).start()
                 return
@@ -84,13 +109,19 @@ class DevTools:
             return {"targetInfos": [*pages, {"targetId": "ui", "type": "browser_ui", "url": "chrome://omnibox-popup/",
                                              "attached": False}]}
         if method == "Target.createTarget":
-            target = f"page-{len(self.pages) + 1}"
+            self._targets += 1
+            target = f"page-{self._targets}"
             self.pages[target] = params["url"]
             return {"targetId": target}
         if method == "Target.closeTarget":
             if self.pages.pop(params["targetId"], None) is None:
                 raise ValueError("No target with given id found")
             return {"success": True}
+        if method == "Target.attachToTarget":
+            if params["targetId"] not in self.pages:
+                raise ValueError("No target with given id found")
+            self.attached[session := f"session-{len(self.attached) + 1}"] = params["targetId"]
+            return {"sessionId": session}
         if method == "Storage.getCookies":
             return {"cookies": [dict(c) for c in self.cookies]}
         if method == "Storage.setCookies":  # a cookie set with an expiry in the past is how a browser drops one
@@ -102,6 +133,8 @@ class DevTools:
         if method == "Test.slow":
             time.sleep(params["seconds"])
             return {}
+        if method == "Test.echo":
+            return params
         if method == "Browser.close":
             return {}
         raise ValueError(f"'{method}' wasn't found")

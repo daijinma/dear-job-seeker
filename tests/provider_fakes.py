@@ -1,7 +1,5 @@
 """Test doubles shared by the provider tests: an httpx client with a canned answer, and a stand-in for
 djs.browser.BrowserClient (the requests of an httpx client under the same names, plus the page primitives)."""
-from types import SimpleNamespace
-
 import httpx
 
 from djs import normalize, service, taskqueue
@@ -56,17 +54,15 @@ def job(conn, provider, sid, tasks, seen=1000.0, **cols):
 
 
 class FakeBrowser:
-    """get/post go through a canned httpx client; goto, eval and wait_cookie only record what the provider asked for.
-    `cookies` is what the page holds ({name: value}), `href` what location.href answers, `cookie_timeout` makes
-    wait_cookie give up the way BrowserClient does (httpx.ReadTimeout)."""
+    """get/post go through a canned httpx client; goto, settle, clear_cookie, eval and wait_cookie record what the
+    provider asked for. `cookies` is what the browser holds ({name: value}), `renews` the cookies the page writes a new
+    value for on every goto (an anti-bot token), `href` what location.href answers, `cookie_timeout` makes wait_cookie
+    give up the way BrowserClient does (httpx.ReadTimeout)."""
 
     def __init__(self, body=None, status=200, text=None, seen=None, cookies=None, href="https://site.test/",
-                 cookie_timeout=False):
+                 cookie_timeout=False, renews=()):
         self.http = client(body, status, text, seen=seen)
-        jar = [{"name": name, "value": value} for name, value in (cookies or {}).items()]
-        rec = lambda name: (lambda *a, **k: self.calls.append((name, a[0] if a else k.get("name"))))  # noqa: E731
-        self.page = SimpleNamespace(goto=rec("page.goto"), wait_for_load_state=rec("page.settle"),
-                                    context=SimpleNamespace(cookies=lambda url: jar, clear_cookies=rec("clear_cookie")))
+        self.jar, self.renews, self.loads = dict(cookies or {}), tuple(renews), 0
         self.calls, self.href, self.cookie_timeout = [], href, cookie_timeout
 
     def get(self, url, paced=True, **kwargs):
@@ -77,6 +73,11 @@ class FakeBrowser:
 
     def goto(self, url, timeout=30):
         self.calls.append(("goto", url))
+        self.loads += 1
+        self.jar.update({name: f"{name}-{self.loads}" for name in self.renews})
+
+    def settle(self, ms):
+        self.calls.append(("settle", ms))
 
     def eval(self, js, arg=None):
         self.calls.append(("eval", js))
@@ -86,3 +87,18 @@ class FakeBrowser:
         self.calls.append(("wait_cookie", name))
         if self.cookie_timeout:
             raise httpx.ReadTimeout("cookie never came")
+
+    def cookies(self, url=None):
+        return [{"name": name, "value": value} for name, value in self.jar.items()]
+
+    def cookie_value(self, name, url=None):
+        return self.jar.get(name)
+
+    def clear_cookie(self, name):
+        self.calls.append(("clear_cookie", name))
+        self.jar.pop(name, None)
+
+    url = property(lambda self: self.href)
+
+    def html(self):
+        return ""

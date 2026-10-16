@@ -1,11 +1,17 @@
 """What providers share about the client they are handed: djs.browser.BrowserClient (a real page) or httpx.Client."""
 from __future__ import annotations
 
+import time
 import weakref
 
 import httpx
 
+from .base import Blocked
+
 XHR_ACCEPT = "application/json, text/plain, */*"     # what the sites' own scripts send; a bare fetch() sends */*
+SETTLE_MS = 8000        # how long a page gets to finish its own redirects
+RENEW_SECONDS = 10      # how long its scripts get to write a new token after the load
+POLL_SECONDS = 0.25
 
 
 def is_browser(client) -> bool:
@@ -18,28 +24,21 @@ def is_browser(client) -> bool:
 _fresh: "weakref.WeakSet" = weakref.WeakSet()
 
 
-def fresh_visit(client, url: str, token: str, settle_ms: int = 8000) -> None:
+def fresh_visit(client, url: str, token: str, settle_ms: int = SETTLE_MS) -> None:
     """Start a visit: wait for the platform's pace, load `url`, let the page's own redirects finish and wait for its
-    scripts to write `token`. The API call that follows belongs to the same visit (see api_get)."""
+    scripts to write a new `token`. The API call that follows belongs to the same visit (see api_get). A token that
+    still holds the value it had before the load is not new: no call is made on a token of unknown age (Blocked)."""
     if client not in _fresh:
-        client.page.context.clear_cookies(name=token)  # a token left in the profile would look present at once
+        client.clear_cookie(token)  # a token left in the profile would look present at once
         _fresh.add(client)
+    before = client.cookie_value(token)
     client.goto(url)
-    _settle(client, settle_ms)
-    for _ in range(3):
-        try:
-            return client.wait_cookie(token, timeout=10)
-        except httpx.ConnectError:   # the page navigated (security check bounce) while we looked: let it finish
-            _settle(client, settle_ms)
-        except httpx.ReadTimeout:    # no token: the API answer (37 -> Blocked) is the verdict
-            return
-
-
-def _settle(client, settle_ms: int) -> None:
-    try:
-        client.page.wait_for_load_state("networkidle", timeout=settle_ms)
-    except Exception:  # a page that keeps polling never goes idle
-        pass
+    client.settle(settle_ms)
+    deadline = time.monotonic() + RENEW_SECONDS
+    while not (now := client.cookie_value(token)) or now == before:
+        if time.monotonic() >= deadline:
+            raise Blocked(f"{token}: token not renewed within {RENEW_SECONDS} s of loading {url}")
+        time.sleep(POLL_SECONDS)
 
 
 def api_get(client, url: str, **kwargs):
@@ -50,5 +49,5 @@ def api_get(client, url: str, **kwargs):
     try:
         return client.get(url, paced=False, **kwargs)
     except httpx.ConnectError:
-        _settle(client, 8000)
+        client.settle(SETTLE_MS)
         return client.get(url, paced=False, **kwargs)

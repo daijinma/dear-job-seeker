@@ -6,9 +6,10 @@ env DJS_JOB51_HMAC_KEY (the hex text itself, NOT hex-decoded). The server verifi
 string, so the signed string and the requested URL must be byte-identical: build the whole URL
 ourselves and never pass params= to httpx. Success is status "1"; "110011" = signature rejected.
 
-browser, logged in: the PC search we.51job.com/api/job/search-pc, unsigned, same envelope, and its list item carries
-the JD (`jobDescribe`; that it is the full text is not confirmed). Aliyun's WAF wants the page's own scripts to have
-set `acw_sc__v2`, so the search page is loaded first.
+browser: the PC search we.51job.com/api/job/search-pc, unsigned, same envelope, and its list item carries the JD
+(`jobDescribe`; that it is the full text is not confirmed). It answers signed out too. Aliyun's WAF once wanted the
+page's own scripts to have set `acw_sc__v2` first: the search page is still loaded first, but the cookie is no longer
+waited for (on 2026-10-16 the page did not set it in 20 s and the search answered without it).
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ import hmac
 import time
 import uuid
 from urllib.parse import quote, urlencode
+
+import httpx
 
 from ._browser import XHR_ACCEPT, is_browser
 from .base import Login, Provider, StructureError, env, get_json, need, tag_names
@@ -89,7 +92,10 @@ class Job51(Provider):
             query = {"jobArea": self.city_code(payload.get("city")) or NATIONWIDE,
                      "keyword": payload.get("keyword", ""), "searchType": 2, "keywordType": ""}
             client.goto(f"{PC_PAGE}?{urlencode(query)}")
-            client.wait_cookie(WAF_COOKIE, timeout=20)
+            try:
+                client.wait_cookie(WAF_COOKIE, timeout=5)
+            except httpx.ReadTimeout:   # ponytail: the search answers without it today; a WAF answer is the verdict then
+                pass
 
     def fetch(self, client, payload: dict, page: int) -> list[dict]:
         if is_browser(client):

@@ -25,6 +25,7 @@ NATIONWIDE = "100010000"                 # Boss's own "全国" city code; the ot
 STOKEN = "__zp_stoken__"                 # anti-bot token the page's scripts write on every load
 HREF = "() => location.href"
 NO_SALARY = ("", "-", "--", "-K", "-k")  # what Boss draws where it hides the salary
+SIGNED_OUT_JOBS = 3                      # a list this long without one salary is a signed-out list, not a run of 面议
 
 
 def check_body(d: dict) -> dict:
@@ -45,6 +46,12 @@ def _api(client, url: str, params: dict) -> dict:
         return check_body(get_json(api_get(client, url, params=params, headers=HEADERS)))
     except httpx.ConnectError as e:
         raise Blocked(f"Boss page went away before the call: {e}") from e
+
+
+def _hidden(text) -> bool:
+    """Boss's placeholder for a salary it will not show (empty, dashes, stars), as opposed to real text like 面议."""
+    text = (text or "").strip()
+    return text in NO_SALARY or "*" in text
 
 
 def _salary(*texts) -> str | None:
@@ -73,8 +80,9 @@ class Boss(Provider):
     transports = ("browser",)
     needs_headed = True
     note = ("Needs a real browser window (plain HTTP gets code 37) and your login: signed out, the salary is hidden and "
-            "the pages are not reliable, so it is never visited without one. List-only for now: job descriptions are "
-            "not fetched by the crawl. Keep the default pace: risk control hits the account and the IP for hours.")
+            "the pages are not reliable, so it is never visited without one. List-only: job descriptions are "
+            "not fetched by the crawl (its risk control answers after a few detail calls). Keep the default pace: "
+            "risk control hits the account and the IP for hours.")
     login = Login(url="https://www.zhipin.com/web/user/?ka=bticket", method="qr", domain="zhipin.com",
                   cookies_any=("wt2", "zp_at"), unlocks="能看到薪资")
 
@@ -101,7 +109,12 @@ class Boss(Provider):
                   "page": page, "pageSize": self.page_size, "scene": 1}
         self._visit(client, self._search_page(payload))
         zp = _api(client, SEARCH_URL, params)
-        return need(zp, "jobList", typ=list)
+        jobs = need(zp, "jobList", typ=list)
+        if len(jobs) >= SIGNED_OUT_JOBS and all(_hidden(j.get("salaryDesc")) for j in jobs):
+            # Boss drops a login it no longer accepts without saying so: the page loads, the list answers code 0, and
+            # no salary comes with any job (observed 2026-10-16: the session cookie `bst` is deleted on the first load)
+            raise LoginRequired("Boss shows no salary on any job: the saved login is no longer accepted")
+        return jobs
 
     def job_id(self, job: dict) -> str:
         return need(job, "encryptJobId", typ=str)
@@ -118,10 +131,10 @@ class Boss(Provider):
     missing_reasons = {"description": "BOSS 暂时拿不到职位描述，可打开原页面查看"}
 
     def detail_can_fill(self, missing: list[str], logged_in: bool) -> bool:
-        """List-only for now (decision A21): Boss blanks a page an automation drives, so the detail call made after the
-        list mostly fails (F44), and each failure cooled the site down and retried the task for hours against the
-        user's account. The crawl never asks; a detail the user opens in the app is still fetched on demand. 1.3.0's
-        experiment E1 decides whether details come back."""
+        """List-only (decision A21): the list call made right after a page loads works, the detail calls do not hold
+        up (experiment E1, docs/plan/v1.3.0/e1-result.md: five of them answered on one page, the next got code 37), and
+        each failure cooled the site down and retried the task for hours against the user's account. The crawl never
+        asks; a detail the user opens in the app is still fetched on demand."""
         return False
 
     def meta(self, job: dict, detail: dict | None) -> dict:

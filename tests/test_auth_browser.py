@@ -238,14 +238,16 @@ def test_a_browser_left_by_a_crashed_run_is_closed_before_the_next_window_opens(
 
 def test_the_cookie_a_login_window_leaves_in_the_profile_is_readable_by_the_crawl_browser(world):
     auth.login("site", timeout=30)   # the window set tok=SECRET (an hour of life) in the shared profile and closed
-    with browser.open_context("site", headless=True) as ctx:   # Playwright, on the same persistent profile
-        assert {c["name"]: c["value"] for c in ctx.cookies()}["tok"] == "SECRET"   # same keychain flags: it can decrypt it
+    with browser.open_browser(providers.get("site"), "direct", 0.0, 0.0) as client:   # the crawl: same profile, same flags
+        assert client.cookie_value("tok", world) == "SECRET"   # so it can decrypt what the login stored
+        assert {c["name"]: c["value"] for c in client.cookies(world)} == {"tok": "SECRET"}   # (wd was a session cookie: it went with the window)
+    assert window_is_gone()
 
 
 def test_in_the_users_own_browser_the_login_is_one_tab_and_their_browser_stays(world, tmp_path, monkeypatch):
     users = tmp_path / "users-chrome"   # a browser of "the user's": not ours, started by hand with a debugging port
     proc = subprocess.Popen([str(browser.executable()), f"--user-data-dir={users}", "--remote-debugging-port=0",
-                             "--no-first-run", "--headless=new", "about:blank"],
+                             "--no-first-run", "--use-mock-keychain", "--password-store=basic", "--headless=new", "about:blank"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_until(lambda: browser._devtools_address(users) is not None)

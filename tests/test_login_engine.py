@@ -4,6 +4,7 @@ city is filtered after the fact, and the overview / checks the pages and tools r
 fake platforms behind httpx.MockTransport, no browser."""
 import asyncio
 import json
+import re
 import signal
 import threading
 import time
@@ -215,7 +216,7 @@ def test_a_search_is_refused_early_when_the_login_transport_needs_a_browser_that
     monkeypatch.setattr(browser, "ready", lambda: False)
     assert service.crawl_start(env.conn, "late", keyword="x")["task_id"] == 1   # logged out: http needs no browser
     login("late")
-    with pytest.raises(ValueError, match="playwright install chromium"):
+    with pytest.raises(ValueError, match=re.escape(browser.no_browser_hint())):
         service.crawl_start(env.conn, "late", keyword="x")
     assert env.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 

@@ -35,7 +35,7 @@ def _check_code(code, where: str) -> None:
 
 def _login_tokens(client) -> tuple[str, str]:
     """The at/rt login cookies the browser holds (HttpOnly ones too: document.cookie cannot see those)."""
-    jar = {c["name"]: c["value"] for c in client.page.context.cookies(HOME)}
+    jar = {c["name"]: c["value"] for c in client.cookies(HOME)}
     if not (jar.get("at") and jar.get("rt")):
         raise LoginRequired("zhaopin PC search needs the at/rt login cookies; log in first")
     return jar["at"], jar["rt"]

@@ -26,7 +26,6 @@ analysis = Analysis(
     [str(Path(SPECPATH) / f"{entry}.py") for entry in (WINDOW, CONSOLE)],
     datas=[
         *collect_data_files("djs"),         # schema.sql and the UI files
-        *collect_data_files("playwright"),  # its driver (node + JS): browser capture and login need it
         *copy_metadata("mcp"),              # mcp reads its own version at import
         *copy_metadata("dear-job-seeker"),  # the `status` tool reports this version
     ],

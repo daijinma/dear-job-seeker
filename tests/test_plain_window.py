@@ -16,7 +16,7 @@ import pytest
 
 import fake_devtools
 from djs import browser, db
-from fake_devtools import DevTools
+from fake_devtools import HOLD, DevTools
 
 process = pytest.mark.skipif(sys.platform == "win32", reason="the fake browser is a script")
 SIGKILL = getattr(signal, "SIGKILL", 9)   # the parametrize lists below are read on Windows too, for its own tests
@@ -96,6 +96,132 @@ def test_a_refused_command_a_silent_browser_a_browser_that_quit_and_no_browser_a
         cdp.call("Target.getTargets")
     with pytest.raises(browser.BrowserUnavailable, match="Cannot talk to the browser at ws://127.0.0.1:1/x"):
         browser._Cdp("ws://127.0.0.1:1/x")
+
+
+def wait_until(condition, seconds=10):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "gave up waiting"
+        time.sleep(0.01)
+
+
+def in_thread(fn, outcomes):
+    """Run fn in a thread that reports what it returned or raised."""
+    def run():
+        try:
+            outcomes.append(fn())
+        except BaseException as e:   # the thread reports it
+            outcomes.append(e)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def test_a_page_is_reached_by_its_session_and_the_answer_is_routed_by_command_id(dev):
+    cdp = browser._Cdp(dev.address)
+    session = cdp.call("Target.attachToTarget", targetId="page-1", flatten=True)["sessionId"]
+    assert cdp.call("Test.echo", session_id=session, a=1) == {"a": 1}   # an event came first, as before
+    assert cdp.call("Test.echo", b=2) == {"b": 2}
+    assert [m.get("sessionId") for m in dev.messages if m["method"] == "Test.echo"] == [session, None]
+    with pytest.raises(browser.BrowserUnavailable, match="Session with given id not found"):
+        cdp.call("Test.echo", session_id="no-such-session")
+    dev.pages.clear()   # the page went away: its session with it
+    with pytest.raises(browser.BrowserUnavailable, match="Session with given id not found"):
+        cdp.call("Test.echo", session_id=session)
+    assert cdp.call("Target.getTargets")["targetInfos"]   # the connection is fine
+    cdp.close()
+
+
+def test_answers_that_arrive_in_another_order_reach_the_call_that_asked(dev):
+    dev.handlers["Test.hold"] = lambda params, session: HOLD
+    cdp, outcomes = browser._Cdp(dev.address), []
+    threads = [in_thread(lambda name=name: cdp.call("Test.hold", timeout=10, name=name), outcomes) for name in ("a", "b", "c")]
+    wait_until(lambda: len(dev.held) == 3)
+    for index in (2, 0, 1):   # not the order in which they were asked
+        dev.answer(index, {"for": dev.held[index][1]["params"]["name"]})
+    for thread in threads:
+        thread.join(10)
+    assert sorted(o["for"] for o in outcomes) == ["a", "b", "c"]
+    cdp.close()
+
+
+def test_many_threads_share_one_connection_without_crossing_their_answers(dev):
+    cdp, wrong = browser._Cdp(dev.address), []
+
+    def hammer(who):
+        for n in range(60):
+            if cdp.call("Test.echo", who=who, n=n) != {"who": who, "n": n}:
+                wrong.append((who, n))
+
+    threads = [threading.Thread(target=hammer, args=(who,)) for who in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    assert not any(t.is_alive() for t in threads) and wrong == []
+    cdp.close()
+
+
+def test_a_call_waiting_for_its_answer_does_not_hold_up_a_close_sent_by_another_thread(dev):
+    """The worker waits for its page while the exit handler asks the browser to quit, on the same connection."""
+    dev.handlers["Test.hold"] = lambda params, session: HOLD
+    cdp, outcomes = browser._Cdp(dev.address), []
+    worker = in_thread(lambda: cdp.call("Test.hold", timeout=30), outcomes)
+    wait_until(lambda: dev.held)
+    begun = time.monotonic()
+    assert cdp.call("Browser.close", timeout=5) == {}   # answered at once, with the other call still waiting
+    worker.join(10)
+    assert time.monotonic() - begun < 5 and dev.gone.is_set()
+    assert not worker.is_alive() and isinstance(outcomes[0], browser.BrowserGone)   # the waiting call is told, not left hanging
+    cdp.close()
+
+
+def test_when_the_socket_closes_every_waiting_call_fails_at_once_and_so_does_the_next(dev):
+    dev.handlers["Test.hold"] = lambda params, session: HOLD
+    cdp, outcomes = browser._Cdp(dev.address), []
+    threads = [in_thread(lambda: cdp.call("Test.hold", timeout=30), outcomes) for _ in range(3)]
+    wait_until(lambda: len(dev.held) == 3)
+    begun = time.monotonic()
+    dev.quit()
+    for thread in threads:
+        thread.join(10)
+    assert time.monotonic() - begun < 5 and [type(o) for o in outcomes] == [browser.BrowserGone] * 3
+    with pytest.raises(browser.BrowserGone):
+        cdp.call("Target.getTargets")
+    cdp.close()
+
+
+def test_closing_the_connection_ourselves_fails_the_waiting_call_and_ends_the_reader(dev):
+    dev.handlers["Test.hold"] = lambda params, session: HOLD
+    cdp, outcomes = browser._Cdp(dev.address), []
+    worker = in_thread(lambda: cdp.call("Test.hold", timeout=30), outcomes)
+    wait_until(lambda: dev.held)
+    cdp.close()
+    worker.join(10)
+    assert not worker.is_alive() and isinstance(outcomes[0], browser.BrowserGone)
+    assert not cdp._reader.is_alive()
+    with pytest.raises(browser.BrowserGone):
+        cdp.call("Target.getTargets")
+
+
+def test_a_frame_that_is_neither_an_answer_nor_an_event_is_skipped_and_the_reader_goes_on(dev):
+    cdp = browser._Cdp(dev.address)
+    wait_until(lambda: dev._sessions)
+    for junk in ("not json", "[1, 2]", "null", '"text"', b"\xff\xfe", '{"id": 99999, "result": {}}'):   # the last: nobody asked
+        dev._sessions[0].send(junk)
+    assert cdp.call("Test.echo", fine=True) == {"fine": True} and cdp._reader.is_alive()
+    cdp.close()
+
+
+def test_an_answer_that_comes_after_its_call_gave_up_is_dropped_not_given_to_the_next(dev):
+    dev.handlers["Test.hold"] = lambda params, session: HOLD
+    cdp = browser._Cdp(dev.address)
+    with pytest.raises(browser.BrowserUnavailable, match="did not answer Test.hold"):
+        cdp.call("Test.hold", timeout=0.2)
+    dev.answer(0, {"late": True})
+    assert cdp.call("Test.echo", fresh=True) == {"fresh": True}
+    cdp.close()
 
 
 # ============================================================ what the login asks of the window

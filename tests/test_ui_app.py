@@ -108,8 +108,9 @@ def test_crawl_starts_the_sites_that_can_and_names_the_ones_that_cannot_in_plain
     assert body["task_ids"] == [1]
     assert [(s["provider"], s["label"], s["reason"]) for s in body["skipped"]] == [
         ("zhaopin", "智联招聘", "不支持“义乌”"), ("ganji", "赶集网", "不支持“义乌”"), ("job58", "58同城", "还没配置密钥"),
-        ("boss", "BOSS 直聘", "需要先安装浏览器组件")]
-    assert not re.search(r"[A-Za-z]", "".join(s["reason"] for s in body["skipped"]))   # the service's English never reaches the page
+        ("boss", "BOSS 直聘", "需要先安装 Chrome 或 Edge 浏览器")]
+    shown = re.sub("Chrome|Edge", "", "".join(s["reason"] for s in body["skipped"]))   # the browsers' names are the one exception
+    assert not re.search(r"[A-Za-z]", shown)   # the service's English never reaches the page
     assert [t["provider"] for t in taskqueue.list_(db.connect())] == ["nowcoder"]
     nationwide = call("POST /api/crawl", {**asked, "city": "", "providers": ["zhaopin", "ganji"]})
     assert [(s["provider"], s["reason"]) for s in nationwide["skipped"]] == [("ganji", "需要先填城市")]
@@ -366,8 +367,8 @@ def test_login_runs_in_background(call, monkeypatch):
 
 
 @pytest.mark.parametrize("error, kind, shown", [
-    (RuntimeError("Playwright/Chromium missing. Run: pip install playwright && playwright install chromium"),
-     "browser", "需要先安装浏览器组件"),
+    (RuntimeError("No browser found. Install Google Chrome or Microsoft Edge."),
+     "browser", "需要先安装 Chrome 或 Edge 浏览器"),
     (TimeoutError("180 秒内没有登录成功，请再试一次"), "timeout", "等了三分钟还没有登录成功，请再试一次"),
     (RuntimeError("登录窗口被关闭了，请重新登录"), "closed", "登录窗口被关掉了，请再试一次"),
     (RuntimeError("正在使用浏览器，请稍后再试"), "busy", "浏览器正忙"),

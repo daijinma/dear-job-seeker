@@ -213,7 +213,7 @@ def run_task(conn, task) -> None:
             stats = _crawl(conn, run, prov, client, payload, max_pages)
     except Stopped:  # asked to stop: back to pending as it stands, for whoever claims it next
         return taskqueue.hand_back(conn, run.who)
-    except browser.BrowserUnavailable as e:  # retrying cannot install Playwright or start the user's Chrome
+    except browser.BrowserUnavailable as e:  # retrying cannot install a browser or reach the user's one
         LOG.warning("%s task %s given up: %s", prov.name, run.id, e)
         return taskqueue.dead(conn, run.who, str(e))
     except egress.NoEgressAvailable as e:  # also a busy browser profile: try again later, attempt not burned

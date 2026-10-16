@@ -158,15 +158,14 @@ def _by_attached_browser(spec: Login) -> bool:
     return bool(browser.cdp_url() and (spec.cookies_any or spec.cookies_all))
 
 
-def _attached(provider: str, spec: Login) -> bool:
-    with browser.open_context(provider, headless=True) as ctx:
-        return _signed_in(spec, _values(browser.on_domain(ctx.cookies(), spec.domain)), "")
+def _attached(spec: Login) -> bool:
+    return _signed_in(spec, _values(browser.on_domain(browser.attached_cookies(), spec.domain)), "")
 
 
 def logged_in(provider: str) -> bool:
     """A usable session. Raises browser.BrowserUnavailable when the attached browser cannot be reached."""
     spec = _spec(provider)
-    return _attached(provider, spec) if _by_attached_browser(spec) else _stored(provider, spec)[0] == "logged_in"
+    return _attached(spec) if _by_attached_browser(spec) else _stored(provider, spec)[0] == "logged_in"
 
 
 def status(provider: str) -> dict:
@@ -176,7 +175,7 @@ def status(provider: str) -> dict:
     state, saved = _stored(provider, spec)
     if _by_attached_browser(spec):
         try:
-            attached = _attached(provider, spec)
+            attached = _attached(spec)
         except browser.BrowserUnavailable:  # the user's browser is not reachable right now: cannot tell
             attached = False
         state = "logged_in" if attached else ("expired" if state == "expired" else "not_logged_in")

@@ -81,7 +81,7 @@ def _run(fn, *args, **kwargs):
 @mcp.tool()
 async def provider_list() -> dict:
     """List platforms with type, auth, capture transport, effective frequency and login state."""
-    return await asyncio.to_thread(_run, service.provider_list)  # the login state may need a browser (plain thread)
+    return await asyncio.to_thread(_run, service.provider_list)  # the login state may ask the attached browser (blocking socket)
 
 
 @mcp.tool()
@@ -92,14 +92,14 @@ async def status() -> dict:
     wait for their next try (`retrying`: task_id, reason, retry_at); the queue by status; `exits`: the egress pool as
     egress_list shows it (passwords masked; id, provider scope with '*' = shared by every platform, ok / fail counts)
     plus `cooling_down` (the exit rests for at least one platform), just the one 'direct' exit when no proxy is
-    configured; the browser a login window would start (or why there is none), Playwright, DJS_CDP_URL, the open login
+    configured; the browser a login window would start (or why there is none), DJS_CDP_URL, the open login
     windows and the platform profiles in use; each login's state and end; per platform its missing keys (names only),
     cooling-down exits and, when its newest task failed, waits for a login or waits for its next try (status
     retrying, with kind, reason and retry_at), why. If every site is retrying, read the exits and the reason here
     before searching again. Also the app's own version, where it runs from and `update` {current, latest, state, note}:
     state `ready` means a newer version is downloaded and waits in the app (it installs from the app, not from here).
     Call it first when results look wrong or a search does not move. Example: status()."""
-    return await asyncio.to_thread(_run, service.status)  # finding the browser can start Playwright (plain thread)
+    return await asyncio.to_thread(_run, service.status)  # the login state may ask the attached browser (blocking socket)
 
 
 @mcp.tool()
@@ -245,7 +245,7 @@ def set_frequency(provider: str, interval: float | None = None, jitter: float | 
 
 @mcp.tool()
 def set_transport(provider: str, transport: str | None = None) -> dict:
-    """Choose how a platform is captured: 'http' (plain requests) or 'browser' (a real Chromium page; set DJS_CDP_URL
+    """Choose how a platform is captured: 'http' (plain requests) or 'browser' (a tab of Chrome or Edge; set DJS_CDP_URL
     to use a tab of your own Chrome instead). Only transports the platform supports; omit to reset to its default."""
     return _run(service.set_transport, provider, transport)
 

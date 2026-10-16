@@ -1,17 +1,19 @@
-"""Browser capture transport: a Playwright page standing in for httpx.Client when a site refuses plain HTTP.
+"""Browser capture transport: a tab of an ordinary browser standing in for httpx.Client when a site refuses plain HTTP.
 
-The browser is our own persistent profile (shared with login) or, with DJS_CDP_URL set, a new tab of the user's own
-Chromium. Providers keep one parsing path: BrowserClient.get/post return real httpx.Responses.
+The browser is Chrome (else Edge) started by us on a persistent profile shared with login or, with DJS_CDP_URL set, a new tab
+of the user's own. Providers keep one parsing path: BrowserClient.get/post return real httpx.Responses.
 
-The login window is the exception: sites blank a page that Playwright drives, so it is an ordinary browser process that
-is only ever asked questions at the browser level (plain_window).
+Sites blank a page that an automation driver controls, so nothing here is one: the browser is an ordinary
+process with a debugging port, a page is only navigated and asked questions with in-page scripts (no Page, Runtime or
+Network domain switched on, no binding, no injected script), cookies are read and written at the browser level. The login
+window is the same browser, asked even less (plain_window).
 """
 from __future__ import annotations
 
 import atexit
-import importlib.util
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -22,7 +24,7 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from functools import partialmethod
 from itertools import count
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -31,25 +33,35 @@ from websockets.sync.client import connect
 from djs import db, filelock, pacer
 from djs.egress import NoEgressAvailable
 
-INSTALL_HINT = "Playwright/Chromium missing. Run: pip install playwright && playwright install chromium"
-# Browsers already on the machine first, so most people never download Playwright's own Chromium (None = that one)
-CHANNELS = ("chrome", "msedge", None)
+CHANNELS = ("chrome", "msedge")   # the browser of the machine, in the order they are tried (every Windows has Edge)
 # Where a CHANNELS entry is installed: the macOS app, the path under Program Files / Local AppData on Windows, the
-# commands on Linux. (None, Chromium itself, is looked up in _chromium.)
+# commands on Linux.
 INSTALLED = {
     "chrome": ("Google Chrome", ("Google", "Chrome", "Application", "chrome.exe"), ("google-chrome", "google-chrome-stable")),
     "msedge": ("Microsoft Edge", ("Microsoft", "Edge", "Application", "msedge.exe"), ("microsoft-edge",)),
 }
-# Flags of the login window. The keychain pair is what Playwright passes too: without it the cookies the login stores
-# would be encrypted with a key the crawling browser cannot read. A debugging port alone makes navigator.webdriver true,
-# which the last flag undoes, as in launch_context.
+# Flags of every browser we start, login window and crawl alike. The keychain pair is what the profiles of earlier versions
+# were made with: without it their stored cookies could not be decrypted. A debugging port alone makes navigator.webdriver
+# true, which the last flag undoes.
 WINDOW_FLAGS = ("--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic",
                 "--lang=zh-CN", "--disable-blink-features=AutomationControlled")
+CRAWL_FLAGS = ("--window-size=1280,900",)   # the window experiment E1 ran in (headless would open at 756x469)
 QUIT_SECONDS = 5     # what a browser of ours gets at each of the three steps of closing it (Browser.close, terminate, kill)
 START_SECONDS = 20   # how long a browser of ours gets to listen and show its first page
 CDP_HINT = ("Cannot reach a browser at {url}. Start Chrome with --remote-debugging-port=9222 "
             "--user-data-dir=<a new empty folder> and set DJS_CDP_URL=http://127.0.0.1:9222")
-STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"  # the one tell Boss reads
+POLL_SECONDS = 0.05   # between two looks at a page that is still loading or has not set its cookie yet
+SETTLE_SECONDS = 1.0  # how long a page must stand still (document complete, same address) for settle() to be satisfied
+FETCH_MARGIN = 10     # seconds the browser gets, beyond a fetch's own timeout, to say that the page's fetch is over
+BLANK = ("about:", "chrome-error:")   # where a tab ends when nothing was loaded (a 204, a refused redirect, an error page)
+# a navigation that ended the page's script context, which is only a reason to look again; and a tab that is gone
+LOST = ("context was destroyed", "cannot find context", "navigated or closed", "promise was collected")
+GONE = ("target closed", "session with given id", "no session with given id", "no target with given id")
+# expressions evaluated bare, and the functions called with an argument (see _script)
+POLL_JS = "[location.href, document.readyState]"
+HREF_JS = "location.href"
+HTML_JS = "document.documentElement.outerHTML"
+COOKIE_JS = "n => document.cookie.split('; ').some(c => c.startsWith(n + '='))"
 # fetch() inside a page that already ran the site's scripts: cookies and anti-bot tokens are the browser's own
 FETCH_JS = """async ({url, method, headers, body, timeout}) => {
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), timeout);
@@ -62,7 +74,7 @@ DECODED_HEADERS = {"content-encoding", "content-length", "transfer-encoding"}  #
 
 
 class BrowserUnavailable(RuntimeError):
-    """Playwright/Chromium missing or the CDP endpoint unreachable: no retry helps, the message says what to do."""
+    """No browser to start or the CDP endpoint unreachable: no retry helps, the message says what to do."""
 
 
 class BrowserGone(BrowserUnavailable):
@@ -78,15 +90,8 @@ def cdp_url() -> str | None:
 
 
 def ready() -> bool:
-    return importlib.util.find_spec("playwright") is not None
-
-
-def _pw():
-    try:
-        import playwright.sync_api as pw
-    except ImportError as e:
-        raise BrowserUnavailable(INSTALL_HINT) from e
-    return pw
+    """A crawl in a browser can start: the user's own is attached, or one is installed to start."""
+    return cdp_url() is not None or find_browser() is not None
 
 
 def _headless(prov) -> bool:
@@ -94,55 +99,21 @@ def _headless(prov) -> bool:
     return forced == "1" if forced in ("0", "1") else not prov.needs_headed
 
 
-def proxy_settings(exit_id: str | None) -> dict | None:
-    """Playwright wants credentials apart from the server: http://u:p@h:8080 -> {server, username, password}."""
+def _proxy_flags(exit_id: str | None) -> list[str]:
+    """--proxy-server for an exit that is a proxy. The flag takes no credentials, and answering a proxy's authentication
+    challenge would need the Fetch domain, which a site's detection could see: a proxy with a user name is refused (A31)."""
     if not exit_id or exit_id == "direct":
-        return None
+        return []
     u = urlsplit(exit_id)
-    proxy = {"server": f"{u.scheme}://{u.netloc.rpartition('@')[2]}"}
     if u.username:
-        proxy.update(username=unquote(u.username), password=unquote(u.password or ""))
-    return proxy
+        raise BrowserUnavailable("Pages loaded this way cannot use a proxy that needs a user name and password: "
+                                 "use a proxy without one, or the direct exit")
+    return [f"--proxy-server={u.scheme}://{u.netloc}"]
 
 
 def no_browser_hint() -> str:
-    """What to do on a machine with neither Chrome, Edge nor Playwright's Chromium."""
-    if getattr(sys, "frozen", False):  # the packaged app has no `playwright` command; its own `djs` runs the installer
-        install = f'"{Path(sys.executable).with_stem("djs")}" install-browser'
-    else:
-        install = "playwright install chromium"
-    return ("No browser found. Install Google Chrome or Microsoft Edge, or download Chromium once "
-            f"(several hundred MB): {install}")
-
-
-def install_chromium() -> int:
-    """Download Playwright's own Chromium with the driver inside the playwright package, which is also present in the
-    packaged app. Returns the installer's exit code."""
-    from playwright._impl._driver import compute_driver_executable, get_driver_env  # what `playwright install` runs
-    node, cli = compute_driver_executable()
-    return subprocess.run([node, cli, "install", "chromium"], env=get_driver_env()).returncode
-
-
-def _not_installed(e: Exception, channel: str | None) -> bool:
-    """Playwright's wording for "that browser is not on this machine" (channel None: its own Chromium download)."""
-    return (f"Chromium distribution '{channel}' is not found" if channel else "Executable doesn't exist") in str(e)
-
-
-def launch_context(pw, provider_name: str, headless: bool, proxy: str | None = None):
-    """THE place that starts the persistent profile, so login and crawling share cookies and flags."""
-    for channel in CHANNELS:
-        try:
-            ctx = pw.chromium.launch_persistent_context(
-                str(db.profile_dir(provider_name) / "browser"), channel=channel, headless=headless, locale="zh-CN",
-                viewport={"width": 1280, "height": 800}, proxy=proxy_settings(proxy),
-                args=["--disable-blink-features=AutomationControlled"])
-        except _pw().Error as e:
-            if _not_installed(e, channel):
-                continue
-            raise
-        ctx.add_init_script(STEALTH_JS)
-        return ctx
-    raise BrowserUnavailable(no_browser_hint())
+    """What to do on a machine with neither Chrome nor Edge."""
+    return "No browser found: install Google Chrome or Microsoft Edge."
 
 
 @contextmanager
@@ -172,34 +143,6 @@ def profiles_in_use() -> list[str]:
     return busy
 
 
-def _attach(pw, url: str):
-    try:
-        return pw.chromium.connect_over_cdp(url, timeout=10_000)
-    except _pw().Error as e:
-        raise BrowserUnavailable(CDP_HINT.format(url=url)) from e
-
-
-@contextmanager
-def open_context(provider_name: str, headless: bool, proxy: str | None = None):
-    """The context to work in: the default one of the user's own browser (CDP) or our locked persistent profile."""
-    with _pw().sync_playwright() as pw, ExitStack() as stack:
-        if url := cdp_url():
-            yield stack.enter_context(closing(_attach(pw, url))).contexts[0]  # close() only disconnects here
-        else:
-            stack.enter_context(profile_lock(provider_name))
-            yield stack.enter_context(closing(launch_context(pw, provider_name, headless, proxy)))
-
-
-@contextmanager
-def open_page(provider_name: str, headless: bool, proxy: str | None = None):
-    with open_context(provider_name, headless, proxy) as ctx:
-        page = ctx.new_page()  # always our own tab: whatever the user already has open stays untouched
-        try:
-            yield page
-        finally:
-            page.close()
-
-
 # ------------------------------------------------------------------ the login window: a plain browser process
 
 def on_domain(cookies: list[dict], domain: str) -> list[dict]:
@@ -210,21 +153,8 @@ def on_domain(cookies: list[dict], domain: str) -> list[dict]:
     return [c for c in cookies if mine(c)]
 
 
-def _chromium() -> Path | None:
-    """Chromium itself: the Linux distribution's, else the copy Playwright downloaded (asking Playwright starts its
-    driver, so that is the last place to look)."""
-    system = next(filter(None, map(shutil.which, ("chromium", "chromium-browser"))), None)
-    if system:
-        return Path(system)
-    with _pw().sync_playwright() as p:
-        own = Path(p.chromium.executable_path)
-    return own if own.is_file() else None
-
-
-def _installed(channel: str | None) -> Path | None:
+def _installed(channel: str) -> Path | None:
     """The executable of a CHANNELS entry on this machine, None when it is not installed."""
-    if channel is None:
-        return _chromium()
     app, windows, commands = INSTALLED[channel]
     if sys.platform == "darwin":
         found = [base / f"{app}.app" / "Contents" / "MacOS" / app
@@ -238,55 +168,106 @@ def _installed(channel: str | None) -> Path | None:
 
 
 def find_browser() -> tuple[str, Path] | None:
-    """(kind, executable) of the browser a login window starts in, the same pick as launch_context: Chrome, else Edge,
-    else Chromium (kinds 'chrome', 'msedge', 'chromium'). None when the machine has none."""
+    """(kind, executable) of the browser we start, login window and crawl alike: Chrome, else Edge (kinds 'chrome',
+    'msedge'). None when the machine has none."""
     for channel in CHANNELS:
         if path := _installed(channel):
-            return channel or "chromium", path
+            return channel, path
     return None
 
 
 def executable() -> Path:
-    """The browser a login window starts in (see find_browser)."""
+    """The browser we start (see find_browser)."""
     found = find_browser()
     if found is None:
         raise BrowserUnavailable(no_browser_hint())
     return found[1]
 
 
+class _Silent(BrowserUnavailable):
+    """The browser did not answer a command in time."""
+
+
+class _Refused(BrowserUnavailable):
+    """The browser answered a command with an error."""
+
+
 class _Cdp:
-    """The DevTools protocol at the browser level over one websocket: send a command, wait for its answer. The browser
-    sends events too; they are skipped. Not a line of this talks to a page. (The errors below say "window", not
-    "browser": djs.results reads that word as "none is installed", which none of them means.)"""
+    """The DevTools protocol over one websocket, safe for two threads (a worker waiting for its page while the exit handler
+    asks the browser to quit): a reader thread hands each answer to the call that asked, by command id, and the browser's
+    events are skipped. Every waiting call fails when the socket closes. `session_id` addresses a page of a flattened
+    session. (The errors below say "window", not "browser": djs.results reads that word as "none is installed", which none
+    of them means.)"""
 
     def __init__(self, address: str):
         self._ids, self._connection = count(1), ExitStack()  # websockets wants its connection used as a context manager
+        self._waiting: dict[int, queue.SimpleQueue] = {}     # command id -> where its answer goes (None: the socket closed)
+        self._lock, self._sending, self._closed = threading.Lock(), threading.Lock(), False
         try:
             # no size limit: a cookie jar can pass the default 1 MiB; a browser that does not say goodbye back (it is
             # frozen) is let go after 2 s, not the 10 s that would eat into the deadline of _Browser.close
             self._ws = self._connection.enter_context(connect(address, max_size=None, open_timeout=10, close_timeout=2))
         except (OSError, WebSocketException) as e:
             raise BrowserUnavailable(f"Cannot talk to the browser at {address}") from e
+        self._reader = threading.Thread(target=self._read, name="devtools-reader", daemon=True)
+        self._reader.start()
 
-    def call(self, method: str, timeout: float = 10, **params) -> dict:
-        n = next(self._ids)
-        deadline = time.monotonic() + timeout
+    def _read(self) -> None:
         try:
-            self._ws.send(json.dumps({"id": n, "method": method, "params": params}))
-            while True:
+            for raw in self._ws:
                 try:
-                    reply = json.loads(self._ws.recv(timeout=max(deadline - time.monotonic(), 0)))
-                except TimeoutError:
-                    raise BrowserUnavailable(f"The window did not answer {method}") from None
-                if reply.get("id") == n:
-                    if "error" in reply:
-                        raise BrowserUnavailable(f"{method}: {reply['error'].get('message')}")
-                    return reply["result"]
-        except ConnectionClosed:
-            raise BrowserGone("The window has quit") from None
+                    reply = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(reply, dict):   # neither an answer nor an event
+                    continue
+                with self._lock:
+                    waiter = self._waiting.pop(reply.get("id"), None)   # no waiter: an answer to a call that gave up
+                if waiter is not None:
+                    waiter.put(reply)
+        except (ConnectionClosed, WebSocketException, OSError):
+            pass
+        finally:
+            with self._lock:
+                self._closed, waiters = True, list(self._waiting.values())
+            for waiter in waiters:
+                waiter.put(None)
+
+    def call(self, method: str, timeout: float = 10, session_id: str | None = None, **params) -> dict:
+        n, answer = next(self._ids), queue.SimpleQueue()
+        message = {"id": n, "method": method, "params": params, **({"sessionId": session_id} if session_id else {})}
+        with self._lock:
+            if self._closed:
+                raise BrowserGone("The window has quit")
+            self._waiting[n] = answer
+        try:
+            try:
+                with self._sending:
+                    self._ws.send(json.dumps(message))
+            except ConnectionClosed:
+                raise BrowserGone("The window has quit") from None
+            try:
+                reply = answer.get(timeout=max(timeout, 0))
+            except queue.Empty:
+                raise _Silent(f"The window did not answer {method}") from None
+        finally:
+            with self._lock:
+                self._waiting.pop(n, None)
+        if reply is None:
+            raise BrowserGone("The window has quit")
+        if "error" in reply:
+            raise _Refused(f"{method}: {reply['error'].get('message')}")
+        return reply["result"]
 
     def close(self) -> None:
         self._connection.close()
+        self._reader.join(1)   # it ends by itself once the socket is closed
+
+
+def _expired(cookies: list[dict]) -> list[dict]:
+    """The same cookies set again with an expiry long past, which is how a browser is told to drop them."""
+    return [{"name": c["name"], "value": "", "domain": c["domain"], "path": c["path"], "secure": c["secure"],
+             "httpOnly": c["httpOnly"], "expires": 1} for c in cookies]
 
 
 class Window:
@@ -307,8 +288,7 @@ class Window:
         return next((t for t in self._ask("Target.getTargets").get("targetInfos", []) if t["targetId"] == self._id), None)
 
     def cookies(self) -> list[dict]:
-        """Every cookie the browser holds: name, value, domain, path and expires (-1 for a session cookie), as Playwright
-        names them."""
+        """Every cookie the browser holds: name, value, domain, path and expires (-1 for a session cookie)."""
         return self._ask("Storage.getCookies").get("cookies", [])
 
     def url(self) -> str:
@@ -322,10 +302,7 @@ class Window:
     def delete_cookies(self, names, domain: str) -> None:
         """Make the browser forget the cookies called `names` on `domain` (and its subdomains). The browser level has no
         delete: a cookie set again with an expiry long past is how it is told to drop one."""
-        dead = [{"name": c["name"], "value": "", "domain": c["domain"], "path": c["path"], "secure": c["secure"],
-                 "httpOnly": c["httpOnly"], "expires": 1}
-                for c in on_domain(self.cookies(), domain) if c["name"] in names]
-        if dead:
+        if dead := _expired([c for c in on_domain(self.cookies(), domain) if c["name"] in names]):
             self._ask("Storage.setCookies", cookies=dead)
 
 
@@ -548,20 +525,27 @@ def _first_page(cdp: _Cdp, deadline: float) -> str:
 
 
 @contextmanager
-def _own_window(provider_name: str, url: str, headless: bool):
-    """The window in a browser process of ours on the shared profile, under the profile lock."""
+def _own_browser(provider_name: str, url: str, headless: bool, flags=()):
+    """A browser process of ours on the shared profile, under the profile lock; yields its _Cdp and the id of its first page."""
     exe = executable()  # before the lock: with no browser there is nothing to wait for
     with profile_lock(provider_name):
         profile = db.profile_dir(provider_name, create=True) / "browser"
         _clear_leftovers(profile)
-        started = _Browser([str(exe), f"--user-data-dir={profile}", "--remote-debugging-port=0", *WINDOW_FLAGS,
+        started = _Browser([str(exe), f"--user-data-dir={profile}", "--remote-debugging-port=0", *WINDOW_FLAGS, *flags,
                             *(["--headless=new"] if headless else []), url], profile)
         try:
             deadline = time.monotonic() + START_SECONDS
             started.cdp = _Cdp(_listening(profile, started.proc, deadline))
-            yield Window(started.cdp, _first_page(started.cdp, deadline))
+            yield started.cdp, _first_page(started.cdp, deadline)
         finally:
             started.close()
+
+
+@contextmanager
+def _own_window(provider_name: str, url: str, headless: bool):
+    """The window in a browser process of ours on the shared profile, under the profile lock."""
+    with _own_browser(provider_name, url, headless) as (cdp, page):
+        yield Window(cdp, page)
 
 
 def _browser_socket(address: str) -> str:
@@ -590,7 +574,7 @@ def _users_window(address: str, url: str):
 def plain_window(provider_name: str, url: str, headless: bool = False):
     """A browser window on `url` for the user to log in in; yields a Window.
 
-    Sites blank a page that Playwright drives, even one we never call, so this is an ordinary browser process with a
+    Sites blank a page that a test driver controls, even one we never call, so this is an ordinary browser process with a
     debugging port of which only the browser-level socket is used: nothing is attached to the page, no script is
     injected. It runs on the profile that crawling shares (cookies set here are read there), under the profile lock, and
     the process, with everything it started, is gone when the block ends however it ends. (Should one outlive the deadline
@@ -602,17 +586,6 @@ def plain_window(provider_name: str, url: str, headless: bool = False):
         yield window
 
 
-@contextmanager
-def _guard():
-    """Playwright failures are network failures to the engine, which already retries those."""
-    try:
-        yield
-    except _pw().TimeoutError as e:
-        raise httpx.ReadTimeout(str(e)) from e
-    except _pw().Error as e:
-        raise httpx.ConnectError(str(e)) from e
-
-
 def _response(req: httpx.Request, status: int, headers, text: str) -> httpx.Response:
     resp = httpx.Response(status, request=req, content=text.encode(),
                           headers=[(k, v) for k, v in headers if k.lower() not in DECODED_HEADERS])
@@ -620,25 +593,81 @@ def _response(req: httpx.Request, status: int, headers, text: str) -> httpx.Resp
     return resp
 
 
-class BrowserClient:
-    """The part of httpx.Client providers use (get/post/request), run as in-page fetch() calls, plus browser-only
-    primitives. Everything that touches the network is paced per (platform, exit) like an http request."""
+def _script(js: str, arg=None) -> str:
+    """The expression that calls the function `js` with `arg` (JSON-able) in the page."""
+    return f"({js})({'undefined' if arg is None else json.dumps(arg)})"
 
-    def __init__(self, page, prov, exit_id: str, interval: float, jitter: float):
-        self.page, self._pace = page, (prov.name, exit_id, interval, jitter)
+
+def _sent_to(cookies: list[dict], url: str) -> list[dict]:
+    """The cookies a browser sends to `url`: the cookie's domain is the host or a parent of it (a host-only cookie: the
+    host itself) and its path a parent of the URL's."""
+    u = urlsplit(url)
+    host, path = u.hostname or "", u.path or "/"
+
+    def sent(c: dict) -> bool:
+        domain, base = c["domain"], c["path"]
+        return bool(host) and (host == domain.lstrip(".") or (domain.startswith(".") and host.endswith(domain))) \
+            and (path == base or path.startswith(base if base.endswith("/") else base + "/"))
+
+    return [c for c in cookies if sent(c)]
+
+
+class _TabGone(httpx.ConnectError):
+    """The tab we work in is closed, or none was ever opened: looking again is pointless."""
+
+
+class BrowserClient:
+    """The part of httpx.Client providers use (get/post/request), run as in-page fetch() calls in a tab of ours, plus
+    browser-only primitives. Everything that touches the network is paced per (platform, exit) like an http request. One
+    thread uses a client; the browser's own exit may come from another (see _Cdp)."""
+
+    def __init__(self, cdp: _Cdp, prov, exit_id: str, interval: float, jitter: float):
+        self._cdp, self._pace = cdp, (prov.name, exit_id, interval, jitter)
+        self._tab = self._session = None   # our one tab and the session that reaches it
+
+    def _page(self, method: str, timeout: float, **params) -> dict:
+        """A command to our tab. What the engine retries comes out as an httpx error: a tab that is gone (_TabGone), a
+        context that a navigation destroyed (ConnectError), a tab that did not answer (ReadTimeout)."""
+        if self._session is None:
+            raise _TabGone("no page is open: goto() first")
+        try:
+            return self._cdp.call(method, timeout, session_id=self._session, **params)
+        except _Silent as e:
+            raise httpx.ReadTimeout(str(e)) from None
+        except _Refused as e:
+            text = str(e).lower()
+            if any(word in text for word in GONE):
+                raise _TabGone(str(e)) from None
+            if any(word in text for word in LOST):
+                raise httpx.ConnectError(str(e)) from None
+            raise
+
+    def _eval(self, expression: str, timeout: float = 10, wait: bool = False):
+        """The value (as JSON) an expression has in our tab; `wait`: of the promise it returns. A script that threw is a
+        ConnectError too."""
+        out = self._page("Runtime.evaluate", timeout, expression=expression, returnByValue=True, awaitPromise=wait)
+        if failure := out.get("exceptionDetails"):
+            what = failure.get("exception", {}).get("description") or failure.get("text")
+            raise httpx.ConnectError(f"The page's script failed: {what}")
+        return out["result"].get("value")
 
     def request(self, method, url, *, params=None, headers=None, data=None, json=None, content=None, timeout=20,
                 paced=True):
         """paced=False: the call belongs to a visit whose page load was already paced (see goto)."""
         # an httpx.Request encodes URL, params and body, so both transports send the same bytes
-        req = httpx.Request(method, urljoin(self.page.url, url), params=params, headers=headers, data=data,
-                            json=json, content=content)
+        req = httpx.Request(method, url if urlsplit(url).scheme else urljoin(self.url, url), params=params,
+                            headers=headers, data=data, json=json, content=content)
         if paced:
             pacer.wait(*self._pace)
         arg = {"url": str(req.url), "method": method, "headers": dict(req.headers),
                "body": req.content.decode() or None, "timeout": timeout * 1000}
-        with _guard():
-            out = self.page.evaluate(FETCH_JS, arg)
+        try:
+            out = self._eval(_script(FETCH_JS, arg), timeout + FETCH_MARGIN, wait=True)
+        except httpx.HTTPError as e:
+            e.request = req
+            raise
+        if not isinstance(out, dict):  # the page went before it said anything: never an empty response
+            raise httpx.ConnectError("The page gave no answer", request=req)
         if "error" in out:
             raise (httpx.ReadTimeout if out["error"] == "timeout" else httpx.ConnectError)(out["error"], request=req)
         return _response(req, out["status"], out["headers"], out["text"])
@@ -647,35 +676,124 @@ class BrowserClient:
     post = partialmethod(request, "POST")
 
     def goto(self, url: str, timeout: float = 30) -> None:
+        """Load `url` in a new tab (ours of before is closed) and wait until its document is complete, in `timeout` seconds
+        all told. A refused navigation, and a tab that ends on no page at all (blank, or the browser's error page), are
+        ConnectErrors, never an empty success. Where it landed after redirects is for the caller to judge."""
         pacer.wait(*self._pace)
-        with _guard():
-            self.page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+        deadline = time.monotonic() + timeout
+        self.close()
+        self._tab = self._cdp.call("Target.createTarget", url="about:blank")["targetId"]
+        self._session = self._cdp.call("Target.attachToTarget", targetId=self._tab, flatten=True)["sessionId"]
+        if refused := self._page("Page.navigate", _left(deadline), url=url).get("errorText"):
+            raise httpx.ConnectError(f"{url}: {refused}")
+        while True:
+            try:
+                href, state = self._eval(POLL_JS, _within(deadline, 10))
+            except _TabGone:
+                raise
+            except httpx.ConnectError:  # a redirect destroyed the context under the look: look again
+                href, state = None, None
+            except httpx.ReadTimeout:  # the tab says nothing: that is the deadline, as far as it goes
+                raise httpx.ReadTimeout(f"{url} did not finish loading in {timeout:g} s") from None
+            if state == "complete":
+                break
+            if time.monotonic() >= deadline:
+                raise httpx.ReadTimeout(f"{url} did not finish loading in {timeout:g} s")
+            time.sleep(POLL_SECONDS)
+        if not href or href.startswith(BLANK):
+            raise httpx.ConnectError(f"{url} ended on an empty page ({href or 'no address'})")
 
     def wait_cookie(self, name: str, timeout: float = 10) -> None:
         """Block until the page's own scripts have set cookie `name` (anti-bot tokens are written by JS after load)."""
-        with _guard():
-            self.page.wait_for_function("n => document.cookie.split('; ').some(c => c.startsWith(n + '='))",
-                                        arg=name, timeout=timeout * 1000)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if self._eval(_script(COOKIE_JS, name), _within(deadline, 10), wait=True):   # a page that hangs ends it too
+                    return
+            except _TabGone:
+                raise
+            except (httpx.ConnectError, httpx.ReadTimeout):  # the page navigated or did not answer: look again, if time is left
+                pass
+            if time.monotonic() >= deadline:
+                raise httpx.ReadTimeout(f"Cookie {name} was not set within {timeout:g} s")
+            time.sleep(POLL_SECONDS)
 
-    def html(self) -> str:
-        return self.page.content()
+    def settle(self, ms: int) -> None:
+        """Wait until the document is complete and the address has not changed for SETTLE_SECONDS (a page's own redirects
+        are over then), at most `ms` milliseconds. Never raises: what is wrong shows with the caller's next call."""
+        end = time.monotonic() + ms / 1000
+        seen, since = None, time.monotonic()
+        while (now := time.monotonic()) < end:
+            try:
+                href, state = self._eval(POLL_JS, _left(end))
+            except _TabGone:
+                return
+            except httpx.ConnectError:
+                href, state = None, None
+            except Exception:  # the browser quit, the page does not answer
+                return
+            here = href if state == "complete" else None
+            if here is None or here != seen:
+                seen, since = here, now
+            elif now - since >= SETTLE_SECONDS:
+                return
+            time.sleep(min(0.1, _left(end)))
 
     def eval(self, js: str, arg=None):
-        return self.page.evaluate(js, arg)
+        """The function `js` called with `arg` in the page, its result (a promise is awaited) by value."""
+        return self._eval(_script(js, arg), wait=True)
 
-    def sniff(self, url_part: str, action, timeout: float = 15) -> httpx.Response:
-        """The first response whose URL contains `url_part` while `action()` (a click, say) runs: the site's own XHR."""
-        pacer.wait(*self._pace)
-        with _guard():
-            with self.page.expect_response(lambda r: url_part in r.url, timeout=timeout * 1000) as seen:
-                action()
-            r = seen.value
-            return _response(httpx.Request(r.request.method, r.url), r.status, r.headers.items(), r.text())
+    def html(self) -> str:
+        return self._eval(HTML_JS)
+
+    @property
+    def url(self) -> str:
+        """Where the page is now ('' before the first goto)."""
+        return self._eval(HREF_JS) if self._session else ""
+
+    def cookies(self, url: str | None = None) -> list[dict]:
+        """The cookies the browser sends to `url`, or without one every cookie it holds (the profile is the platform's own):
+        HttpOnly ones too, read at the browser level where document.cookie cannot see those. No page is asked."""
+        jar = self._cdp.call("Storage.getCookies")["cookies"]
+        return jar if url is None else _sent_to(jar, url)
+
+    def cookie_value(self, name: str, url: str | None = None) -> str | None:
+        found = [c for c in self.cookies(url) if c["name"] == name]
+        return max(found, key=lambda c: len(c["path"]))["value"] if found else None  # the most specific path first, as sent
+
+    def clear_cookie(self, name: str) -> None:
+        """Make the browser forget every cookie called `name`, on whatever domain (a token's name belongs to its site)."""
+        if dead := _expired([c for c in self._cdp.call("Storage.getCookies")["cookies"] if c["name"] == name]):
+            self._cdp.call("Storage.setCookies", cookies=dead)
+
+    def close(self) -> None:
+        """Close our tab; the browser and whatever else it has open are not ours to touch."""
+        tab, self._tab, self._session = self._tab, None, None
+        if tab:
+            with suppress(BrowserUnavailable):  # the user may have closed it, or the browser quit
+                self._cdp.call("Target.closeTarget", targetId=tab)
+
+
+def attached_cookies() -> list[dict]:
+    """Every cookie of the browser DJS_CDP_URL names, read at the browser level: no tab is opened."""
+    address = cdp_url()
+    if address is None:
+        raise BrowserUnavailable("DJS_CDP_URL does not name a browser")
+    with closing(_Cdp(_browser_socket(address))) as cdp:
+        return cdp.call("Storage.getCookies")["cookies"]
 
 
 @contextmanager
 def open_browser(prov, exit_id: str, interval: float, jitter: float):
-    """A paced BrowserClient in a fresh page. Call it from plain threads only (engine workers, the UI, to_thread):
-    sync_playwright raises on a thread that runs an asyncio loop."""
-    with open_page(prov.name, _headless(prov), exit_id) as page:
-        yield BrowserClient(page, prov, exit_id, interval, jitter)
+    """A paced BrowserClient: a browser of ours on the platform's profile (a proxy exit is its proxy, one with a login is
+    refused; a window only where the platform needs one) or, with DJS_CDP_URL, the user's own, of which only our tab is
+    touched and closed. Our browser is gone, with everything it started, when the block ends however it ends."""
+    with ExitStack() as stack:
+        if address := cdp_url():
+            cdp = stack.enter_context(closing(_Cdp(_browser_socket(address))))
+        else:
+            cdp, _ = stack.enter_context(_own_browser(prov.name, "about:blank", _headless(prov),
+                                                 [*CRAWL_FLAGS, *_proxy_flags(exit_id)]))
+        client = BrowserClient(cdp, prov, exit_id, interval, jitter)
+        stack.callback(client.close)  # before the browser or the socket goes
+        yield client

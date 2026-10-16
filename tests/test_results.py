@@ -2,7 +2,7 @@
 third-party descriptions, friendly error wording."""
 import pytest
 
-from djs import db, normalize, results, service, taskqueue
+from djs import browser, db, normalize, results, service, taskqueue
 from provider_fakes import job, retrying, task
 
 
@@ -373,15 +373,17 @@ def test_plain_text_leaves_nothing_that_could_run_as_markup():
     ("nowcoder: could not load the detail (StructureError: shape)", "structure", "网站页面变了，暂时读不出来"),
     ("missing environment variable(s): DJS_YUPAO_NONCE_KEY", "env", "还没配置这个网站需要的密钥"),
     ("MissingEnv: environment variable DJS_X is not set", "env", "还没配置这个网站需要的密钥"),
-    ("Playwright/Chromium missing. Run: pip install playwright && playwright install chromium (Error)", "browser", "需要先安装浏览器组件"),
-    ("BrowserType.launch: Executable doesn't exist at /x/chromium", "browser", "需要先安装浏览器组件"),
+    ("No browser found. Install Google Chrome or Microsoft Edge. (BrowserUnavailable)", "browser", "需要先安装 Chrome 或 Edge 浏览器"),
+    ("Install Google Chrome or Microsoft Edge to open this window", "browser", "需要先安装 Chrome 或 Edge 浏览器"),   # without the word "browser"
     ("ConnectError: [Errno 61] Connection refused", "network", "网络不通，稍后再试"),
     ("ReadTimeout: timed out", "network", "网络不通，稍后再试"),
     ("nowcoder: could not load the detail (ConnectTimeout: )", "network", "网络不通，稍后再试"),
     ("180 秒内没有登录成功，请再试一次", "timeout", "等了三分钟还没有登录成功，请再试一次"),
     ("登录窗口被关闭了，请重新登录", "closed", "登录窗口被关掉了，请再试一次"),
     ("正在使用浏览器，请稍后再试", "busy", "浏览器正忙"),
-    ("打不开浏览器，没法登录。No browser found. Install Google Chrome or Microsoft Edge", "browser", "需要先安装浏览器组件"),
+    ("Pages loaded this way cannot use a proxy that needs a user name and password: use a proxy without one, or the "
+     "direct exit", "proxy", "这个网站配的代理需要账号密码，网页方式用不了它，请换成不需要账号的代理或直连"),
+    ("打不开浏览器，没法登录。No browser found. Install Google Chrome or Microsoft Edge", "browser", "需要先安装 Chrome 或 Edge 浏览器"),
     ("Page.goto: net::ERR_INTERNET_DISCONNECTED at https://www.zhipin.com/", "network", "网络不通，稍后再试"),
     ("BOSS 直聘暂不支持城市「火星」，可选：北京、上海等", "city", "这个网站暂时不支持这个城市"),
     ("58同城必须指定城市", "city", "这个网站需要先填写城市"),
@@ -391,6 +393,10 @@ def test_plain_text_leaves_nothing_that_could_run_as_markup():
 ])
 def test_friendly_error_table(raw, kind, text):
     assert results.classify(raw) == (kind, text) and results.friendly_error(raw) == text
+
+
+def test_the_hint_for_a_machine_without_a_browser_is_classified_as_such():
+    assert results.classify(browser.no_browser_hint()) == ("browser", "需要先安装 Chrome 或 Edge 浏览器")
 
 
 def test_friendly_text_never_leaks_the_raw_error():
@@ -403,7 +409,7 @@ def test_friendly_text_never_leaks_the_raw_error():
     ("58同城必须指定城市", "", "需要先填城市"),
     ("yupao needs environment variable(s) DJS_YUPAO_NONCE_KEY; set them in the MCP client config env block (see README)",
      "杭州", "还没配置密钥"),
-    ("Playwright/Chromium missing. Run: pip install playwright && playwright install chromium", "杭州", "需要先安装浏览器组件"),
+    ("No browser found. Install Google Chrome or Microsoft Edge.", "杭州", "需要先安装 Chrome 或 Edge 浏览器"),
     ("max_pages must be an integer >= 1", "杭州", "暂时不能用"),
     ("", "", "暂时不能用")])
 def test_skip_reason_is_plain_chinese_that_follows_the_name_of_the_site(raw, city, text):

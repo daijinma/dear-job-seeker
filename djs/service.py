@@ -75,7 +75,7 @@ def crawl_start(conn, provider, keyword=None, city=None, tenant=None, max_pages=
                          "set them in the MCP client config env block (see README)")
     session = bool(prov.login_transport) and auth.logged_in(provider)  # only then does the login change the transport
     if pacer.transport(conn, provider, session) != "http" and not browser.ready():
-        raise ValueError(browser.INSTALL_HINT)  # the task would only die later with the same message
+        raise ValueError(browser.no_browser_hint())  # the task would only die later with the same message
     payload = {k: v for k, v in (("keyword", keyword), ("city", city), ("tenant", tenant), ("max_pages", max_pages),
                                  ("detail", detail)) if v is not None}
     return {"task_id": taskqueue.create(conn, provider, payload)}
@@ -563,13 +563,10 @@ def _queue(conn) -> dict[str, int]:
 
 def _browser_state() -> dict:
     """The browser a login window would start in (or why there is none), and what holds browser profiles right now."""
-    try:
-        found = browser.find_browser()
-        hint = None if found else browser.no_browser_hint()
-    except browser.BrowserUnavailable as e:  # no Chrome or Edge, and Playwright cannot say where its Chromium is
-        found, hint = None, str(e)
+    found = browser.find_browser()
+    hint = None if found else browser.no_browser_hint()
     return {"executable": {"kind": found[0], "path": str(found[1])} if found else None, "hint": hint,
-            "playwright": browser.ready(), "cdp_url_set": browser.cdp_url() is not None,
+            "cdp_url_set": browser.cdp_url() is not None,
             "login_windows": auth.pending_logins(), "profiles_in_use": browser.profiles_in_use()}
 
 

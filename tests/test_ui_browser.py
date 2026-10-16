@@ -619,7 +619,7 @@ def test_the_note_about_left_out_sites_groups_them_by_the_reason(page, app):
     got = note([{"label": "58同城", "reason": "不支持“三亚”"}, {"label": "赶集网", "reason": "不支持“三亚”"},
                 {"label": "鱼泡直聘", "reason": "还没配置密钥"}])
     assert got == "58同城、赶集网不支持“三亚”；鱼泡直聘还没配置密钥，这次没有找它们"
-    assert note([{"label": "BOSS 直聘", "reason": "需要先安装浏览器组件"}]) == "BOSS 直聘需要先安装浏览器组件，这次没有找它"
+    assert note([{"label": "BOSS 直聘", "reason": "需要先安装 Chrome 或 Edge 浏览器"}]) == "BOSS 直聘需要先安装 Chrome 或 Edge 浏览器，这次没有找它"
 
 
 def test_search_shows_progress_then_the_finished_card(page, app):
@@ -1798,7 +1798,7 @@ def test_login_dialog_failures_say_why_and_retry(page, app):
     modal.get_by_role("button", name="重试").click()
     expect(modal.locator(".state.waiting")).to_be_visible()
     app.auth.release.set()
-    expect(modal.locator(".state.failed")).to_contain_text("需要先安装浏览器组件")
+    expect(modal.locator(".state.failed")).to_contain_text("需要先安装 Chrome 或 Edge 浏览器")
     expect(modal).to_contain_text("请先安装 Google Chrome 或 Microsoft Edge 浏览器，再重新登录")   # the one thing the user has to do
     assert page.evaluate(NAMELESS) == []
     app.auth.error = "正在使用浏览器，请稍后再试"

@@ -196,6 +196,12 @@ def test_job51_pc_rows_carry_the_jd_and_split_the_place_text():
     assert (p.row({}, None)["city"], p.row({}, None)["district"]) == (None, None)
 
 
+def test_job51_warmup_goes_on_when_the_waf_cookie_never_comes():
+    page = FakeBrowser(cookie_timeout=True)   # 2026-10-16: the page did not set it, and the search answered without it
+    Job51().warmup(page, {"keyword": "算法", "city": "杭州"})
+    assert [name for name, _ in page.calls] == ["goto", "wait_cookie"]
+
+
 def test_job51_warmup_opens_the_search_page_and_waits_for_the_waf_cookie_in_a_browser_only():
     page = FakeBrowser()
     Job51().warmup(page, {"keyword": "算法", "city": "杭州"})

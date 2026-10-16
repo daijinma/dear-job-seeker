@@ -226,7 +226,7 @@ class Provider:
     note: str = ""                 # one-line platform caveat shown by provider_list
     requires_env: tuple[str, ...] = ()   # env vars holding signing keys (never shipped in the repo)
     # ---- capture transport (user can override with set_transport) ----
-    transports: tuple[str, ...] = ("http",)   # 'http' (httpx) | 'browser' (a real Chromium page; DJS_CDP_URL makes it
+    transports: tuple[str, ...] = ("http",)   # 'http' (httpx) | 'browser' (a tab of Chrome or Edge; DJS_CDP_URL makes it
                                               # a new tab of the user's own browser). First = default.
     needs_headed: bool = False     # True = the site refuses headless browsers, so the browser transport opens a window
     home: str = ""                 # page the browser loads first so the site's own scripts write their anti-bot cookies

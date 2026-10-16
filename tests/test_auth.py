@@ -6,7 +6,6 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -335,11 +334,7 @@ def test_the_users_own_browser_is_never_cleaned(monkeypatch):
     window = Window([on(LOGIN_URL, cookie("wt2"))])
     show(monkeypatch, window)
 
-    @contextmanager
-    def attached(provider_name, headless, proxy=None):
-        yield SimpleNamespace(cookies=lambda: [cookie("wt2")])
-
-    monkeypatch.setattr(browser, "open_context", attached)
+    monkeypatch.setattr(browser, "attached_cookies", lambda: [cookie("wt2")])
     assert auth.login("any", timeout=5)["logged_in"] is True and window.deleted == []
 
 
@@ -480,13 +475,12 @@ def test_check_asks_nothing_when_there_is_no_session(monkeypatch):
 def attached(monkeypatch, cookies):
     monkeypatch.setenv("DJS_CDP_URL", "http://127.0.0.1:9222")
 
-    @contextmanager
-    def open_context(provider_name, headless, proxy=None):
+    def attached_cookies():
         if isinstance(cookies, Exception):
             raise cookies
-        yield SimpleNamespace(cookies=lambda: cookies)
+        return cookies
 
-    monkeypatch.setattr(browser, "open_context", open_context)
+    monkeypatch.setattr(browser, "attached_cookies", attached_cookies)
 
 
 def test_the_attached_browser_decides_when_the_platform_has_a_cookie_signal(monkeypatch):
@@ -498,6 +492,15 @@ def test_the_attached_browser_decides_when_the_platform_has_a_cookie_signal(monk
     attached(monkeypatch, [cookie("zp_at", SECRET)])
     assert auth.logged_in("any") is True and auth.status("any")["state"] == "logged_in"
     assert SECRET not in json.dumps(auth.status("any"))
+
+
+def test_only_the_platforms_own_cookies_of_the_attached_browser_count(monkeypatch):
+    attached(monkeypatch, [cookie("zp_at", domain=".elsewhere.test"), cookie("junk")])   # the success cookie of another site
+    assert auth.logged_in("any") is False
+    attached(monkeypatch, [cookie("at"), cookie("rt", domain=".elsewhere.test")])
+    assert auth.logged_in("all") is False   # both cookies are needed, on the platform's own domain
+    attached(monkeypatch, [cookie("at"), cookie("rt", domain="www.site.test")])
+    assert auth.logged_in("all") is True    # a subdomain is the platform's too
 
 
 def test_an_unreachable_browser_is_no_answer_for_status_and_an_error_for_the_engines_gate(monkeypatch):

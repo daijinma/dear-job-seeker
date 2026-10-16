@@ -67,9 +67,9 @@ def check_cli(console: Path, home: str) -> None:
     from djs import providers
     platforms = call(console, home, "provider_list")["result"]
     expect(len(platforms) == len(providers.names()), f"provider_list shows {len(platforms)} platforms")
-    expect(all(p["browser_ready"] for p in platforms), "the Playwright driver is not in the build")
+    expect([p["name"] for p in platforms] == providers.names(), "provider_list names other platforms than the source tree")
     expect(call(console, home, "login_status", {"provider": "boss"})["logged_in"] is False, "login_status")
-    ok(f"djs call provider_list: {len(platforms)} platforms, browser ready")
+    ok(f"djs call provider_list: {len(platforms)} platforms")
 
 
 def check_status(console: Path, home: str) -> None:
